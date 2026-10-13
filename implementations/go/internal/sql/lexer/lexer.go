@@ -85,12 +85,25 @@ type lexer struct {
 	line, col int
 }
 
+// Scanner produces the tokens of SQL text one at a time, so that a parser
+// holds only its lookahead in memory however long the text is.
+type Scanner struct{ lx lexer }
+
+// NewScanner returns a scanner over src.
+func NewScanner(src string) *Scanner {
+	return &Scanner{lx: lexer{src: src, line: 1, col: 1}}
+}
+
+// Next returns the next token; after the end of the text it keeps
+// returning EOF tokens.
+func (s *Scanner) Next() (Token, error) { return s.lx.next() }
+
 // Tokenize splits SQL text into tokens, ending with an EOF token.
 func Tokenize(src string) ([]Token, error) {
-	lx := &lexer{src: src, line: 1, col: 1}
+	sc := NewScanner(src)
 	var toks []Token
 	for {
-		t, err := lx.next()
+		t, err := sc.Next()
 		if err != nil {
 			return nil, err
 		}

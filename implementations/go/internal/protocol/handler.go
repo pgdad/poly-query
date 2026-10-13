@@ -173,7 +173,7 @@ func (h *Handler) dispatch(ctx context.Context, req *request) ([]byte, error) {
 	case "sleep":
 		return h.sleep(ctx, req)
 	case "explain":
-		return h.explain(req)
+		return h.explain(ctx, req)
 	case "save":
 		return h.save(req)
 	case "open":
@@ -569,7 +569,7 @@ func (h *Handler) query(ctx context.Context, req *request) ([]byte, int64, error
 	return finish(w), res.RowCount, nil
 }
 
-func (h *Handler) explain(req *request) ([]byte, error) {
+func (h *Handler) explain(ctx context.Context, req *request) ([]byte, error) {
 	sql, err := req.requiredStr("sql")
 	if err != nil {
 		return nil, err
@@ -578,7 +578,7 @@ func (h *Handler) explain(req *request) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	tree, err := h.eng.Explain(sql, qo)
+	tree, err := h.eng.Explain(ctx, sql, qo)
 	if err != nil {
 		return nil, err
 	}

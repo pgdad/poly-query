@@ -289,7 +289,7 @@ func TestJoinAlgorithmSelection(t *testing.T) {
 	e := newModesEngine(t)
 	q := "SELECT t.id FROM t JOIN d ON CAST(t.grp AS INT64) = d.grp"
 	for join, op := range map[string]string{"hash": "HashJoin", "merge": "MergeJoin", "nested_loop": "NestedLoopJoin", "auto": "HashJoin"} {
-		p, err := e.Explain(q, QueryOptions{Join: join})
+		p, err := e.Explain(context.Background(), q, QueryOptions{Join: join})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -299,7 +299,7 @@ func TestJoinAlgorithmSelection(t *testing.T) {
 		}
 	}
 	// Non-equi joins always use a nested loop.
-	p, err := e.Explain("SELECT t.id FROM t JOIN d ON t.id < d.grp", QueryOptions{Join: "merge"})
+	p, err := e.Explain(context.Background(), "SELECT t.id FROM t JOIN d ON t.id < d.grp", QueryOptions{Join: "merge"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -310,7 +310,7 @@ func TestJoinAlgorithmSelection(t *testing.T) {
 
 func TestOptimizerFoldsConstants(t *testing.T) {
 	e := newModesEngine(t)
-	p, err := e.Explain("SELECT id FROM t WHERE amount > 100 * 2 + 0.5 AND 1 = 1", QueryOptions{})
+	p, err := e.Explain(context.Background(), "SELECT id FROM t WHERE amount > 100 * 2 + 0.5 AND 1 = 1", QueryOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -318,7 +318,7 @@ func TestOptimizerFoldsConstants(t *testing.T) {
 	if !strings.Contains(string(b), "200.5") || strings.Contains(string(b), "(1 = 1)") {
 		t.Errorf("constants not folded: %s", b)
 	}
-	p, err = e.Explain("SELECT id FROM t WHERE amount > 100 * 2 + 0.5 AND 1 = 1", QueryOptions{NoOptimize: true})
+	p, err = e.Explain(context.Background(), "SELECT id FROM t WHERE amount > 100 * 2 + 0.5 AND 1 = 1", QueryOptions{NoOptimize: true})
 	if err != nil {
 		t.Fatal(err)
 	}

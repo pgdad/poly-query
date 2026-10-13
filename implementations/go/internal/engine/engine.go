@@ -20,6 +20,7 @@ import (
 	"polyquery/internal/errs"
 	"polyquery/internal/exec"
 	"polyquery/internal/index"
+	"polyquery/internal/interrupt"
 	"polyquery/internal/ingest"
 	"polyquery/internal/native"
 	"polyquery/internal/optimizer"
@@ -75,6 +76,8 @@ type Config struct {
 	// it when they run with the option native: true.
 	Native *native.Lib
 	Logger *slog.Logger
+	// Limits are the statement size limits (CR-6).
+	Limits parser.Limits
 }
 
 // DefaultMaxThreads caps the default number of worker threads per query
@@ -92,6 +95,7 @@ func DefaultConfig() Config {
 		MaxTableRows:     500_000_000,
 		MaxJoinRows:      100_000_000,
 		Threads:          min(DefaultMaxThreads, runtime.NumCPU()),
+		Limits:           parser.DefaultLimits,
 		Logger:           slog.New(slog.NewTextHandler(io.Discard, nil)),
 	}
 }
@@ -301,21 +305,47 @@ type Cursor struct {
 
 // Start parses, analyzes and plans a SQL statement and returns a cursor
 // over its result. Statements without a row result (CREATE/DROP INDEX) are
-// executed immediately. The caller must Close the cursor.
+// executed immediately. The caller must Close the cursor. The timeout
+// counts from here and covers every stage: parsing, analysis,
+// optimization, planning and execution.
 func (e *Engine) Start(ctx context.Context, sql string, opts QueryOptions) (*Cursor, error) {
-	stmt, err := parser.Parse(sql)
+	ctx, cancel := queryContext(ctx, opts.Timeout)
+	cur, err := e.start(interrupt.New(ctx), sql, opts)
+	if err != nil {
+		cancel()
+		return nil, err
+	}
+	if cur.op == nil {
+		cancel() // the result is complete
+	} else {
+		cur.ctx, cur.cancel = ctx, cancel
+	}
+	return cur, nil
+}
+
+// queryContext bounds ctx by the query timeout. The cancel function also
+// stops the parallel workers of an unfinished query.
+func queryContext(ctx context.Context, timeout time.Duration) (context.Context, context.CancelFunc) {
+	if timeout > 0 {
+		return context.WithTimeout(ctx, timeout)
+	}
+	return context.WithCancel(ctx)
+}
+
+func (e *Engine) start(intr *interrupt.Checker, sql string, opts QueryOptions) (*Cursor, error) {
+	stmt, err := e.parse(intr, sql)
 	if err != nil {
 		return nil, err
 	}
 	switch s := stmt.(type) {
 	case *ast.Query:
-		p, err := e.plan(s, opts)
+		p, err := e.plan(intr, s, opts)
 		if err != nil {
 			return nil, err
 		}
-		return e.open(ctx, p, opts)
+		return e.open(intr, p, opts)
 	case *ast.Explain:
-		p, err := e.plan(s.Query, opts)
+		p, err := e.plan(intr, s.Query, opts)
 		if err != nil {
 			return nil, err
 		}
@@ -340,21 +370,18 @@ func (e *Engine) Start(ctx context.Context, sql string, opts QueryOptions) (*Cur
 	return nil, unsupportedStatement(stmt)
 }
 
+func (e *Engine) parse(intr *interrupt.Checker, sql string) (ast.Statement, error) {
+	return parser.ParseWith(sql, parser.Options{Limits: e.cfg.Limits, Interrupt: intr})
+}
+
 func staticCursor(cols []plan.Column, rows []types.Row) *Cursor {
 	return &Cursor{Columns: cols, rows: rows, maxRows: -1, ctx: context.Background(), ec: &exec.Context{}}
 }
 
 // open builds the operator tree of a physical plan.
-func (e *Engine) open(ctx context.Context, p *physical.Plan, opts QueryOptions) (*Cursor, error) {
-	var cancel context.CancelFunc
-	if opts.Timeout > 0 {
-		ctx, cancel = context.WithTimeout(ctx, opts.Timeout)
-	} else {
-		// Closing the cursor stops parallel workers of unfinished queries.
-		ctx, cancel = context.WithCancel(ctx)
-	}
+func (e *Engine) open(intr *interrupt.Checker, p *physical.Plan, opts QueryOptions) (*Cursor, error) {
 	ec := &exec.Context{
-		Ctx:         ctx,
+		Ctx:         intr.Context(),
 		Mem:         &exec.MemTracker{Limit: e.cfg.MaxQueryMemoryMB << 20},
 		MaxJoinRows: e.cfg.MaxJoinRows,
 		Plan:        p,
@@ -367,10 +394,12 @@ func (e *Engine) open(ctx context.Context, p *physical.Plan, opts QueryOptions) 
 	}
 	op, err := exec.BuildRoot(ec, p.Root)
 	if err != nil {
-		cancel()
 		return nil, err
 	}
-	return &Cursor{Columns: p.Root.Schema(), ctx: ctx, cancel: cancel, ec: ec, op: op, maxRows: opts.MaxRows}, nil
+	if err := intr.Check(); err != nil {
+		return nil, err
+	}
+	return &Cursor{Columns: p.Root.Schema(), ec: ec, op: op, maxRows: opts.MaxRows}, nil
 }
 
 // Next returns the next result row, or nil at the end. The row is only
@@ -414,9 +443,13 @@ func (c *Cursor) Close() {
 	}
 }
 
-// Explain plans a query and returns its EXPLAIN plan tree.
-func (e *Engine) Explain(sql string, opts QueryOptions) (*physical.Object, error) {
-	stmt, err := parser.Parse(sql)
+// Explain plans a query and returns its EXPLAIN plan tree. The timeout
+// covers parsing and planning.
+func (e *Engine) Explain(ctx context.Context, sql string, opts QueryOptions) (*physical.Object, error) {
+	ctx, cancel := queryContext(ctx, opts.Timeout)
+	defer cancel()
+	intr := interrupt.New(ctx)
+	stmt, err := e.parse(intr, sql)
 	if err != nil {
 		return nil, err
 	}
@@ -427,7 +460,7 @@ func (e *Engine) Explain(sql string, opts QueryOptions) (*physical.Object, error
 	if !ok {
 		return nil, unsupportedStatement(stmt)
 	}
-	p, err := e.plan(q, opts)
+	p, err := e.plan(intr, q, opts)
 	if err != nil {
 		return nil, err
 	}
@@ -442,21 +475,27 @@ func unsupportedStatement(stmt ast.Statement) error {
 	return errs.New(errs.Unsupported, "statement %T is not supported", stmt)
 }
 
-// plan runs semantic analysis, logical optimization and physical planning.
-func (e *Engine) plan(q *ast.Query, opts QueryOptions) (*physical.Plan, error) {
+// plan runs semantic analysis, logical optimization and physical
+// planning, each observing the query's deadline.
+func (e *Engine) plan(intr *interrupt.Checker, q *ast.Query, opts QueryOptions) (*physical.Plan, error) {
 	snap := e.catalog.Snapshot()
 	logical, err := analyzer.AnalyzeQuery(q, snap, analyzer.Config{
 		TestFunctions: e.cfg.TestFunctions,
 		EvalConst:     exec.EvalConstant,
+		Interrupt:     intr,
 	})
 	if err != nil {
 		return nil, err
 	}
-	logical = optimizer.Optimize(logical, optimizer.Options{
+	logical, err = optimizer.Optimize(logical, optimizer.Options{
 		Disabled:  opts.NoOptimize,
 		EvalConst: exec.EvalConstant,
+		Interrupt: intr,
 	})
-	return physical.Build(logical, physical.Options{
+	if err != nil {
+		return nil, err
+	}
+	p, err := physical.Build(logical, physical.Options{
 		Join:           opts.Join,
 		UseIndexes:     !opts.NoIndexes,
 		Indexes:        snap.IndexesOf,
@@ -465,7 +504,12 @@ func (e *Engine) plan(q *ast.Query, opts QueryOptions) (*physical.Plan, error) {
 		Threads:        opts.Threads,
 		DefaultThreads: e.cfg.Threads,
 		Native:         opts.Native && e.cfg.Native != nil,
+		Interrupt:      intr,
 	})
+	if err != nil {
+		return nil, err
+	}
+	return p, intr.Check()
 }
 
 // ---------------------------------------------------------------- storage

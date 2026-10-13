@@ -11,6 +11,7 @@ package physical
 
 import (
 	"polyquery/internal/index"
+	"polyquery/internal/interrupt"
 	"polyquery/internal/plan"
 	"polyquery/internal/storage"
 	"polyquery/internal/types"
@@ -318,4 +319,6 @@ type Options struct {
 	Threads, DefaultThreads int
 	// Native requests the native kernels (only set when they are loaded).
 	Native bool
+	// Interrupt observes the query's deadline (nil: none).
+	Interrupt *interrupt.Checker
 }

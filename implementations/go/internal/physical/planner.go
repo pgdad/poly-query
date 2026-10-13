@@ -86,6 +86,9 @@ func (p *planner) subqueries(exprs ...plan.Expr) error {
 
 // node plans n; req is the set of n's output columns its consumer needs.
 func (p *planner) node(n plan.Node, req idset) (Node, error) {
+	if err := p.opts.Interrupt.Check(); err != nil {
+		return nil, err
+	}
 	if len(p.params) > 0 {
 		// Inside a correlated subquery: compute uncorrelated subtrees once
 		// and turn correlation equalities into hash lookups.

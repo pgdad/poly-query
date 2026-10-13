@@ -5,12 +5,12 @@ package exec
 
 import (
 	"context"
-	"errors"
 	"sync"
 	"sync/atomic"
 	"unsafe"
 
 	"polyquery/internal/errs"
+	"polyquery/internal/interrupt"
 	"polyquery/internal/native"
 	"polyquery/internal/physical"
 	"polyquery/internal/plan"
@@ -64,12 +64,7 @@ func (c *Context) Check() error {
 }
 
 // ContextError maps a context error to a PolyQuery error.
-func ContextError(err error) error {
-	if errors.Is(err, context.DeadlineExceeded) {
-		return errs.New(errs.Timeout, "query exceeded its timeout")
-	}
-	return errs.New(errs.Cancelled, "query was cancelled")
-}
+func ContextError(err error) error { return interrupt.Error(err) }
 
 // MemTracker approximates the memory retained by a query's operators. It
 // is safe for concurrent use by parallel workers.

@@ -6,6 +6,7 @@ package analyzer
 
 import (
 	"polyquery/internal/errs"
+	"polyquery/internal/interrupt"
 	"polyquery/internal/plan"
 	"polyquery/internal/sql/ast"
 	"polyquery/internal/storage"
@@ -25,6 +26,8 @@ type Config struct {
 	// function parameters that determine a result type (ROUND digits) or are
 	// validated up front (DATE_TRUNC units).
 	EvalConst func(plan.Expr) (types.Value, error)
+	// Interrupt observes the query's deadline (nil: none).
+	Interrupt *interrupt.Checker
 }
 
 // AnalyzeQuery validates a query and returns its logical plan. The plan's

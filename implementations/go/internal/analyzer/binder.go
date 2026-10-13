@@ -29,6 +29,9 @@ func (a *analyzer) newBinder(sc *scope, env *cteEnv, aggs *[]*plan.AggCall, clau
 }
 
 func (b *binder) bind(e ast.Expr) (plan.Expr, error) {
+	if err := b.a.cfg.Interrupt.Tick(); err != nil {
+		return nil, err
+	}
 	switch x := e.(type) {
 	case *ast.Literal:
 		return bindLiteral(x, false)
