@@ -1,6 +1,6 @@
 {
  "schema": "polyquery-conformance-report/1",
- "started": "2026-10-11T16:38:08.267756+00:00",
+ "started": "2026-10-13T03:10:00.923998+00:00",
  "seconds": 0.09,
  "engine": {
   "launcher": "/home/esa/git/poly-query/implementations/common-lisp/bin/polyquery",
@@ -18,7 +18,7 @@
    }
   },
   "version_exit": 0,
-  "version_seconds": 0.008,
+  "version_seconds": 0.007,
   "capabilities": {
    "ok": true,
    "protocol_version": 1,
@@ -52,13 +52,15 @@
     "join.nested_loop",
     "native.kernels",
     "change.union_all",
-    "change.decimal38"
+    "change.decimal38",
+    "change.expression_limits"
    ]
   },
   "capabilities_exit": 0,
-  "capabilities_seconds": 0.005,
+  "capabilities_seconds": 0.004,
   "capability_set": [
    "change.decimal38",
+   "change.expression_limits",
    "change.union_all",
    "exec.parallel",
    "exec.row",
@@ -154,7 +156,7 @@
      "line": 9,
      "kind": "query",
      "status": "pass",
-     "elapsed_ms": 5.25
+     "elapsed_ms": 4.74
     },
     {
      "line": 15,
@@ -166,67 +168,67 @@
      "line": 21,
      "kind": "query",
      "status": "pass",
-     "elapsed_ms": 0.28
+     "elapsed_ms": 0.24
     },
     {
      "line": 27,
      "kind": "query",
      "status": "pass",
-     "elapsed_ms": 0.12
+     "elapsed_ms": 0.04
     },
     {
      "line": 33,
      "kind": "query",
      "status": "pass",
-     "elapsed_ms": 0.1
+     "elapsed_ms": 0.11
     },
     {
      "line": 39,
      "kind": "query",
      "status": "pass",
-     "elapsed_ms": 0.1
+     "elapsed_ms": 0.16
     },
     {
      "line": 46,
      "kind": "query",
      "status": "pass",
-     "elapsed_ms": 0.08
+     "elapsed_ms": 0.14
     },
     {
      "line": 53,
      "kind": "query",
      "status": "pass",
-     "elapsed_ms": 0.16
+     "elapsed_ms": 0.12
     },
     {
      "line": 60,
      "kind": "query",
      "status": "pass",
-     "elapsed_ms": 0.06
+     "elapsed_ms": 0.11
     },
     {
      "line": 66,
      "kind": "query",
      "status": "pass",
-     "elapsed_ms": 0.12
+     "elapsed_ms": 0.06
     },
     {
      "line": 73,
      "kind": "error",
      "status": "pass",
-     "elapsed_ms": 0.37
+     "elapsed_ms": 0.21
     },
     {
      "line": 76,
      "kind": "query",
      "status": "pass",
-     "elapsed_ms": 0.1
+     "elapsed_ms": 0.06
     },
     {
      "line": 83,
      "kind": "query",
      "status": "pass",
-     "elapsed_ms": 0.06
+     "elapsed_ms": 0.05
     },
     {
      "line": 90,
@@ -238,31 +240,31 @@
      "line": 94,
      "kind": "error",
      "status": "pass",
-     "elapsed_ms": 0.07
+     "elapsed_ms": 0.02
     },
     {
      "line": 98,
      "kind": "error",
      "status": "pass",
-     "elapsed_ms": 0.15
+     "elapsed_ms": 0.02
     },
     {
      "line": 101,
      "kind": "error",
      "status": "pass",
-     "elapsed_ms": 0.23
+     "elapsed_ms": 0.02
     },
     {
      "line": 104,
      "kind": "error",
      "status": "pass",
-     "elapsed_ms": 0.08
+     "elapsed_ms": 0.02
     },
     {
      "line": 107,
      "kind": "error",
      "status": "pass",
-     "elapsed_ms": 0.04
+     "elapsed_ms": 0.07
     },
     {
      "line": 110,
@@ -274,19 +276,19 @@
      "line": 118,
      "kind": "query",
      "status": "pass",
-     "elapsed_ms": 0.05
+     "elapsed_ms": 0.16
     },
     {
      "line": 125,
      "kind": "query",
      "status": "pass",
-     "elapsed_ms": 0.04
+     "elapsed_ms": 0.09
     },
     {
      "line": 131,
      "kind": "query",
      "status": "pass",
-     "elapsed_ms": 0.06
+     "elapsed_ms": 0.08
     }
    ],
    "missing_capabilities": [],
@@ -306,7 +308,7 @@
      "line": 5,
      "kind": "request",
      "status": "pass",
-     "elapsed_ms": 4.36
+     "elapsed_ms": 4.58
     },
     {
      "line": 10,
@@ -318,7 +320,7 @@
      "line": 15,
      "kind": "request",
      "status": "pass",
-     "elapsed_ms": 0.02
+     "elapsed_ms": 0.07
     },
     {
      "line": 20,
@@ -330,156 +332,156 @@
      "line": 25,
      "kind": "request",
      "status": "pass",
-     "elapsed_ms": 0.09
+     "elapsed_ms": 0.07
     },
     {
      "line": 31,
      "kind": "request",
      "status": "pass",
-     "elapsed_ms": 0.13
+     "elapsed_ms": 0.09
     },
     {
      "line": 37,
      "kind": "request",
      "status": "pass",
-     "elapsed_ms": 0.05
+     "elapsed_ms": 0.01
     },
     {
      "line": 42,
      "kind": "request",
      "status": "pass",
-     "elapsed_ms": 1.6
+     "elapsed_ms": 0.75
     },
     {
      "line": 48,
      "kind": "request",
      "status": "pass",
-     "elapsed_ms": 0.14
+     "elapsed_ms": 0.02
     },
     {
      "line": 53,
      "kind": "request",
      "status": "pass",
-     "elapsed_ms": 0.12
+     "elapsed_ms": 0.19
     },
     {
      "line": 58,
      "kind": "request",
      "status": "pass",
-     "elapsed_ms": 0.14
+     "elapsed_ms": 0.08
     },
     {
      "line": 63,
      "kind": "request",
      "status": "pass",
-     "elapsed_ms": 0.34
+     "elapsed_ms": 0.16
     },
     {
      "line": 68,
      "kind": "request",
      "status": "pass",
-     "elapsed_ms": 0.32
+     "elapsed_ms": 0.04
     },
     {
      "line": 73,
      "kind": "request",
      "status": "pass",
-     "elapsed_ms": 0.1
+     "elapsed_ms": 0.11
     },
     {
      "line": 78,
      "kind": "error",
      "status": "pass",
-     "elapsed_ms": 0.07
+     "elapsed_ms": 0.1
     },
     {
      "line": 81,
      "kind": "request",
      "status": "pass",
-     "elapsed_ms": 0.06
+     "elapsed_ms": 0.09
     },
     {
      "line": 86,
      "kind": "request",
      "status": "pass",
-     "elapsed_ms": 0.03
+     "elapsed_ms": 0.05
     },
     {
      "line": 92,
      "kind": "request",
      "status": "pass",
-     "elapsed_ms": 0.13
+     "elapsed_ms": 0.11
     },
     {
      "line": 97,
      "kind": "request",
      "status": "pass",
-     "elapsed_ms": 0.06
+     "elapsed_ms": 0.11
     },
     {
      "line": 102,
      "kind": "request",
      "status": "pass",
-     "elapsed_ms": 0.03
+     "elapsed_ms": 0.14
     },
     {
      "line": 107,
      "kind": "request",
      "status": "pass",
-     "elapsed_ms": 0.14
+     "elapsed_ms": 0.08
     },
     {
      "line": 112,
      "kind": "request",
      "status": "pass",
-     "elapsed_ms": 0.12
+     "elapsed_ms": 0.07
     },
     {
      "line": 118,
      "kind": "request",
      "status": "pass",
-     "elapsed_ms": 0.03
+     "elapsed_ms": 0.04
     },
     {
      "line": 123,
      "kind": "request",
      "status": "pass",
-     "elapsed_ms": 0.12
+     "elapsed_ms": 0.05
     },
     {
      "line": 128,
      "kind": "request",
      "status": "pass",
-     "elapsed_ms": 0.06
+     "elapsed_ms": 0.09
     },
     {
      "line": 133,
      "kind": "request",
      "status": "pass",
-     "elapsed_ms": 0.01
+     "elapsed_ms": 0.04
     },
     {
      "line": 138,
      "kind": "request",
      "status": "pass",
-     "elapsed_ms": 0.09
+     "elapsed_ms": 0.1
     },
     {
      "line": 144,
      "kind": "request",
      "status": "pass",
-     "elapsed_ms": 0.05
+     "elapsed_ms": 0.06
     },
     {
      "line": 149,
      "kind": "query",
      "status": "pass",
-     "elapsed_ms": 0.31
+     "elapsed_ms": 0.24
     }
    ],
    "missing_capabilities": [],
    "status": "ran",
-   "seconds": 0.012
+   "seconds": 0.011
   },
   {
    "file": "cases/phase1/expressions.pqt",
@@ -495,139 +497,139 @@
      "line": 6,
      "kind": "query",
      "status": "pass",
-     "elapsed_ms": 5.3
+     "elapsed_ms": 5.2
     },
     {
      "line": 12,
      "kind": "query",
      "status": "pass",
-     "elapsed_ms": 1.61
+     "elapsed_ms": 0.17
     },
     {
      "line": 18,
      "kind": "query",
      "status": "pass",
-     "elapsed_ms": 0.21
+     "elapsed_ms": 0.09
     },
     {
      "line": 24,
      "kind": "error",
      "status": "pass",
-     "elapsed_ms": 0.2
+     "elapsed_ms": 0.38
     },
     {
      "line": 27,
      "kind": "error",
      "status": "pass",
-     "elapsed_ms": 0.05
+     "elapsed_ms": 0.06
     },
     {
      "line": 30,
      "kind": "error",
      "status": "pass",
-     "elapsed_ms": 0.13
+     "elapsed_ms": 0.23
     },
     {
      "line": 33,
      "kind": "query",
      "status": "pass",
-     "elapsed_ms": 0.26
+     "elapsed_ms": 0.07
     },
     {
      "line": 40,
      "kind": "query",
      "status": "pass",
-     "elapsed_ms": 0.09
+     "elapsed_ms": 0.1
     },
     {
      "line": 46,
      "kind": "error",
      "status": "pass",
-     "elapsed_ms": 0.11
+     "elapsed_ms": 0.13
     },
     {
      "line": 49,
      "kind": "error",
      "status": "pass",
-     "elapsed_ms": 0.09
+     "elapsed_ms": 0.12
     },
     {
      "line": 52,
      "kind": "error",
      "status": "pass",
-     "elapsed_ms": 0.1
+     "elapsed_ms": 0.11
     },
     {
      "line": 55,
      "kind": "error",
      "status": "pass",
-     "elapsed_ms": 0.09
+     "elapsed_ms": 0.06
     },
     {
      "line": 58,
      "kind": "error",
      "status": "pass",
-     "elapsed_ms": 0.04
+     "elapsed_ms": 0.23
     },
     {
      "line": 61,
      "kind": "error",
      "status": "pass",
-     "elapsed_ms": 0.07
+     "elapsed_ms": 0.06
     },
     {
      "line": 64,
      "kind": "error",
      "status": "pass",
-     "elapsed_ms": 0.02
+     "elapsed_ms": 0.08
     },
     {
      "line": 67,
      "kind": "query",
      "status": "pass",
-     "elapsed_ms": 0.05
+     "elapsed_ms": 0.14
     },
     {
      "line": 74,
      "kind": "query",
      "status": "pass",
-     "elapsed_ms": 0.02
+     "elapsed_ms": 0.05
     },
     {
      "line": 81,
      "kind": "query",
      "status": "pass",
-     "elapsed_ms": 0.13
+     "elapsed_ms": 0.12
     },
     {
      "line": 87,
      "kind": "query",
      "status": "pass",
-     "elapsed_ms": 0.09
+     "elapsed_ms": 0.13
     },
     {
      "line": 93,
      "kind": "error",
      "status": "pass",
-     "elapsed_ms": 0.03
+     "elapsed_ms": 0.04
     },
     {
      "line": 96,
      "kind": "error",
      "status": "pass",
-     "elapsed_ms": 0.04
+     "elapsed_ms": 0.05
     },
     {
      "line": 99,
      "kind": "error",
      "status": "pass",
-     "elapsed_ms": 0.04
+     "elapsed_ms": 0.06
     },
     {
      "line": 102,
      "kind": "error",
      "status": "pass",
-     "elapsed_ms": 0.02
+     "elapsed_ms": 0.05
     },
     {
      "line": 105,
@@ -639,25 +641,25 @@
      "line": 109,
      "kind": "query",
      "status": "pass",
-     "elapsed_ms": 0.03
+     "elapsed_ms": 0.05
     },
     {
      "line": 115,
      "kind": "error",
      "status": "pass",
-     "elapsed_ms": 0.06
+     "elapsed_ms": 0.07
     },
     {
      "line": 118,
      "kind": "error",
      "status": "pass",
-     "elapsed_ms": 0.06
+     "elapsed_ms": 0.27
     },
     {
      "line": 121,
      "kind": "error",
      "status": "pass",
-     "elapsed_ms": 0.1
+     "elapsed_ms": 0.08
     },
     {
      "line": 124,
@@ -669,73 +671,73 @@
      "line": 128,
      "kind": "query",
      "status": "pass",
-     "elapsed_ms": 0.06
+     "elapsed_ms": 0.05
     },
     {
      "line": 134,
      "kind": "error",
      "status": "pass",
-     "elapsed_ms": 0.07
+     "elapsed_ms": 0.05
     },
     {
      "line": 137,
      "kind": "error",
      "status": "pass",
-     "elapsed_ms": 0.03
+     "elapsed_ms": 0.02
     },
     {
      "line": 140,
      "kind": "error",
      "status": "pass",
-     "elapsed_ms": 0.04
+     "elapsed_ms": 0.02
     },
     {
      "line": 143,
      "kind": "error",
      "status": "pass",
-     "elapsed_ms": 0.05
+     "elapsed_ms": 0.01
     },
     {
      "line": 146,
      "kind": "error",
      "status": "pass",
-     "elapsed_ms": 0.05
+     "elapsed_ms": 0.06
     },
     {
      "line": 149,
      "kind": "error",
      "status": "pass",
-     "elapsed_ms": 0.07
+     "elapsed_ms": 0.02
     },
     {
      "line": 152,
      "kind": "error",
      "status": "pass",
-     "elapsed_ms": 0.27
+     "elapsed_ms": 0.07
     },
     {
      "line": 155,
      "kind": "error",
      "status": "pass",
-     "elapsed_ms": 0.09
+     "elapsed_ms": 0.04
     },
     {
      "line": 159,
      "kind": "query",
      "status": "pass",
-     "elapsed_ms": 0.39
+     "elapsed_ms": 0.09
     },
     {
      "line": 167,
      "kind": "query",
      "status": "pass",
-     "elapsed_ms": 0.11
+     "elapsed_ms": 0.1
     },
     {
      "line": 180,
      "kind": "query",
      "status": "pass",
-     "elapsed_ms": 0.11
+     "elapsed_ms": 0.1
     },
     {
      "line": 187,
@@ -747,96 +749,96 @@
      "line": 197,
      "kind": "error",
      "status": "pass",
-     "elapsed_ms": 0.05
+     "elapsed_ms": 0.04
     },
     {
      "line": 200,
      "kind": "error",
      "status": "pass",
-     "elapsed_ms": 0.04
+     "elapsed_ms": 0.06
     },
     {
      "line": 204,
      "kind": "query",
      "status": "pass",
-     "elapsed_ms": 0.06
+     "elapsed_ms": 0.09
     },
     {
      "line": 210,
      "kind": "query",
      "status": "pass",
-     "elapsed_ms": 0.09
+     "elapsed_ms": 0.08
     },
     {
      "line": 216,
      "kind": "query",
      "status": "pass",
-     "elapsed_ms": 0.15
+     "elapsed_ms": 0.09
     },
     {
      "line": 222,
      "kind": "query",
      "status": "pass",
-     "elapsed_ms": 0.05
+     "elapsed_ms": 0.04
     },
     {
      "line": 228,
      "kind": "error",
      "status": "pass",
-     "elapsed_ms": 0.06
+     "elapsed_ms": 0.03
     },
     {
      "line": 231,
      "kind": "error",
      "status": "pass",
-     "elapsed_ms": 0.04
+     "elapsed_ms": 0.07
     },
     {
      "line": 234,
      "kind": "error",
      "status": "pass",
-     "elapsed_ms": 0.06
+     "elapsed_ms": 0.16
     },
     {
      "line": 237,
      "kind": "error",
      "status": "pass",
-     "elapsed_ms": 0.02
+     "elapsed_ms": 0.06
     },
     {
      "line": 240,
      "kind": "error",
      "status": "pass",
-     "elapsed_ms": 0.07
+     "elapsed_ms": 0.06
     },
     {
      "line": 243,
      "kind": "error",
      "status": "pass",
-     "elapsed_ms": 0.07
+     "elapsed_ms": 0.18
     },
     {
      "line": 246,
      "kind": "error",
      "status": "pass",
-     "elapsed_ms": 0.08
+     "elapsed_ms": 0.04
     },
     {
      "line": 249,
      "kind": "error",
      "status": "pass",
-     "elapsed_ms": 0.02
+     "elapsed_ms": 0.05
     },
     {
      "line": 252,
      "kind": "error",
      "status": "pass",
-     "elapsed_ms": 0.04
+     "elapsed_ms": 0.09
     }
    ],
    "missing_capabilities": [],
    "status": "ran",
-   "seconds": 0.016
+   "seconds": 0.013
   },
   {
    "file": "cases/phase1/ingest_csv.pqt",
@@ -852,43 +854,43 @@
      "line": 7,
      "kind": "request",
      "status": "pass",
-     "elapsed_ms": 0.11
+     "elapsed_ms": 0.04
     },
     {
      "line": 12,
      "kind": "query",
      "status": "pass",
-     "elapsed_ms": 1.73
+     "elapsed_ms": 0.46
     },
     {
      "line": 26,
      "kind": "query",
      "status": "pass",
-     "elapsed_ms": 0.42
+     "elapsed_ms": 0.14
     },
     {
      "line": 38,
      "kind": "query",
      "status": "pass",
-     "elapsed_ms": 0.24
+     "elapsed_ms": 0.16
     },
     {
      "line": 54,
      "kind": "query",
      "status": "pass",
-     "elapsed_ms": 0.12
+     "elapsed_ms": 0.15
     },
     {
      "line": 65,
      "kind": "query",
      "status": "pass",
-     "elapsed_ms": 0.11
+     "elapsed_ms": 0.18
     },
     {
      "line": 75,
      "kind": "request",
      "status": "pass",
-     "elapsed_ms": 0.04
+     "elapsed_ms": 0.05
     },
     {
      "line": 83,
@@ -900,73 +902,73 @@
      "line": 91,
      "kind": "request",
      "status": "pass",
-     "elapsed_ms": 0.07
+     "elapsed_ms": 0.08
     },
     {
      "line": 96,
      "kind": "query",
      "status": "pass",
-     "elapsed_ms": 0.1
+     "elapsed_ms": 0.08
     },
     {
      "line": 107,
      "kind": "request",
      "status": "pass",
-     "elapsed_ms": 0.02
+     "elapsed_ms": 0.08
     },
     {
      "line": 112,
      "kind": "query",
      "status": "pass",
-     "elapsed_ms": 0.12
+     "elapsed_ms": 0.18
     },
     {
      "line": 125,
      "kind": "request",
      "status": "pass",
-     "elapsed_ms": 0.06
+     "elapsed_ms": 0.16
     },
     {
      "line": 133,
      "kind": "query",
      "status": "pass",
-     "elapsed_ms": 0.25
+     "elapsed_ms": 0.09
     },
     {
      "line": 146,
      "kind": "query",
      "status": "pass",
-     "elapsed_ms": 0.11
+     "elapsed_ms": 0.16
     },
     {
      "line": 154,
      "kind": "load",
      "status": "pass",
-     "elapsed_ms": 0.1
+     "elapsed_ms": 0.12
     },
     {
      "line": 155,
      "kind": "load",
      "status": "pass",
-     "elapsed_ms": 0.16
+     "elapsed_ms": 0.05
     },
     {
      "line": 156,
      "kind": "load",
      "status": "pass",
-     "elapsed_ms": 0.12
+     "elapsed_ms": 0.02
     },
     {
      "line": 157,
      "kind": "load",
      "status": "pass",
-     "elapsed_ms": 0.08
+     "elapsed_ms": 0.07
     },
     {
      "line": 158,
      "kind": "load",
      "status": "pass",
-     "elapsed_ms": 0.03
+     "elapsed_ms": 0.02
     },
     {
      "line": 159,
@@ -978,78 +980,78 @@
      "line": 160,
      "kind": "load",
      "status": "pass",
-     "elapsed_ms": 0.09
+     "elapsed_ms": 0.11
     },
     {
      "line": 161,
      "kind": "load",
      "status": "pass",
-     "elapsed_ms": 0.07
+     "elapsed_ms": 0.08
     },
     {
      "line": 162,
      "kind": "load",
      "status": "pass",
-     "elapsed_ms": 0.07
+     "elapsed_ms": 0.08
     },
     {
      "line": 164,
      "kind": "data",
      "status": "pass",
-     "elapsed_ms": 0.04
+     "elapsed_ms": 0.07
     },
     {
      "line": 176,
      "kind": "query",
      "status": "pass",
-     "elapsed_ms": 0.08
+     "elapsed_ms": 0.05
     },
     {
      "line": 184,
      "kind": "data",
      "status": "pass",
-     "elapsed_ms": 0.02
+     "elapsed_ms": 0.04
     },
     {
      "line": 189,
      "kind": "data",
      "status": "pass",
-     "elapsed_ms": 0.04
+     "elapsed_ms": 0.02
     },
     {
      "line": 195,
      "kind": "request",
      "status": "pass",
-     "elapsed_ms": 0.09
+     "elapsed_ms": 0.01
     },
     {
      "line": 201,
      "kind": "data",
      "status": "pass",
-     "elapsed_ms": 0.08
+     "elapsed_ms": 0.04
     },
     {
      "line": 213,
      "kind": "query",
      "status": "pass",
-     "elapsed_ms": 0.19
+     "elapsed_ms": 0.1
     },
     {
      "line": 225,
      "kind": "request",
      "status": "pass",
-     "elapsed_ms": 0.12
+     "elapsed_ms": 0.01
     },
     {
      "line": 236,
      "kind": "query",
      "status": "pass",
-     "elapsed_ms": 0.11
+     "elapsed_ms": 0.04
     }
    ],
    "missing_capabilities": [],
    "status": "ran",
-   "seconds": 0.015
+   "seconds": 0.013
   },
   {
    "file": "cases/phase1/ingest_json.pqt",
@@ -1066,127 +1068,127 @@
      "line": 7,
      "kind": "request",
      "status": "pass",
-     "elapsed_ms": 0.11
+     "elapsed_ms": 0.22
     },
     {
      "line": 12,
      "kind": "query",
      "status": "pass",
-     "elapsed_ms": 2.06
+     "elapsed_ms": 0.31
     },
     {
      "line": 24,
      "kind": "request",
      "status": "pass",
-     "elapsed_ms": 0.1
+     "elapsed_ms": 0.16
     },
     {
      "line": 29,
      "kind": "query",
      "status": "pass",
-     "elapsed_ms": 0.25
+     "elapsed_ms": 0.29
     },
     {
      "line": 45,
      "kind": "request",
      "status": "pass",
-     "elapsed_ms": 0.1
+     "elapsed_ms": 0.03
     },
     {
      "line": 50,
      "kind": "query",
      "status": "pass",
-     "elapsed_ms": 0.17
+     "elapsed_ms": 0.14
     },
     {
      "line": 63,
      "kind": "query",
      "status": "pass",
-     "elapsed_ms": 0.12
+     "elapsed_ms": 0.13
     },
     {
      "line": 77,
      "kind": "request",
      "status": "pass",
-     "elapsed_ms": 0.09
+     "elapsed_ms": 0.12
     },
     {
      "line": 87,
      "kind": "query",
      "status": "pass",
-     "elapsed_ms": 0.17
+     "elapsed_ms": 0.03
     },
     {
      "line": 94,
      "kind": "load",
      "status": "pass",
-     "elapsed_ms": 0.14
+     "elapsed_ms": 0.11
     },
     {
      "line": 95,
      "kind": "load",
      "status": "pass",
-     "elapsed_ms": 0.15
+     "elapsed_ms": 0.1
     },
     {
      "line": 96,
      "kind": "load",
      "status": "pass",
-     "elapsed_ms": 0.09
+     "elapsed_ms": 0.1
     },
     {
      "line": 98,
      "kind": "data",
      "status": "pass",
-     "elapsed_ms": 0.02
+     "elapsed_ms": 0.06
     },
     {
      "line": 102,
      "kind": "data",
      "status": "pass",
-     "elapsed_ms": 0.07
+     "elapsed_ms": 0.03
     },
     {
      "line": 106,
      "kind": "data",
      "status": "pass",
-     "elapsed_ms": 0.04
+     "elapsed_ms": 0.05
     },
     {
      "line": 110,
      "kind": "data",
      "status": "pass",
-     "elapsed_ms": 0.17
+     "elapsed_ms": 0.11
     },
     {
      "line": 114,
      "kind": "data",
      "status": "pass",
-     "elapsed_ms": 0.03
+     "elapsed_ms": 0.07
     },
     {
      "line": 118,
      "kind": "data",
      "status": "pass",
-     "elapsed_ms": 0.12
+     "elapsed_ms": 0.05
     },
     {
      "line": 122,
      "kind": "data",
      "status": "pass",
-     "elapsed_ms": 0.08
+     "elapsed_ms": 0.07
     },
     {
      "line": 126,
      "kind": "data",
      "status": "pass",
-     "elapsed_ms": 0.18
+     "elapsed_ms": 0.13
     },
     {
      "line": 130,
      "kind": "data",
      "status": "pass",
-     "elapsed_ms": 0.21
+     "elapsed_ms": 0.09
     },
     {
      "line": 139,
@@ -1197,7 +1199,7 @@
    ],
    "missing_capabilities": [],
    "status": "ran",
-   "seconds": 0.013
+   "seconds": 0.011
   },
   {
    "file": "cases/phase1/limits_and_output.pqt",
@@ -1214,73 +1216,73 @@
      "line": 8,
      "kind": "error",
      "status": "pass",
-     "elapsed_ms": 1.01
+     "elapsed_ms": 0.21
     },
     {
      "line": 11,
      "kind": "query",
      "status": "pass",
-     "elapsed_ms": 1.15
+     "elapsed_ms": 0.13
     },
     {
      "line": 16,
      "kind": "query",
      "status": "pass",
-     "elapsed_ms": 0.22
+     "elapsed_ms": 0.17
     },
     {
      "line": 21,
      "kind": "request",
      "status": "pass",
-     "elapsed_ms": 0.12
+     "elapsed_ms": 0.07
     },
     {
      "line": 27,
      "kind": "query",
      "status": "pass",
-     "elapsed_ms": 2.73
+     "elapsed_ms": 3.88
     },
     {
      "line": 34,
      "kind": "request",
      "status": "pass",
-     "elapsed_ms": 0.23
+     "elapsed_ms": 0.17
     },
     {
      "line": 39,
      "kind": "request",
      "status": "pass",
-     "elapsed_ms": 0.21
+     "elapsed_ms": 0.17
     },
     {
      "line": 45,
      "kind": "query",
      "status": "pass",
-     "elapsed_ms": 0.13
+     "elapsed_ms": 0.08
     },
     {
      "line": 52,
      "kind": "query",
      "status": "pass",
-     "elapsed_ms": 0.11
+     "elapsed_ms": 0.21
     },
     {
      "line": 59,
      "kind": "query",
      "status": "pass",
-     "elapsed_ms": 9.24
+     "elapsed_ms": 9.27
     },
     {
      "line": 65,
      "kind": "request",
      "status": "pass",
-     "elapsed_ms": 5.14
+     "elapsed_ms": 5.1
     },
     {
      "line": 70,
      "kind": "error",
      "status": "pass",
-     "elapsed_ms": 50.66
+     "elapsed_ms": 50.65
     }
    ],
    "missing_capabilities": [],
@@ -1301,25 +1303,25 @@
      "line": 7,
      "kind": "query",
      "status": "pass",
-     "elapsed_ms": 0.61
+     "elapsed_ms": 0.2
     },
     {
      "line": 20,
      "kind": "query",
      "status": "pass",
-     "elapsed_ms": 0.1
+     "elapsed_ms": 0.08
     },
     {
      "line": 30,
      "kind": "query",
      "status": "pass",
-     "elapsed_ms": 0.04
+     "elapsed_ms": 0.05
     },
     {
      "line": 39,
      "kind": "query",
      "status": "pass",
-     "elapsed_ms": 0.06
+     "elapsed_ms": 0.04
     },
     {
      "line": 50,
@@ -1331,61 +1333,61 @@
      "line": 59,
      "kind": "query",
      "status": "pass",
-     "elapsed_ms": 0.02
+     "elapsed_ms": 0.05
     },
     {
      "line": 68,
      "kind": "query",
      "status": "pass",
-     "elapsed_ms": 0.02
+     "elapsed_ms": 0.09
     },
     {
      "line": 77,
      "kind": "query",
      "status": "pass",
-     "elapsed_ms": 0.07
+     "elapsed_ms": 0.06
     },
     {
      "line": 91,
      "kind": "query",
      "status": "pass",
-     "elapsed_ms": 0.06
+     "elapsed_ms": 0.04
     },
     {
      "line": 100,
      "kind": "query",
      "status": "pass",
-     "elapsed_ms": 0.04
+     "elapsed_ms": 0.08
     },
     {
      "line": 109,
      "kind": "query",
      "status": "pass",
-     "elapsed_ms": 0.12
+     "elapsed_ms": 0.15
     },
     {
      "line": 122,
      "kind": "query",
      "status": "pass",
-     "elapsed_ms": 0.07
+     "elapsed_ms": 0.08
     },
     {
      "line": 135,
      "kind": "query",
      "status": "pass",
-     "elapsed_ms": 0.09
+     "elapsed_ms": 0.1
     },
     {
      "line": 148,
      "kind": "query",
      "status": "pass",
-     "elapsed_ms": 0.07
+     "elapsed_ms": 0.17
     },
     {
      "line": 162,
      "kind": "query",
      "status": "pass",
-     "elapsed_ms": 0.07
+     "elapsed_ms": 0.06
     },
     {
      "line": 175,
@@ -1397,7 +1399,7 @@
      "line": 183,
      "kind": "query",
      "status": "pass",
-     "elapsed_ms": 0.09
+     "elapsed_ms": 0.08
     },
     {
      "line": 191,
@@ -1409,7 +1411,7 @@
      "line": 196,
      "kind": "query",
      "status": "pass",
-     "elapsed_ms": 0.04
+     "elapsed_ms": 0.03
     },
     {
      "line": 203,
@@ -1433,7 +1435,7 @@
      "line": 224,
      "kind": "query",
      "status": "pass",
-     "elapsed_ms": 0.04
+     "elapsed_ms": 0.05
     },
     {
      "line": 235,
@@ -1445,31 +1447,31 @@
      "line": 247,
      "kind": "query",
      "status": "pass",
-     "elapsed_ms": 0.03
+     "elapsed_ms": 0.08
     },
     {
      "line": 260,
      "kind": "query",
      "status": "pass",
-     "elapsed_ms": 0.03
+     "elapsed_ms": 0.04
     },
     {
      "line": 266,
      "kind": "query",
      "status": "pass",
-     "elapsed_ms": 0.03
+     "elapsed_ms": 0.04
     },
     {
      "line": 274,
      "kind": "query",
      "status": "pass",
-     "elapsed_ms": 0.04
+     "elapsed_ms": 0.03
     },
     {
      "line": 281,
      "kind": "query",
      "status": "pass",
-     "elapsed_ms": 0.03
+     "elapsed_ms": 0.04
     },
     {
      "line": 288,
@@ -1481,25 +1483,25 @@
      "line": 294,
      "kind": "query",
      "status": "pass",
-     "elapsed_ms": 0.04
+     "elapsed_ms": 0.05
     },
     {
      "line": 300,
      "kind": "query",
      "status": "pass",
-     "elapsed_ms": 0.04
+     "elapsed_ms": 0.09
     },
     {
      "line": 307,
      "kind": "query",
      "status": "pass",
-     "elapsed_ms": 0.04
+     "elapsed_ms": 0.09
     },
     {
      "line": 320,
      "kind": "query",
      "status": "pass",
-     "elapsed_ms": 0.07
+     "elapsed_ms": 0.08
     },
     {
      "line": 326,
@@ -1511,55 +1513,55 @@
      "line": 331,
      "kind": "query",
      "status": "pass",
-     "elapsed_ms": 0.05
+     "elapsed_ms": 0.03
     },
     {
      "line": 338,
      "kind": "query",
      "status": "pass",
-     "elapsed_ms": 0.04
+     "elapsed_ms": 0.03
     },
     {
      "line": 346,
      "kind": "error",
      "status": "pass",
-     "elapsed_ms": 0.07
+     "elapsed_ms": 0.16
     },
     {
      "line": 349,
      "kind": "error",
      "status": "pass",
-     "elapsed_ms": 0.03
+     "elapsed_ms": 0.06
     },
     {
      "line": 352,
      "kind": "error",
      "status": "pass",
-     "elapsed_ms": 0.03
+     "elapsed_ms": 0.13
     },
     {
      "line": 355,
      "kind": "error",
      "status": "pass",
-     "elapsed_ms": 0.03
+     "elapsed_ms": 0.1
     },
     {
      "line": 358,
      "kind": "error",
      "status": "pass",
-     "elapsed_ms": 0.02
+     "elapsed_ms": 0.06
     },
     {
      "line": 361,
      "kind": "error",
      "status": "pass",
-     "elapsed_ms": 0.03
+     "elapsed_ms": 0.02
     },
     {
      "line": 364,
      "kind": "error",
      "status": "pass",
-     "elapsed_ms": 0.02
+     "elapsed_ms": 0.03
     },
     {
      "line": 367,
@@ -1571,25 +1573,25 @@
      "line": 370,
      "kind": "error",
      "status": "pass",
-     "elapsed_ms": 0.01
+     "elapsed_ms": 0.07
     },
     {
      "line": 373,
      "kind": "error",
      "status": "pass",
-     "elapsed_ms": 0.09
+     "elapsed_ms": 0.18
     },
     {
      "line": 376,
      "kind": "error",
      "status": "pass",
-     "elapsed_ms": 0.02
+     "elapsed_ms": 0.05
     },
     {
      "line": 379,
      "kind": "error",
      "status": "pass",
-     "elapsed_ms": 0.02
+     "elapsed_ms": 0.04
     }
    ],
    "missing_capabilities": [],
@@ -1613,133 +1615,133 @@
      "line": 11,
      "kind": "query",
      "status": "pass",
-     "elapsed_ms": 1.46
+     "elapsed_ms": 0.3
     },
     {
      "line": 22,
      "kind": "query",
      "status": "pass",
-     "elapsed_ms": 0.22
+     "elapsed_ms": 0.09
     },
     {
      "line": 33,
      "kind": "query",
      "status": "pass",
-     "elapsed_ms": 0.11
+     "elapsed_ms": 0.05
     },
     {
      "line": 42,
      "kind": "query",
      "status": "pass",
-     "elapsed_ms": 0.28
+     "elapsed_ms": 0.17
     },
     {
      "line": 52,
      "kind": "query",
      "status": "pass",
-     "elapsed_ms": 0.18
+     "elapsed_ms": 0.06
     },
     {
      "line": 60,
      "kind": "query",
      "status": "pass",
-     "elapsed_ms": 0.06
+     "elapsed_ms": 0.04
     },
     {
      "line": 68,
      "kind": "query",
      "status": "pass",
-     "elapsed_ms": 0.36
+     "elapsed_ms": 0.21
     },
     {
      "line": 76,
      "kind": "query",
      "status": "pass",
-     "elapsed_ms": 2.06
+     "elapsed_ms": 3.92
     },
     {
      "line": 83,
      "kind": "query",
      "status": "pass",
-     "elapsed_ms": 0.19
+     "elapsed_ms": 0.23
     },
     {
      "line": 96,
      "kind": "query",
      "status": "pass",
-     "elapsed_ms": 0.19
+     "elapsed_ms": 0.16
     },
     {
      "line": 102,
      "kind": "query",
      "status": "pass",
-     "elapsed_ms": 0.11
+     "elapsed_ms": 0.08
     },
     {
      "line": 108,
      "kind": "query",
      "status": "pass",
-     "elapsed_ms": 0.17
+     "elapsed_ms": 0.14
     },
     {
      "line": 115,
      "kind": "query",
      "status": "pass",
-     "elapsed_ms": 0.14
+     "elapsed_ms": 0.22
     },
     {
      "line": 122,
      "kind": "query",
      "status": "pass",
-     "elapsed_ms": 0.09
+     "elapsed_ms": 0.05
     },
     {
      "line": 128,
      "kind": "error",
      "status": "pass",
-     "elapsed_ms": 0.07
+     "elapsed_ms": 0.05
     },
     {
      "line": 131,
      "kind": "error",
      "status": "pass",
-     "elapsed_ms": 0.09
+     "elapsed_ms": 0.05
     },
     {
      "line": 134,
      "kind": "error",
      "status": "pass",
-     "elapsed_ms": 0.04
+     "elapsed_ms": 0.03
     },
     {
      "line": 137,
      "kind": "error",
      "status": "pass",
-     "elapsed_ms": 0.04
+     "elapsed_ms": 0.03
     },
     {
      "line": 140,
      "kind": "error",
      "status": "pass",
-     "elapsed_ms": 0.06
+     "elapsed_ms": 0.04
     },
     {
      "line": 143,
      "kind": "error",
      "status": "pass",
-     "elapsed_ms": 0.06
+     "elapsed_ms": 0.04
     },
     {
      "line": 146,
      "kind": "error",
      "status": "pass",
-     "elapsed_ms": 0.06
+     "elapsed_ms": 0.03
     },
     {
      "line": 150,
      "kind": "explain",
      "status": "pass",
-     "elapsed_ms": 0.1
+     "elapsed_ms": 0.08
     }
    ],
    "missing_capabilities": [],
@@ -1762,36 +1764,36 @@
      "line": 9,
      "kind": "query",
      "status": "pass",
-     "elapsed_ms": 1.78
+     "elapsed_ms": 2.8
     },
     {
      "line": 19,
      "kind": "query",
      "status": "pass",
-     "elapsed_ms": 0.1
+     "elapsed_ms": 0.13
     },
     {
      "line": 27,
      "kind": "query",
      "status": "pass",
-     "elapsed_ms": 0.05
+     "elapsed_ms": 0.06
     },
     {
      "line": 33,
      "kind": "query",
      "status": "pass",
-     "elapsed_ms": 0.15
+     "elapsed_ms": 0.12
     },
     {
      "line": 40,
      "kind": "query",
      "status": "pass",
-     "elapsed_ms": 0.14
+     "elapsed_ms": 0.18
     }
    ],
    "missing_capabilities": [],
    "status": "ran",
-   "seconds": 0.008
+   "seconds": 0.009
   },
   {
    "file": "cases/phase2/cte.pqt",
@@ -1810,78 +1812,78 @@
      "line": 9,
      "kind": "query",
      "status": "pass",
-     "elapsed_ms": 0.23
+     "elapsed_ms": 0.35
     },
     {
      "line": 18,
      "kind": "query",
      "status": "pass",
-     "elapsed_ms": 1.91
+     "elapsed_ms": 2.04
     },
     {
      "line": 29,
      "kind": "query",
      "status": "pass",
-     "elapsed_ms": 0.12
+     "elapsed_ms": 0.11
     },
     {
      "line": 38,
      "kind": "query",
      "status": "pass",
-     "elapsed_ms": 0.1
+     "elapsed_ms": 0.14
     },
     {
      "line": 47,
      "kind": "query",
      "status": "pass",
-     "elapsed_ms": 0.08
+     "elapsed_ms": 0.14
     },
     {
      "line": 53,
      "kind": "query",
      "status": "pass",
-     "elapsed_ms": 0.11
+     "elapsed_ms": 0.17
     },
     {
      "line": 61,
      "kind": "query",
      "status": "pass",
-     "elapsed_ms": 0.05
+     "elapsed_ms": 0.1
     },
     {
      "line": 69,
      "kind": "query",
      "status": "pass",
-     "elapsed_ms": 0.08
+     "elapsed_ms": 0.09
     },
     {
      "line": 77,
      "kind": "error",
      "status": "pass",
-     "elapsed_ms": 0.06
+     "elapsed_ms": 0.11
     },
     {
      "line": 80,
      "kind": "error",
      "status": "pass",
-     "elapsed_ms": 0.04
+     "elapsed_ms": 0.1
     },
     {
      "line": 83,
      "kind": "error",
      "status": "pass",
-     "elapsed_ms": 0.02
+     "elapsed_ms": 0.03
     },
     {
      "line": 86,
      "kind": "error",
      "status": "pass",
-     "elapsed_ms": 0.03
+     "elapsed_ms": 0.04
     }
    ],
    "missing_capabilities": [],
    "status": "ran",
-   "seconds": 0.009
+   "seconds": 0.01
   },
   {
    "file": "cases/phase2/functions.pqt",
@@ -1903,37 +1905,37 @@
      "line": 17,
      "kind": "error",
      "status": "pass",
-     "elapsed_ms": 0.13
+     "elapsed_ms": 0.11
     },
     {
      "line": 20,
      "kind": "query",
      "status": "pass",
-     "elapsed_ms": 0.08
+     "elapsed_ms": 0.13
     },
     {
      "line": 26,
      "kind": "query",
      "status": "pass",
-     "elapsed_ms": 0.08
+     "elapsed_ms": 0.06
     },
     {
      "line": 32,
      "kind": "query",
      "status": "pass",
-     "elapsed_ms": 0.05
+     "elapsed_ms": 0.06
     },
     {
      "line": 38,
      "kind": "error",
      "status": "pass",
-     "elapsed_ms": 0.04
+     "elapsed_ms": 0.05
     },
     {
      "line": 41,
      "kind": "error",
      "status": "pass",
-     "elapsed_ms": 0.03
+     "elapsed_ms": 0.04
     },
     {
      "line": 44,
@@ -1957,79 +1959,79 @@
      "line": 53,
      "kind": "error",
      "status": "pass",
-     "elapsed_ms": 0.1
+     "elapsed_ms": 0.13
     },
     {
      "line": 57,
      "kind": "query",
      "status": "pass",
-     "elapsed_ms": 0.08
+     "elapsed_ms": 0.11
     },
     {
      "line": 63,
      "kind": "query",
      "status": "pass",
-     "elapsed_ms": 0.04
+     "elapsed_ms": 0.06
     },
     {
      "line": 69,
      "kind": "query",
      "status": "pass",
-     "elapsed_ms": 0.03
+     "elapsed_ms": 0.05
     },
     {
      "line": 75,
      "kind": "error",
      "status": "pass",
-     "elapsed_ms": 0.03
+     "elapsed_ms": 0.04
     },
     {
      "line": 78,
      "kind": "error",
      "status": "pass",
-     "elapsed_ms": 0.04
+     "elapsed_ms": 0.06
     },
     {
      "line": 81,
      "kind": "error",
      "status": "pass",
-     "elapsed_ms": 0.05
+     "elapsed_ms": 0.03
     },
     {
      "line": 84,
      "kind": "error",
      "status": "pass",
-     "elapsed_ms": 0.01
+     "elapsed_ms": 0.03
     },
     {
      "line": 87,
      "kind": "error",
      "status": "pass",
-     "elapsed_ms": 0.03
+     "elapsed_ms": 0.02
     },
     {
      "line": 90,
      "kind": "error",
      "status": "pass",
-     "elapsed_ms": 0.01
+     "elapsed_ms": 0.04
     },
     {
      "line": 93,
      "kind": "query",
      "status": "pass",
-     "elapsed_ms": 0.06
+     "elapsed_ms": 0.07
     },
     {
      "line": 106,
      "kind": "query",
      "status": "pass",
-     "elapsed_ms": 0.04
+     "elapsed_ms": 0.07
     },
     {
      "line": 112,
      "kind": "query",
      "status": "pass",
-     "elapsed_ms": 0.05
+     "elapsed_ms": 0.06
     },
     {
      "line": 119,
@@ -2041,19 +2043,19 @@
      "line": 123,
      "kind": "query",
      "status": "pass",
-     "elapsed_ms": 0.05
+     "elapsed_ms": 0.06
     },
     {
      "line": 129,
      "kind": "query",
      "status": "pass",
-     "elapsed_ms": 0.05
+     "elapsed_ms": 0.04
     },
     {
      "line": 135,
      "kind": "query",
      "status": "pass",
-     "elapsed_ms": 0.06
+     "elapsed_ms": 0.03
     },
     {
      "line": 141,
@@ -2065,31 +2067,31 @@
      "line": 144,
      "kind": "error",
      "status": "pass",
-     "elapsed_ms": 0.02
+     "elapsed_ms": 0.01
     },
     {
      "line": 147,
      "kind": "error",
      "status": "pass",
-     "elapsed_ms": 0.03
+     "elapsed_ms": 0.01
     },
     {
      "line": 150,
      "kind": "query",
      "status": "pass",
-     "elapsed_ms": 1.55
+     "elapsed_ms": 1.58
     },
     {
      "line": 161,
      "kind": "query",
      "status": "pass",
-     "elapsed_ms": 0.12
+     "elapsed_ms": 0.07
     },
     {
      "line": 171,
      "kind": "query",
      "status": "pass",
-     "elapsed_ms": 0.08
+     "elapsed_ms": 0.06
     },
     {
      "line": 184,
@@ -2107,49 +2109,49 @@
      "line": 203,
      "kind": "query",
      "status": "pass",
-     "elapsed_ms": 0.05
+     "elapsed_ms": 0.03
     },
     {
      "line": 209,
      "kind": "error",
      "status": "pass",
-     "elapsed_ms": 0.04
+     "elapsed_ms": 0.02
     },
     {
      "line": 212,
      "kind": "error",
      "status": "pass",
-     "elapsed_ms": 0.07
+     "elapsed_ms": 0.02
     },
     {
      "line": 215,
      "kind": "query",
      "status": "pass",
-     "elapsed_ms": 0.17
+     "elapsed_ms": 0.08
     },
     {
      "line": 224,
      "kind": "query",
      "status": "pass",
-     "elapsed_ms": 0.22
+     "elapsed_ms": 0.04
     },
     {
      "line": 233,
      "kind": "query",
      "status": "pass",
-     "elapsed_ms": 0.07
+     "elapsed_ms": 0.03
     },
     {
      "line": 240,
      "kind": "query",
      "status": "pass",
-     "elapsed_ms": 0.04
+     "elapsed_ms": 0.03
     },
     {
      "line": 248,
      "kind": "query",
      "status": "pass",
-     "elapsed_ms": 0.05
+     "elapsed_ms": 0.04
     },
     {
      "line": 254,
@@ -2161,72 +2163,72 @@
      "line": 258,
      "kind": "query",
      "status": "pass",
-     "elapsed_ms": 0.04
+     "elapsed_ms": 0.03
     },
     {
      "line": 267,
      "kind": "query",
      "status": "pass",
-     "elapsed_ms": 0.11
+     "elapsed_ms": 0.02
     },
     {
      "line": 275,
      "kind": "query",
      "status": "pass",
-     "elapsed_ms": 0.07
+     "elapsed_ms": 0.03
     },
     {
      "line": 283,
      "kind": "query",
      "status": "pass",
-     "elapsed_ms": 0.16
+     "elapsed_ms": 0.03
     },
     {
      "line": 290,
      "kind": "query",
      "status": "pass",
-     "elapsed_ms": 0.1
+     "elapsed_ms": 0.03
     },
     {
      "line": 298,
      "kind": "query",
      "status": "pass",
-     "elapsed_ms": 0.09
+     "elapsed_ms": 0.04
     },
     {
      "line": 304,
      "kind": "error",
      "status": "pass",
-     "elapsed_ms": 0.03
+     "elapsed_ms": 0.02
     },
     {
      "line": 307,
      "kind": "error",
      "status": "pass",
-     "elapsed_ms": 0.06
+     "elapsed_ms": 0.01
     },
     {
      "line": 311,
      "kind": "query",
      "status": "pass",
-     "elapsed_ms": 0.06
+     "elapsed_ms": 0.05
     },
     {
      "line": 317,
      "kind": "query",
      "status": "pass",
-     "elapsed_ms": 0.05
+     "elapsed_ms": 0.04
     },
     {
      "line": 323,
      "kind": "error",
      "status": "pass",
-     "elapsed_ms": 0.07
+     "elapsed_ms": 0.02
     }
    ],
    "missing_capabilities": [],
    "status": "ran",
-   "seconds": 0.011
+   "seconds": 0.013
   },
   {
    "file": "cases/phase2/groupby.pqt",
@@ -2242,85 +2244,85 @@
      "line": 9,
      "kind": "query",
      "status": "pass",
-     "elapsed_ms": 1.96
+     "elapsed_ms": 1.75
     },
     {
      "line": 20,
      "kind": "query",
      "status": "pass",
-     "elapsed_ms": 0.13
+     "elapsed_ms": 0.09
     },
     {
      "line": 31,
      "kind": "query",
      "status": "pass",
-     "elapsed_ms": 0.06
+     "elapsed_ms": 0.13
     },
     {
      "line": 43,
      "kind": "query",
      "status": "pass",
-     "elapsed_ms": 0.05
+     "elapsed_ms": 0.08
     },
     {
      "line": 51,
      "kind": "query",
      "status": "pass",
-     "elapsed_ms": 0.04
+     "elapsed_ms": 0.07
     },
     {
      "line": 59,
      "kind": "query",
      "status": "pass",
-     "elapsed_ms": 0.04
+     "elapsed_ms": 0.05
     },
     {
      "line": 68,
      "kind": "query",
      "status": "pass",
-     "elapsed_ms": 0.03
+     "elapsed_ms": 0.08
     },
     {
      "line": 77,
      "kind": "query",
      "status": "pass",
-     "elapsed_ms": 0.04
+     "elapsed_ms": 0.07
     },
     {
      "line": 87,
      "kind": "query",
      "status": "pass",
-     "elapsed_ms": 0.03
+     "elapsed_ms": 0.05
     },
     {
      "line": 98,
      "kind": "query",
      "status": "pass",
-     "elapsed_ms": 0.04
+     "elapsed_ms": 0.09
     },
     {
      "line": 108,
      "kind": "query",
      "status": "pass",
-     "elapsed_ms": 0.03
+     "elapsed_ms": 0.06
     },
     {
      "line": 114,
      "kind": "query",
      "status": "pass",
-     "elapsed_ms": 0.03
+     "elapsed_ms": 0.05
     },
     {
      "line": 120,
      "kind": "query",
      "status": "pass",
-     "elapsed_ms": 0.03
+     "elapsed_ms": 0.1
     },
     {
      "line": 126,
      "kind": "query",
      "status": "pass",
-     "elapsed_ms": 0.03
+     "elapsed_ms": 0.05
     },
     {
      "line": 136,
@@ -2338,13 +2340,13 @@
      "line": 155,
      "kind": "query",
      "status": "pass",
-     "elapsed_ms": 0.04
+     "elapsed_ms": 0.07
     },
     {
      "line": 161,
      "kind": "query",
      "status": "pass",
-     "elapsed_ms": 0.07
+     "elapsed_ms": 0.06
     },
     {
      "line": 169,
@@ -2356,13 +2358,13 @@
      "line": 176,
      "kind": "error",
      "status": "pass",
-     "elapsed_ms": 0.04
+     "elapsed_ms": 0.05
     },
     {
      "line": 180,
      "kind": "error",
      "status": "pass",
-     "elapsed_ms": 0.03
+     "elapsed_ms": 0.02
     },
     {
      "line": 183,
@@ -2374,13 +2376,13 @@
      "line": 186,
      "kind": "error",
      "status": "pass",
-     "elapsed_ms": 0.02
+     "elapsed_ms": 0.03
     },
     {
      "line": 189,
      "kind": "error",
      "status": "pass",
-     "elapsed_ms": 0.02
+     "elapsed_ms": 0.03
     },
     {
      "line": 192,
@@ -2398,31 +2400,31 @@
      "line": 198,
      "kind": "query",
      "status": "pass",
-     "elapsed_ms": 0.03
+     "elapsed_ms": 0.04
     },
     {
      "line": 209,
      "kind": "query",
      "status": "pass",
-     "elapsed_ms": 0.08
+     "elapsed_ms": 0.1
     },
     {
      "line": 219,
      "kind": "query",
      "status": "pass",
-     "elapsed_ms": 0.08
+     "elapsed_ms": 0.14
     },
     {
      "line": 242,
      "kind": "query",
      "status": "pass",
-     "elapsed_ms": 0.09
+     "elapsed_ms": 0.12
     },
     {
      "line": 257,
      "kind": "query",
      "status": "pass",
-     "elapsed_ms": 0.14
+     "elapsed_ms": 0.15
     },
     {
      "line": 269,
@@ -2440,13 +2442,13 @@
      "line": 282,
      "kind": "query",
      "status": "pass",
-     "elapsed_ms": 0.12
+     "elapsed_ms": 0.07
     },
     {
      "line": 296,
      "kind": "query",
      "status": "pass",
-     "elapsed_ms": 0.12
+     "elapsed_ms": 0.06
     }
    ],
    "missing_capabilities": [],
@@ -2469,19 +2471,19 @@
      "line": 13,
      "kind": "query",
      "status": "pass",
-     "elapsed_ms": 0.25
+     "elapsed_ms": 0.16
     },
     {
      "line": 26,
      "kind": "query",
      "status": "pass",
-     "elapsed_ms": 0.17
+     "elapsed_ms": 0.08
     },
     {
      "line": 37,
      "kind": "query",
      "status": "pass",
-     "elapsed_ms": 0.07
+     "elapsed_ms": 0.11
     },
     {
      "line": 52,
@@ -2493,109 +2495,109 @@
      "line": 67,
      "kind": "query",
      "status": "pass",
-     "elapsed_ms": 0.22
+     "elapsed_ms": 0.08
     },
     {
      "line": 74,
      "kind": "query",
      "status": "pass",
-     "elapsed_ms": 0.2
+     "elapsed_ms": 0.05
     },
     {
      "line": 86,
      "kind": "query",
      "status": "pass",
-     "elapsed_ms": 0.06
+     "elapsed_ms": 0.04
     },
     {
      "line": 97,
      "kind": "query",
      "status": "pass",
-     "elapsed_ms": 0.09
+     "elapsed_ms": 0.06
     },
     {
      "line": 110,
      "kind": "query",
      "status": "pass",
-     "elapsed_ms": 2.02
+     "elapsed_ms": 1.6
     },
     {
      "line": 116,
      "kind": "query",
      "status": "pass",
-     "elapsed_ms": 0.15
+     "elapsed_ms": 0.09
     },
     {
      "line": 124,
      "kind": "query",
      "status": "pass",
-     "elapsed_ms": 0.09
+     "elapsed_ms": 0.12
     },
     {
      "line": 131,
      "kind": "query",
      "status": "pass",
-     "elapsed_ms": 0.09
+     "elapsed_ms": 0.19
     },
     {
      "line": 142,
      "kind": "query",
      "status": "pass",
-     "elapsed_ms": 0.24
+     "elapsed_ms": 0.15
     },
     {
      "line": 152,
      "kind": "query",
      "status": "pass",
-     "elapsed_ms": 0.23
+     "elapsed_ms": 0.28
     },
     {
      "line": 165,
      "kind": "query",
      "status": "pass",
-     "elapsed_ms": 0.19
+     "elapsed_ms": 0.15
     },
     {
      "line": 174,
      "kind": "query",
      "status": "pass",
-     "elapsed_ms": 0.1
+     "elapsed_ms": 0.11
     },
     {
      "line": 180,
      "kind": "query",
      "status": "pass",
-     "elapsed_ms": 0.17
+     "elapsed_ms": 0.16
     },
     {
      "line": 191,
      "kind": "query",
      "status": "pass",
-     "elapsed_ms": 0.11
+     "elapsed_ms": 0.07
     },
     {
      "line": 212,
      "kind": "query",
      "status": "pass",
-     "elapsed_ms": 0.07
+     "elapsed_ms": 0.04
     },
     {
      "line": 218,
      "kind": "query",
      "status": "pass",
-     "elapsed_ms": 0.09
+     "elapsed_ms": 0.04
     },
     {
      "line": 226,
      "kind": "query",
      "status": "pass",
-     "elapsed_ms": 0.07
+     "elapsed_ms": 0.03
     },
     {
      "line": 232,
      "kind": "query",
      "status": "pass",
-     "elapsed_ms": 0.11
+     "elapsed_ms": 0.08
     },
     {
      "line": 239,
@@ -2607,42 +2609,42 @@
      "line": 242,
      "kind": "error",
      "status": "pass",
-     "elapsed_ms": 0.09
+     "elapsed_ms": 0.07
     },
     {
      "line": 245,
      "kind": "error",
      "status": "pass",
-     "elapsed_ms": 0.06
+     "elapsed_ms": 0.02
     },
     {
      "line": 248,
      "kind": "error",
      "status": "pass",
-     "elapsed_ms": 0.04
+     "elapsed_ms": 0.02
     },
     {
      "line": 251,
      "kind": "error",
      "status": "pass",
-     "elapsed_ms": 0.03
+     "elapsed_ms": 0.01
     },
     {
      "line": 254,
      "kind": "error",
      "status": "pass",
-     "elapsed_ms": 0.02
+     "elapsed_ms": 0.04
     },
     {
      "line": 257,
      "kind": "error",
      "status": "pass",
-     "elapsed_ms": 0.01
+     "elapsed_ms": 0.04
     }
    ],
    "missing_capabilities": [],
    "status": "ran",
-   "seconds": 0.013
+   "seconds": 0.014
   },
   {
    "file": "cases/phase2/parser.pqt",
@@ -2658,37 +2660,37 @@
      "line": 8,
      "kind": "query",
      "status": "pass",
-     "elapsed_ms": 0.2
+     "elapsed_ms": 0.16
     },
     {
      "line": 25,
      "kind": "query",
      "status": "pass",
-     "elapsed_ms": 0.08
+     "elapsed_ms": 0.04
     },
     {
      "line": 31,
      "kind": "error",
      "status": "pass",
-     "elapsed_ms": 0.09
+     "elapsed_ms": 0.05
     },
     {
      "line": 35,
      "kind": "query",
      "status": "pass",
-     "elapsed_ms": 0.09
+     "elapsed_ms": 0.05
     },
     {
      "line": 42,
      "kind": "query",
      "status": "pass",
-     "elapsed_ms": 0.04
+     "elapsed_ms": 0.03
     },
     {
      "line": 48,
      "kind": "error",
      "status": "pass",
-     "elapsed_ms": 0.05
+     "elapsed_ms": 0.02
     },
     {
      "line": 51,
@@ -2700,7 +2702,7 @@
      "line": 54,
      "kind": "error",
      "status": "pass",
-     "elapsed_ms": 0.01
+     "elapsed_ms": 0.03
     },
     {
      "line": 57,
@@ -2718,7 +2720,7 @@
      "line": 63,
      "kind": "error",
      "status": "pass",
-     "elapsed_ms": 0.01
+     "elapsed_ms": 0.02
     },
     {
      "line": 66,
@@ -2730,37 +2732,37 @@
      "line": 69,
      "kind": "error",
      "status": "pass",
-     "elapsed_ms": 0.02
+     "elapsed_ms": 0.01
     },
     {
      "line": 72,
      "kind": "error",
      "status": "pass",
-     "elapsed_ms": 0.07
+     "elapsed_ms": 0.08
     },
     {
      "line": 75,
      "kind": "error",
      "status": "pass",
-     "elapsed_ms": 0.02
+     "elapsed_ms": 0.04
     },
     {
      "line": 78,
      "kind": "error",
      "status": "pass",
-     "elapsed_ms": 0.1
+     "elapsed_ms": 0.02
     },
     {
      "line": 81,
      "kind": "error",
      "status": "pass",
-     "elapsed_ms": 0.05
+     "elapsed_ms": 0.02
     },
     {
      "line": 84,
      "kind": "error",
      "status": "pass",
-     "elapsed_ms": 0.05
+     "elapsed_ms": 0.02
     },
     {
      "line": 87,
@@ -2772,7 +2774,7 @@
      "line": 90,
      "kind": "error",
      "status": "pass",
-     "elapsed_ms": 0.05
+     "elapsed_ms": 0.01
     },
     {
      "line": 93,
@@ -2784,42 +2786,42 @@
      "line": 96,
      "kind": "error",
      "status": "pass",
-     "elapsed_ms": 0.07
+     "elapsed_ms": 0.01
     },
     {
      "line": 99,
      "kind": "error",
      "status": "pass",
-     "elapsed_ms": 0.13
+     "elapsed_ms": 0.03
     },
     {
      "line": 103,
      "kind": "request",
      "status": "pass",
-     "elapsed_ms": 0.06
+     "elapsed_ms": 0.03
     },
     {
      "line": 109,
      "kind": "query",
      "status": "pass",
-     "elapsed_ms": 0.08
+     "elapsed_ms": 0.06
     },
     {
      "line": 114,
      "kind": "request",
      "status": "pass",
-     "elapsed_ms": 0.04
+     "elapsed_ms": 0.03
     },
     {
      "line": 119,
      "kind": "request",
      "status": "pass",
-     "elapsed_ms": 0.04
+     "elapsed_ms": 0.06
     }
    ],
    "missing_capabilities": [],
    "status": "ran",
-   "seconds": 0.008
+   "seconds": 0.007
   },
   {
    "file": "cases/phase2/subqueries.pqt",
@@ -2838,19 +2840,19 @@
      "line": 11,
      "kind": "query",
      "status": "pass",
-     "elapsed_ms": 1.85
+     "elapsed_ms": 1.98
     },
     {
      "line": 19,
      "kind": "query",
      "status": "pass",
-     "elapsed_ms": 0.13
+     "elapsed_ms": 0.11
     },
     {
      "line": 25,
      "kind": "query",
      "status": "pass",
-     "elapsed_ms": 0.05
+     "elapsed_ms": 0.06
     },
     {
      "line": 31,
@@ -2862,13 +2864,13 @@
      "line": 34,
      "kind": "error",
      "status": "pass",
-     "elapsed_ms": 0.06
+     "elapsed_ms": 0.02
     },
     {
      "line": 37,
      "kind": "query",
      "status": "pass",
-     "elapsed_ms": 0.09
+     "elapsed_ms": 0.06
     },
     {
      "line": 50,
@@ -2886,79 +2888,79 @@
      "line": 65,
      "kind": "query",
      "status": "pass",
-     "elapsed_ms": 0.03
+     "elapsed_ms": 0.04
     },
     {
      "line": 70,
      "kind": "query",
      "status": "pass",
-     "elapsed_ms": 0.1
+     "elapsed_ms": 0.06
     },
     {
      "line": 76,
      "kind": "error",
      "status": "pass",
-     "elapsed_ms": 0.06
+     "elapsed_ms": 0.02
     },
     {
      "line": 79,
      "kind": "error",
      "status": "pass",
-     "elapsed_ms": 0.08
+     "elapsed_ms": 0.02
     },
     {
      "line": 83,
      "kind": "query",
      "status": "pass",
-     "elapsed_ms": 0.09
+     "elapsed_ms": 0.07
     },
     {
      "line": 89,
      "kind": "query",
      "status": "pass",
-     "elapsed_ms": 0.08
+     "elapsed_ms": 0.05
     },
     {
      "line": 97,
      "kind": "query",
      "status": "pass",
-     "elapsed_ms": 0.08
+     "elapsed_ms": 0.06
     },
     {
      "line": 104,
      "kind": "query",
      "status": "pass",
-     "elapsed_ms": 0.09
+     "elapsed_ms": 0.16
     },
     {
      "line": 113,
      "kind": "query",
      "status": "pass",
-     "elapsed_ms": 0.11
+     "elapsed_ms": 0.15
     },
     {
      "line": 119,
      "kind": "query",
      "status": "pass",
-     "elapsed_ms": 0.05
+     "elapsed_ms": 0.07
     },
     {
      "line": 128,
      "kind": "query",
      "status": "pass",
-     "elapsed_ms": 0.11
+     "elapsed_ms": 0.12
     },
     {
      "line": 135,
      "kind": "query",
      "status": "pass",
-     "elapsed_ms": 0.03
+     "elapsed_ms": 0.05
     },
     {
      "line": 141,
      "kind": "error",
      "status": "pass",
-     "elapsed_ms": 0.02
+     "elapsed_ms": 0.04
     },
     {
      "line": 144,
@@ -2970,12 +2972,12 @@
      "line": 148,
      "kind": "query",
      "status": "pass",
-     "elapsed_ms": 0.14
+     "elapsed_ms": 0.08
     }
    ],
    "missing_capabilities": [],
    "status": "ran",
-   "seconds": 0.012
+   "seconds": 0.014
   },
   {
    "file": "cases/changes/decimal38.pqt",
@@ -2996,49 +2998,49 @@
      "line": 11,
      "kind": "request",
      "status": "pass",
-     "elapsed_ms": 0.04
+     "elapsed_ms": 0.06
     },
     {
      "line": 16,
      "kind": "query",
      "status": "pass",
-     "elapsed_ms": 1.32
+     "elapsed_ms": 0.16
     },
     {
      "line": 22,
      "kind": "query",
      "status": "pass",
-     "elapsed_ms": 0.22
+     "elapsed_ms": 0.09
     },
     {
      "line": 29,
      "kind": "query",
      "status": "pass",
-     "elapsed_ms": 0.19
+     "elapsed_ms": 0.07
     },
     {
      "line": 35,
      "kind": "query",
      "status": "pass",
-     "elapsed_ms": 0.19
+     "elapsed_ms": 0.35
     },
     {
      "line": 41,
      "kind": "error",
      "status": "pass",
-     "elapsed_ms": 0.11
+     "elapsed_ms": 0.3
     },
     {
      "line": 44,
      "kind": "error",
      "status": "pass",
-     "elapsed_ms": 0.06
+     "elapsed_ms": 0.13
     },
     {
      "line": 48,
      "kind": "query",
      "status": "pass",
-     "elapsed_ms": 0.31
+     "elapsed_ms": 0.07
     },
     {
      "line": 54,
@@ -3050,49 +3052,49 @@
      "line": 57,
      "kind": "query",
      "status": "pass",
-     "elapsed_ms": 0.1
+     "elapsed_ms": 0.05
     },
     {
      "line": 63,
      "kind": "error",
      "status": "pass",
-     "elapsed_ms": 0.13
+     "elapsed_ms": 0.08
     },
     {
      "line": 66,
      "kind": "query",
      "status": "pass",
-     "elapsed_ms": 0.07
+     "elapsed_ms": 0.09
     },
     {
      "line": 72,
      "kind": "query",
      "status": "pass",
-     "elapsed_ms": 0.05
+     "elapsed_ms": 0.08
     },
     {
      "line": 78,
      "kind": "query",
      "status": "pass",
-     "elapsed_ms": 0.04
+     "elapsed_ms": 0.05
     },
     {
      "line": 84,
      "kind": "error",
      "status": "pass",
-     "elapsed_ms": 0.06
+     "elapsed_ms": 0.08
     },
     {
      "line": 87,
      "kind": "query",
      "status": "pass",
-     "elapsed_ms": 0.09
+     "elapsed_ms": 0.12
     },
     {
      "line": 93,
      "kind": "error",
      "status": "pass",
-     "elapsed_ms": 0.08
+     "elapsed_ms": 0.04
     },
     {
      "line": 96,
@@ -3104,121 +3106,121 @@
      "line": 99,
      "kind": "query",
      "status": "pass",
-     "elapsed_ms": 0.05
+     "elapsed_ms": 0.07
     },
     {
      "line": 105,
      "kind": "query",
      "status": "pass",
-     "elapsed_ms": 0.16
+     "elapsed_ms": 0.14
     },
     {
      "line": 114,
      "kind": "error",
      "status": "pass",
-     "elapsed_ms": 0.09
+     "elapsed_ms": 0.22
     },
     {
      "line": 118,
      "kind": "query",
      "status": "pass",
-     "elapsed_ms": 0.06
+     "elapsed_ms": 0.11
     },
     {
      "line": 124,
      "kind": "query",
      "status": "pass",
-     "elapsed_ms": 0.04
+     "elapsed_ms": 0.14
     },
     {
      "line": 133,
      "kind": "query",
      "status": "pass",
-     "elapsed_ms": 0.04
+     "elapsed_ms": 0.07
     },
     {
      "line": 140,
      "kind": "query",
      "status": "pass",
-     "elapsed_ms": 0.22
+     "elapsed_ms": 0.21
     },
     {
      "line": 147,
      "kind": "query",
      "status": "pass",
-     "elapsed_ms": 0.09
+     "elapsed_ms": 0.1
     },
     {
      "line": 153,
      "kind": "error",
      "status": "pass",
-     "elapsed_ms": 0.15
+     "elapsed_ms": 0.06
     },
     {
      "line": 156,
      "kind": "query",
      "status": "pass",
-     "elapsed_ms": 0.07
+     "elapsed_ms": 0.08
     },
     {
      "line": 162,
      "kind": "error",
      "status": "pass",
-     "elapsed_ms": 0.1
+     "elapsed_ms": 0.15
     },
     {
      "line": 166,
      "kind": "query",
      "status": "pass",
-     "elapsed_ms": 0.19
+     "elapsed_ms": 0.17
     },
     {
      "line": 172,
      "kind": "query",
      "status": "pass",
-     "elapsed_ms": 0.19
+     "elapsed_ms": 0.08
     },
     {
      "line": 179,
      "kind": "query",
      "status": "pass",
-     "elapsed_ms": 1.65
+     "elapsed_ms": 1.79
     },
     {
      "line": 188,
      "kind": "error",
      "status": "pass",
-     "elapsed_ms": 0.14
+     "elapsed_ms": 0.16
     },
     {
      "line": 191,
      "kind": "query",
      "status": "pass",
-     "elapsed_ms": 0.08
+     "elapsed_ms": 0.1
     },
     {
      "line": 197,
      "kind": "query",
      "status": "pass",
-     "elapsed_ms": 0.19
+     "elapsed_ms": 0.08
     },
     {
      "line": 203,
      "kind": "query",
      "status": "pass",
-     "elapsed_ms": 0.07
+     "elapsed_ms": 0.06
     },
     {
      "line": 214,
      "kind": "statement",
      "status": "pass",
-     "elapsed_ms": 0.07
+     "elapsed_ms": 0.04
     },
     {
      "line": 217,
      "kind": "query",
      "status": "pass",
-     "elapsed_ms": 0.06
+     "elapsed_ms": 0.09
     },
     {
      "line": 225,
@@ -3230,7 +3232,7 @@
      "line": 234,
      "kind": "save",
      "status": "pass",
-     "elapsed_ms": 3.84
+     "elapsed_ms": 4.08
     },
     {
      "line": 235,
@@ -3241,7 +3243,7 @@
      "line": 236,
      "kind": "save",
      "status": "pass",
-     "elapsed_ms": 3.16
+     "elapsed_ms": 3.36
     },
     {
      "line": 237,
@@ -3252,31 +3254,31 @@
      "line": 240,
      "kind": "open",
      "status": "pass",
-     "elapsed_ms": 2.68
+     "elapsed_ms": 2.53
     },
     {
      "line": 242,
      "kind": "request",
      "status": "pass",
-     "elapsed_ms": 0.22
+     "elapsed_ms": 0.02
     },
     {
      "line": 247,
      "kind": "open",
      "status": "pass",
-     "elapsed_ms": 0.19
+     "elapsed_ms": 0.07
     },
     {
      "line": 249,
      "kind": "query",
      "status": "pass",
-     "elapsed_ms": 0.25
+     "elapsed_ms": 0.35
     },
     {
      "line": 260,
      "kind": "request",
      "status": "pass",
-     "elapsed_ms": 0.07
+     "elapsed_ms": 0.6
     },
     {
      "line": 265,
@@ -3300,7 +3302,7 @@
      "line": 279,
      "kind": "save",
      "status": "pass",
-     "elapsed_ms": 2.38
+     "elapsed_ms": 2.28
     },
     {
      "line": 280,
@@ -3311,7 +3313,7 @@
      "line": 287,
      "kind": "save",
      "status": "pass",
-     "elapsed_ms": 3.1
+     "elapsed_ms": 3.26
     },
     {
      "line": 288,
@@ -3322,13 +3324,13 @@
      "line": 291,
      "kind": "open",
      "status": "pass",
-     "elapsed_ms": 0.13
+     "elapsed_ms": 0.14
     },
     {
      "line": 292,
      "kind": "open",
      "status": "pass",
-     "elapsed_ms": 0.09
+     "elapsed_ms": 0.08
     },
     {
      "line": 294,
@@ -3340,25 +3342,25 @@
      "line": 299,
      "kind": "query",
      "status": "pass",
-     "elapsed_ms": 1.71
+     "elapsed_ms": 1.57
     },
     {
      "line": 305,
      "kind": "query",
      "status": "pass",
-     "elapsed_ms": 0.23
+     "elapsed_ms": 0.22
     },
     {
      "line": 311,
      "kind": "query",
      "status": "pass",
-     "elapsed_ms": 0.13
+     "elapsed_ms": 0.15
     },
     {
      "line": 320,
      "kind": "corrupt",
      "status": "pass",
-     "elapsed_ms": 0.1
+     "elapsed_ms": 0.11
     },
     {
      "line": 321,
@@ -3382,30 +3384,30 @@
      "line": 330,
      "kind": "query",
      "status": "pass",
-     "elapsed_ms": 0.06
+     "elapsed_ms": 0.09
     },
     {
      "line": 337,
      "kind": "data",
      "status": "pass",
-     "elapsed_ms": 0.03
+     "elapsed_ms": 0.07
     },
     {
      "line": 342,
      "kind": "data",
      "status": "pass",
-     "elapsed_ms": 0.02
+     "elapsed_ms": 0.03
     },
     {
      "line": 347,
      "kind": "data",
      "status": "pass",
-     "elapsed_ms": 0.01
+     "elapsed_ms": 0.03
     }
    ],
    "missing_capabilities": [],
    "status": "ran",
-   "seconds": 0.036
+   "seconds": 0.035
   },
   {
    "file": "cases/phase3/indexes.pqt",
@@ -3424,37 +3426,37 @@
      "line": 9,
      "kind": "statement",
      "status": "pass",
-     "elapsed_ms": 0.23
+     "elapsed_ms": 0.18
     },
     {
      "line": 12,
      "kind": "statement",
      "status": "pass",
-     "elapsed_ms": 0.24
+     "elapsed_ms": 0.23
     },
     {
      "line": 15,
      "kind": "statement",
      "status": "pass",
-     "elapsed_ms": 0.22
+     "elapsed_ms": 0.21
     },
     {
      "line": 18,
      "kind": "statement",
      "status": "pass",
-     "elapsed_ms": 0.06
+     "elapsed_ms": 0.04
     },
     {
      "line": 21,
      "kind": "statement",
      "status": "pass",
-     "elapsed_ms": 0.1
+     "elapsed_ms": 0.04
     },
     {
      "line": 24,
      "kind": "statement",
      "status": "pass",
-     "elapsed_ms": 0.14
+     "elapsed_ms": 0.08
     },
     {
      "line": 27,
@@ -3472,73 +3474,73 @@
      "line": 33,
      "kind": "statement",
      "status": "pass",
-     "elapsed_ms": 0.08
+     "elapsed_ms": 0.04
     },
     {
      "line": 36,
      "kind": "statement",
      "status": "pass",
-     "elapsed_ms": 0.06
+     "elapsed_ms": 0.02
     },
     {
      "line": 39,
      "kind": "request",
      "status": "pass",
-     "elapsed_ms": 0.03
+     "elapsed_ms": 0.04
     },
     {
      "line": 45,
      "kind": "query",
      "status": "pass",
-     "elapsed_ms": 0.16
+     "elapsed_ms": 0.14
     },
     {
      "line": 51,
      "kind": "query",
      "status": "pass",
-     "elapsed_ms": 0.08
+     "elapsed_ms": 0.07
     },
     {
      "line": 59,
      "kind": "query",
      "status": "pass",
-     "elapsed_ms": 0.07
+     "elapsed_ms": 0.03
     },
     {
      "line": 64,
      "kind": "query",
      "status": "pass",
-     "elapsed_ms": 0.03
+     "elapsed_ms": 0.02
     },
     {
      "line": 73,
      "kind": "query",
      "status": "pass",
-     "elapsed_ms": 0.07
+     "elapsed_ms": 0.03
     },
     {
      "line": 86,
      "kind": "query",
      "status": "pass",
-     "elapsed_ms": 0.03
+     "elapsed_ms": 0.04
     },
     {
      "line": 94,
      "kind": "query",
      "status": "pass",
-     "elapsed_ms": 0.06
+     "elapsed_ms": 0.04
     },
     {
      "line": 103,
      "kind": "query",
      "status": "pass",
-     "elapsed_ms": 0.06
+     "elapsed_ms": 0.04
     },
     {
      "line": 109,
      "kind": "query",
      "status": "pass",
-     "elapsed_ms": 1.68
+     "elapsed_ms": 1.59
     },
     {
      "line": 115,
@@ -3550,13 +3552,13 @@
      "line": 123,
      "kind": "query",
      "status": "pass",
-     "elapsed_ms": 0.08
+     "elapsed_ms": 0.13
     },
     {
      "line": 168,
      "kind": "query",
      "status": "pass",
-     "elapsed_ms": 0.15
+     "elapsed_ms": 0.16
     },
     {
      "line": 179,
@@ -3568,13 +3570,13 @@
      "line": 187,
      "kind": "query",
      "status": "pass",
-     "elapsed_ms": 0.09
+     "elapsed_ms": 0.07
     },
     {
      "line": 196,
      "kind": "explain",
      "status": "pass",
-     "elapsed_ms": 0.04
+     "elapsed_ms": 0.03
     },
     {
      "line": 201,
@@ -3598,13 +3600,13 @@
      "line": 218,
      "kind": "statement",
      "status": "pass",
-     "elapsed_ms": 0.02
+     "elapsed_ms": 0.01
     },
     {
      "line": 221,
      "kind": "statement",
      "status": "pass",
-     "elapsed_ms": 0.02
+     "elapsed_ms": 0.01
     },
     {
      "line": 224,
@@ -3628,25 +3630,25 @@
      "line": 239,
      "kind": "save",
      "status": "pass",
-     "elapsed_ms": 2.2
+     "elapsed_ms": 2.23
     },
     {
      "line": 240,
      "kind": "open",
      "status": "pass",
-     "elapsed_ms": 1.6
+     "elapsed_ms": 1.61
     },
     {
      "line": 242,
      "kind": "request",
      "status": "pass",
-     "elapsed_ms": 0.05
+     "elapsed_ms": 0.07
     },
     {
      "line": 248,
      "kind": "open",
      "status": "pass",
-     "elapsed_ms": 0.09
+     "elapsed_ms": 0.1
     },
     {
      "line": 250,
@@ -3658,7 +3660,7 @@
      "line": 255,
      "kind": "statement",
      "status": "pass",
-     "elapsed_ms": 0.03
+     "elapsed_ms": 0.02
     },
     {
      "line": 258,
@@ -3670,7 +3672,7 @@
      "line": 261,
      "kind": "open",
      "status": "pass",
-     "elapsed_ms": 0.05
+     "elapsed_ms": 0.04
     },
     {
      "line": 263,
@@ -3682,13 +3684,13 @@
      "line": 268,
      "kind": "query",
      "status": "pass",
-     "elapsed_ms": 0.05
+     "elapsed_ms": 0.07
     },
     {
      "line": 276,
      "kind": "explain",
      "status": "pass",
-     "elapsed_ms": 0.03
+     "elapsed_ms": 0.04
     },
     {
      "line": 282,
@@ -3705,7 +3707,7 @@
    ],
    "missing_capabilities": [],
    "status": "ran",
-   "seconds": 0.017
+   "seconds": 0.016
   },
   {
    "file": "cases/phase3/stats_layout_planning.pqt",
@@ -3722,7 +3724,7 @@
      "line": 14,
      "kind": "request",
      "status": "pass",
-     "elapsed_ms": 0.08
+     "elapsed_ms": 0.06
     },
     {
      "line": 19,
@@ -3734,7 +3736,7 @@
      "line": 24,
      "kind": "request",
      "status": "pass",
-     "elapsed_ms": 0.08
+     "elapsed_ms": 0.14
     },
     {
      "line": 34,
@@ -3746,55 +3748,55 @@
      "line": 40,
      "kind": "query",
      "status": "pass",
-     "elapsed_ms": 1.57
+     "elapsed_ms": 1.86
     },
     {
      "line": 50,
      "kind": "query",
      "status": "pass",
-     "elapsed_ms": 0.09
+     "elapsed_ms": 0.1
     },
     {
      "line": 60,
      "kind": "query",
      "status": "pass",
-     "elapsed_ms": 0.11
+     "elapsed_ms": 0.08
     },
     {
      "line": 69,
      "kind": "query",
      "status": "pass",
-     "elapsed_ms": 0.28
+     "elapsed_ms": 0.48
     },
     {
      "line": 79,
      "kind": "query",
      "status": "pass",
-     "elapsed_ms": 0.11
+     "elapsed_ms": 0.12
     },
     {
      "line": 89,
      "kind": "request",
      "status": "pass",
-     "elapsed_ms": 0.03
+     "elapsed_ms": 0.04
     },
     {
      "line": 95,
      "kind": "request",
      "status": "pass",
-     "elapsed_ms": 2.38
+     "elapsed_ms": 1.95
     },
     {
      "line": 100,
      "kind": "query",
      "status": "pass",
-     "elapsed_ms": 0.18
+     "elapsed_ms": 0.14
     },
     {
      "line": 126,
      "kind": "explain",
      "status": "pass",
-     "elapsed_ms": 0.06
+     "elapsed_ms": 0.05
     },
     {
      "line": 131,
@@ -3812,12 +3814,12 @@
      "line": 142,
      "kind": "query",
      "status": "pass",
-     "elapsed_ms": 0.09
+     "elapsed_ms": 0.08
     }
    ],
    "missing_capabilities": [],
    "status": "ran",
-   "seconds": 0.03
+   "seconds": 0.029
   },
   {
    "file": "cases/phase3/storage_golden.pqt",
@@ -3833,13 +3835,13 @@
      "line": 5,
      "kind": "open",
      "status": "pass",
-     "elapsed_ms": 6.28
+     "elapsed_ms": 5.64
     },
     {
      "line": 6,
      "kind": "open",
      "status": "pass",
-     "elapsed_ms": 0.74
+     "elapsed_ms": 0.66
     },
     {
      "line": 7,
@@ -3851,31 +3853,31 @@
      "line": 8,
      "kind": "open",
      "status": "pass",
-     "elapsed_ms": 0.09
+     "elapsed_ms": 0.11
     },
     {
      "line": 10,
      "kind": "request",
      "status": "pass",
-     "elapsed_ms": 0.03
+     "elapsed_ms": 0.04
     },
     {
      "line": 15,
      "kind": "query",
      "status": "pass",
-     "elapsed_ms": 1.72
+     "elapsed_ms": 2.17
     },
     {
      "line": 26,
      "kind": "query",
      "status": "pass",
-     "elapsed_ms": 1.5
+     "elapsed_ms": 1.49
     },
     {
      "line": 37,
      "kind": "query",
      "status": "pass",
-     "elapsed_ms": 0.32
+     "elapsed_ms": 0.29
     },
     {
      "line": 48,
@@ -3887,37 +3889,37 @@
      "line": 59,
      "kind": "query",
      "status": "pass",
-     "elapsed_ms": 0.14
+     "elapsed_ms": 0.13
     },
     {
      "line": 80,
      "kind": "statement",
      "status": "pass",
-     "elapsed_ms": 0.02
+     "elapsed_ms": 0.06
     },
     {
      "line": 83,
      "kind": "open",
      "status": "pass",
-     "elapsed_ms": 0.12
+     "elapsed_ms": 0.09
     },
     {
      "line": 85,
      "kind": "query",
      "status": "pass",
-     "elapsed_ms": 0.21
+     "elapsed_ms": 0.35
     },
     {
      "line": 98,
      "kind": "open",
      "status": "pass",
-     "elapsed_ms": 0.03
+     "elapsed_ms": 0.04
     },
     {
      "line": 100,
      "kind": "query",
      "status": "pass",
-     "elapsed_ms": 0.04
+     "elapsed_ms": 0.05
     },
     {
      "line": 107,
@@ -3935,7 +3937,7 @@
      "line": 117,
      "kind": "corrupt",
      "status": "pass",
-     "elapsed_ms": 0.04
+     "elapsed_ms": 0.05
     },
     {
      "line": 118,
@@ -3947,13 +3949,13 @@
      "line": 119,
      "kind": "corrupt",
      "status": "pass",
-     "elapsed_ms": 0.03
+     "elapsed_ms": 0.02
     },
     {
      "line": 120,
      "kind": "corrupt",
      "status": "pass",
-     "elapsed_ms": 0.02
+     "elapsed_ms": 0.03
     },
     {
      "line": 121,
@@ -3995,7 +3997,7 @@
      "line": 127,
      "kind": "corrupt",
      "status": "pass",
-     "elapsed_ms": 0.02
+     "elapsed_ms": 0.03
     },
     {
      "line": 128,
@@ -4053,19 +4055,19 @@
      "line": 12,
      "kind": "save",
      "status": "pass",
-     "elapsed_ms": 3.17
+     "elapsed_ms": 3.98
     },
     {
      "line": 13,
      "kind": "open",
      "status": "pass",
-     "elapsed_ms": 1.62
+     "elapsed_ms": 1.65
     },
     {
      "line": 15,
      "kind": "query",
      "status": "pass",
-     "elapsed_ms": 0.28
+     "elapsed_ms": 0.37
     },
     {
      "line": 28,
@@ -4077,19 +4079,19 @@
      "line": 34,
      "kind": "save",
      "status": "pass",
-     "elapsed_ms": 3.46
+     "elapsed_ms": 3.47
     },
     {
      "line": 35,
      "kind": "save",
      "status": "pass",
-     "elapsed_ms": 3.95
+     "elapsed_ms": 3.9
     },
     {
      "line": 36,
      "kind": "save",
      "status": "pass",
-     "elapsed_ms": 3.49
+     "elapsed_ms": 3.56
     },
     {
      "line": 37,
@@ -4101,37 +4103,37 @@
      "line": 38,
      "kind": "open",
      "status": "pass",
-     "elapsed_ms": 0.86
+     "elapsed_ms": 0.77
     },
     {
      "line": 39,
      "kind": "open",
      "status": "pass",
-     "elapsed_ms": 0.52
+     "elapsed_ms": 0.46
     },
     {
      "line": 40,
      "kind": "open",
      "status": "pass",
-     "elapsed_ms": 0.85
+     "elapsed_ms": 0.81
     },
     {
      "line": 41,
      "kind": "open",
      "status": "pass",
-     "elapsed_ms": 0.08
+     "elapsed_ms": 0.09
     },
     {
      "line": 43,
      "kind": "query",
      "status": "pass",
-     "elapsed_ms": 3.5
+     "elapsed_ms": 3.76
     },
     {
      "line": 53,
      "kind": "query",
      "status": "pass",
-     "elapsed_ms": 0.23
+     "elapsed_ms": 0.22
     },
     {
      "line": 63,
@@ -4143,7 +4145,7 @@
      "line": 73,
      "kind": "query",
      "status": "pass",
-     "elapsed_ms": 0.32
+     "elapsed_ms": 0.31
     },
     {
      "line": 83,
@@ -4155,7 +4157,7 @@
      "line": 94,
      "kind": "save",
      "status": "pass",
-     "elapsed_ms": 3.14
+     "elapsed_ms": 3.04
     },
     {
      "line": 95,
@@ -4167,79 +4169,79 @@
      "line": 97,
      "kind": "query",
      "status": "pass",
-     "elapsed_ms": 0.45
+     "elapsed_ms": 0.5
     },
     {
      "line": 103,
      "kind": "query",
      "status": "pass",
-     "elapsed_ms": 0.09
+     "elapsed_ms": 0.08
     },
     {
      "line": 121,
      "kind": "save",
      "status": "pass",
-     "elapsed_ms": 2.99
+     "elapsed_ms": 3.11
     },
     {
      "line": 122,
      "kind": "open",
      "status": "pass",
-     "elapsed_ms": 0.07
+     "elapsed_ms": 0.05
     },
     {
      "line": 124,
      "kind": "query",
      "status": "pass",
-     "elapsed_ms": 0.1
+     "elapsed_ms": 0.13
     },
     {
      "line": 135,
      "kind": "save",
      "status": "pass",
-     "elapsed_ms": 2.02
+     "elapsed_ms": 2.05
     },
     {
      "line": 136,
      "kind": "open",
      "status": "pass",
-     "elapsed_ms": 0.05
+     "elapsed_ms": 0.04
     },
     {
      "line": 138,
      "kind": "query",
      "status": "pass",
-     "elapsed_ms": 0.07
+     "elapsed_ms": 0.08
     },
     {
      "line": 146,
      "kind": "save",
      "status": "pass",
-     "elapsed_ms": 3.0
+     "elapsed_ms": 2.94
     },
     {
      "line": 147,
      "kind": "open",
      "status": "pass",
-     "elapsed_ms": 0.04
+     "elapsed_ms": 0.05
     },
     {
      "line": 149,
      "kind": "query",
      "status": "pass",
-     "elapsed_ms": 0.06
+     "elapsed_ms": 0.1
     },
     {
      "line": 166,
      "kind": "save",
      "status": "pass",
-     "elapsed_ms": 2.28
+     "elapsed_ms": 2.09
     },
     {
      "line": 167,
      "kind": "open",
      "status": "pass",
-     "elapsed_ms": 0.07
+     "elapsed_ms": 0.06
     },
     {
      "line": 169,
@@ -4251,13 +4253,13 @@
      "line": 175,
      "kind": "save",
      "status": "pass",
-     "elapsed_ms": 3.05
+     "elapsed_ms": 2.93
     },
     {
      "line": 176,
      "kind": "open",
      "status": "pass",
-     "elapsed_ms": 0.06
+     "elapsed_ms": 0.05
     },
     {
      "line": 178,
@@ -4269,7 +4271,7 @@
      "line": 185,
      "kind": "open",
      "status": "pass",
-     "elapsed_ms": 0.04
+     "elapsed_ms": 0.03
     },
     {
      "line": 186,
@@ -4287,7 +4289,7 @@
      "line": 188,
      "kind": "open",
      "status": "pass",
-     "elapsed_ms": 0.05
+     "elapsed_ms": 0.06
     },
     {
      "line": 189,
@@ -4317,18 +4319,18 @@
      "line": 195,
      "kind": "corrupt",
      "status": "pass",
-     "elapsed_ms": 0.02
+     "elapsed_ms": 0.03
     },
     {
      "line": 198,
      "kind": "request",
      "status": "pass",
-     "elapsed_ms": 0.03
+     "elapsed_ms": 0.02
     }
    ],
    "missing_capabilities": [],
    "status": "ran",
-   "seconds": 0.054
+   "seconds": 0.057
   },
   {
    "file": "cases/phase5/execution_options.pqt",
@@ -4351,7 +4353,7 @@
      "line": 11,
      "kind": "explain",
      "status": "pass",
-     "elapsed_ms": 0.1
+     "elapsed_ms": 0.14
     },
     {
      "line": 18,
@@ -4363,49 +4365,49 @@
      "line": 24,
      "kind": "explain",
      "status": "pass",
-     "elapsed_ms": 0.05
+     "elapsed_ms": 0.09
     },
     {
      "line": 30,
      "kind": "explain",
      "status": "pass",
-     "elapsed_ms": 0.05
+     "elapsed_ms": 0.04
     },
     {
      "line": 35,
      "kind": "query",
      "status": "pass",
-     "elapsed_ms": 1.87
+     "elapsed_ms": 1.76
     },
     {
      "line": 44,
      "kind": "query",
      "status": "pass",
-     "elapsed_ms": 0.68
+     "elapsed_ms": 0.69
     },
     {
      "line": 53,
      "kind": "query",
      "status": "pass",
-     "elapsed_ms": 8.54
+     "elapsed_ms": 8.8
     },
     {
      "line": 62,
      "kind": "query",
      "status": "pass",
-     "elapsed_ms": 0.26
+     "elapsed_ms": 0.28
     },
     {
      "line": 74,
      "kind": "query",
      "status": "pass",
-     "elapsed_ms": 0.18
+     "elapsed_ms": 0.19
     },
     {
      "line": 89,
      "kind": "query",
      "status": "pass",
-     "elapsed_ms": 0.29
+     "elapsed_ms": 0.28
     },
     {
      "line": 105,
@@ -4417,30 +4419,30 @@
      "line": 115,
      "kind": "error",
      "status": "pass",
-     "elapsed_ms": 0.04
+     "elapsed_ms": 0.05
     },
     {
      "line": 118,
      "kind": "error",
      "status": "pass",
-     "elapsed_ms": 0.02
+     "elapsed_ms": 0.03
     },
     {
      "line": 122,
      "kind": "error",
      "status": "pass",
-     "elapsed_ms": 0.17
+     "elapsed_ms": 0.18
     },
     {
      "line": 125,
      "kind": "error",
      "status": "pass",
-     "elapsed_ms": 0.06
+     "elapsed_ms": 0.07
     }
    ],
    "missing_capabilities": [],
    "status": "ran",
-   "seconds": 0.023
+   "seconds": 0.024
   }
  ]
 }
