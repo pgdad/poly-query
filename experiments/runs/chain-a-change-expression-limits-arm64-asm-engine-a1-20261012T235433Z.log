@@ -1,0 +1,6 @@
+2026-10-12T23:54:33+00:00 chain chain-a-change-expression-limits-arm64-asm-engine-a1-20261012T235433Z: session 1 -> a-change-expression-limits-arm64-asm-engine-a1-20261012T235433Z (budget $50.00)
+2026-10-12T23:54:33+00:00 [a-change-expression-limits-arm64-asm-engine-a1-20261012T235433Z] agent queued (usage gate, then launch)
+2026-10-13T00:57:36+00:00 [a-change-expression-limits-arm64-asm-engine-a1-20261012T235433Z] agent finished; collecting telemetry
+2026-10-13T00:57:36+00:00 [a-change-expression-limits-arm64-asm-engine-a1-20261012T235433Z] validating (clean clone, sandboxed)
+2026-10-13T00:57:54+00:00 [a-change-expression-limits-arm64-asm-engine-a1-20261012T235433Z] outcome=success cost=$10.889416799999998 turns=153 wall=2100.5s
+2026-10-13T00:57:54+00:00 chain chain-a-change-expression-limits-arm64-asm-engine-a1-20261012T235433Z finished: outcome=success sessions=1 spent=$10.89

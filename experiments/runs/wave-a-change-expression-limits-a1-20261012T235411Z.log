@@ -1,0 +1,4 @@
+2026-10-12T23:54:18+00:00 wave wave-a-change-expression-limits-a1-20261012T235411Z: order=['rust', 'common-lisp', 'clojure', 'python', 'java', 'go']
+2026-10-12T23:54:18+00:00 [a-change-expression-limits-rust-a1-20261012T235411Z] agent queued (usage gate, then launch)
+2026-10-12T23:54:23+00:00 [a-change-expression-limits-common-lisp-a1-20261012T235412Z] agent queued (usage gate, then launch)
+2026-10-12T23:54:28+00:00 [a-change-expression-limits-clojure-a1-20261012T235413Z] agent queued (usage gate, then launch)

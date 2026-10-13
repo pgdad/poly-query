@@ -1,0 +1,38 @@
+{
+ "wave_id": "wave-a-change-expression-limits-a1-20261012T235411Z",
+ "task": "change-expression-limits",
+ "track": "A",
+ "attempt": 1,
+ "seed": 6,
+ "order": [
+  "rust",
+  "common-lisp",
+  "clojure",
+  "python",
+  "java",
+  "go"
+ ],
+ "run_ids": [
+  "a-change-expression-limits-rust-a1-20261012T235411Z",
+  "a-change-expression-limits-common-lisp-a1-20261012T235412Z",
+  "a-change-expression-limits-clojure-a1-20261012T235413Z",
+  "a-change-expression-limits-python-a1-20261012T235414Z",
+  "a-change-expression-limits-java-a1-20261012T235415Z",
+  "a-change-expression-limits-go-a1-20261012T235417Z"
+ ],
+ "started": "2026-10-12T23:54:18+00:00",
+ "parallel": 3,
+ "base_refs": {},
+ "attempts": {},
+ "record_only": false,
+ "limits": {
+  "timeout_min": 240,
+  "budget_usd": 60.0,
+  "max_turns": null
+ },
+ "loadavg_start": [
+  0.91015625,
+  1.515625,
+  1.552734375
+ ]
+}
