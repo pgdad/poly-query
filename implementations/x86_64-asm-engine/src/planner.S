@@ -92,6 +92,8 @@ f_huge:  .double 9.0e18
 /* push_conj(ps rdi, expr rsi): distributes the conjuncts of an unplaced
  * WHERE: to the scans (PS_PUSH) or the residual WHERE (PS_RESID) */
 FUNC push_conj
+    STACK_CHECK
+    call deadline_tick
     ENTER 0
     mov %rdi, %rbx
     mov %rsi, %r12
@@ -354,6 +356,8 @@ ENDF ci_bound
 
 /* analyze_conj(sc rdi, expr rsi): records usable constraints */
 FUNC analyze_conj
+    STACK_CHECK
+    call deadline_tick
     ENTER 32
     mov %rdi, %rbx
     mov %rsi, %rdi
@@ -921,6 +925,7 @@ ENDF choose_join
 
 /* plan_fp(ps rdi, fp rsi) -> rax estimated rows */
 FUNC plan_fp
+    STACK_CHECK
     ENTER 16
     mov %rdi, %rbx
     mov %rsi, %r12
@@ -961,6 +966,7 @@ ENDF plan_fp
 /* rv_range(expr rdi, acc rsi): acc[0] = min range variable, acc[1] = max,
  * acc[2] = 1 if the expression is not a plain function of current columns */
 FUNC rv_range
+    STACK_CHECK
     ENTER 0
     mov %rdi, %rbx
     mov %rsi, %r12
@@ -1090,6 +1096,8 @@ ENDF equi_key_type
 /* find_equi(fp rdi, expr rsi): first conjunct `left = right` of the join
  * condition usable as a hash / merge join key; sets FP_LKEY/FP_RKEY */
 FUNC find_equi
+    STACK_CHECK
+    call deadline_tick
     ENTER 16
     mov %rdi, %rbx
     mov %rsi, %rdi
@@ -1172,6 +1180,7 @@ ENDF find_equi
 /* build_fp(ps rdi, lp rsi) -> rax physical FROM tree of a logical one;
  * a pushed Filter's conjuncts go to the scan below it */
 FUNC build_fp
+    STACK_CHECK
     ENTER 0
     mov %rdi, %rbx
     mov %rsi, %r12

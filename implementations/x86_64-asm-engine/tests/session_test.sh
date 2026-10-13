@@ -114,6 +114,36 @@ check '{"op":"open","table":"b","path":"bad.pqcf"}' '"code":"STORAGE_CORRUPT"'
 check '{"op":"open","table":"b","path":"none.pqcf"}' '"code":"NOT_FOUND"'
 check_seq "$(seq '{"op":"save","table":"t","path":"nodir/t.pqcf"}')" '"code":"IO_ERROR"'
 
+# CR-6 statement size limits on n(x) = 0..99, in every execution mode:
+# big(name, awk program printing the SQL, options, expected substring)
+awk 'BEGIN { print "x"; for (i = 0; i < 100; i++) print i }' > "$TMP/n.csv"
+big() {
+  sql=$(awk "BEGIN { $2 }")
+  printf '%s\n' '{"op":"load","table":"n","format":"csv","path":"n.csv"}' \
+    "{\"op\":\"query\",\"sql\":\"$sql\",\"options\":$3}" > "$TMP/big.jsonl"
+  out=$(PQ_PAR_MIN=1 "$BIN" session --data-dir "$TMP" < "$TMP/big.jsonl" | tail -n 1)
+  case "$out" in
+    *"$4"*) pass=$((pass + 1)) ;;
+    *) fail=$((fail + 1)); echo "FAIL: CR-6 $1 $3"; echo "  expected: $4"; echo "  got:      $(printf '%s' "$out" | cut -c1-200)" ;;
+  esac
+}
+W='printf "SELECT count(*) FROM n WHERE "'
+for o in '{"mode":"row","threads":1}' '{"mode":"vectorized","threads":1}' '{"mode":"vectorized","threads":8}' '{}'; do
+  big parens_998 "$W; for (i = 0; i < 998; i++) printf \"(\"; printf \"x >= 0\"; for (i = 0; i < 998; i++) printf \")\"" "$o" '"rows":[[100]]'
+  big not_2000 "$W; for (i = 0; i < 2000; i++) printf \"NOT \"; printf \"x >= 0\"" "$o" '"rows":[[100]]'
+  big subq_998 "$W; printf \"x >= \"; for (i = 0; i < 998; i++) printf \"(SELECT \"; printf 0; for (i = 0; i < 998; i++) printf \")\"" "$o" '"rows":[[100]]'
+  big or_10000 "$W; for (i = 0; i < 10000; i++) printf \"%sx = %d\", (i ? \" OR \" : \"\"), i" "$o" '"rows":[[100]]'
+  big sum_10000 "printf \"SELECT max(x\"; for (i = 1; i < 10000; i++) printf \" + 1\"; printf \") FROM n\"" "$o" '"rows":[[10098]]'
+  big in_10000 "$W; printf \"x IN (0\"; for (i = 1; i < 10000; i++) printf \", %d\", i; printf \")\"" "$o" '"rows":[[100]]'
+  big concat_50000 "printf \"SELECT max(length(CAST(x AS STRING)\"; for (i = 0; i < 50000; i++) printf \" || 'a'\"; printf \")) FROM n\"" "$o" '"rows":[[50002]]'
+  big or_200000 "$W; for (i = 0; i < 200000; i++) printf \"%sx = %d\", (i ? \" OR \" : \"\"), i" "$o" '"rows":[[100]]'
+  big parens_100000 "$W; for (i = 0; i < 100000; i++) printf \"(\"; printf \"x >= 0\"; for (i = 0; i < 100000; i++) printf \")\"" "$o" 'expression nesting depth exceeds 4096'
+  big operands_1000001 "$W; printf \"x IN (0\"; for (i = 1; i < 1000001; i++) printf \", 1\"; printf \")\"" "$o" 'expression operand count exceeds 1000000'
+done
+# the timeout also covers binding: a 20,000-CTE chain takes ~1 s to bind
+big cte_timeout "printf \"WITH c0 AS (SELECT x FROM n)\"; for (i = 1; i < 20000; i++) printf \", c%d AS (SELECT x FROM c%d)\", i, i - 1; printf \" SELECT count(*) FROM c19999\"" '{"timeout_ms":20}' '"code":"TIMEOUT"'
+check '{"op":"capabilities"}' '"change.expression_limits"'
+
 # exec mode with an array of requests
 printf '[{"op":"query","sql":"SELECT 1 AS a"},{"op":"query","sql":"SELECT 2 AS b"}]' > "$TMP/req.json"
 n=$("$BIN" exec --data-dir "$TMP" --request "$TMP/req.json" | grep -c '"ok":true')

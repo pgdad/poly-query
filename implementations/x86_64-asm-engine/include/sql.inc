@@ -106,7 +106,8 @@
 #define PS_NTOK  8
 #define PS_POS   16
 #define PS_DEPTH 24
-#define PS_SIZE  32
+#define PS_NOPND 32    /* primary expressions parsed (operand count, CR-6) */
+#define PARSER_SIZE 40
 
 /* ------------------------------------------------------------ AST / bound expression node (72 bytes) */
 #define N_KIND  0      /* u32 EK_* */
@@ -149,6 +150,9 @@
 #define NF_PAREN    16 /* expression was parenthesised */
 #define NF_CACHED   32 /* subquery result cached in V3 */
 #define NF_CORR     64 /* subquery references an enclosing query */
+#define NF_BCDONE  128 /* expr_batch_const result cached (vec.S) */
+#define NF_BCONST  256 /* cached expr_batch_const result: constant */
+#define NF_FOLDERR 512 /* constant folding raised an error (rule_fold.S) */
 
 #define U_NEG 1
 #define U_POS 2

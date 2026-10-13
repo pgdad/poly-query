@@ -72,7 +72,7 @@ caps_fields:
     .ascii ",\"phase4\",\"http.streaming\""
     .ascii ",\"phase5\",\"exec.row\",\"exec.vectorized\",\"exec.parallel\""
     .ascii ",\"join.hash\",\"join.merge\",\"join.nested_loop\""
-    .asciz ",\"change.union_all\",\"change.decimal38\"]"
+    .asciz ",\"change.union_all\",\"change.decimal38\",\"change.expression_limits\"]"
 
 /* operation table: name, handler */
 op_names:
@@ -279,6 +279,8 @@ FUNC proto_handle_line
     call par_reset
     mov g_arena(%rip), %rdi
     call arena_reset
+    mov g_arena(%rip), %rax         /* a failed query left its budget set */
+    movq $0, AR_LIMIT(%rax)
     mov %rbx, %rdi
     mov %r12, %rsi
     mov g_arena(%rip), %rdx
@@ -295,6 +297,8 @@ FUNC proto_handle_request
     call par_reset
     mov g_arena(%rip), %rdi
     call arena_reset
+    mov g_arena(%rip), %rax         /* a failed query left its budget set */
+    movq $0, AR_LIMIT(%rax)
     mov %rbx, %rdi
     call handle_request_noreset
     pop %rbx

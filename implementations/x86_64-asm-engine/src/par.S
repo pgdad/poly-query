@@ -25,6 +25,7 @@
 
     .section .note.GNU-stack, "", @progbits
 
+#define WORKER_STACK_SIZE (256*1024*1024) /* reserved per pool thread (CR-6) */
 #define PW_FN    0
 #define PW_ARG   8
 #define PW_PART  16
@@ -72,8 +73,10 @@ g_par_min:  .quad 0             /* minimum items per part (env PQ_PAR_MIN) */
 FUNC par_body
     ENTER 16
     mov %rdi, %rbx
-    mov %fs:t_vs_cur@tpoff, %rax    /* scratch stack top (restored: an */
-    mov %rax, 0(%rsp)               /* error may leave marks behind) */
+    call vs_mark                    /* scratch stack top (restored: an */
+    mov %rax, 0(%rsp)               /* error may leave marks behind); */
+                                    /* initialised first, else restoring 0
+                                     * would drop (leak) the thread's stack */
     mov PW_ARENA(%rbx), %rax
     mov %rax, %fs:t_arena@tpoff
     lea PW_JB(%rbx), %rdi
@@ -115,6 +118,7 @@ ENDF par_body
 FUNC par_worker
     push %rbx
     mov %rdi, %rbx
+    call thread_stack_init          /* STACK_CHECK limit, signal stack */
 0:  mov $POOL_SPIN, %ecx            /* poll a while: operators of a query */
 1:  cmpq $1, PW_STATE(%rbx)         /* follow each other closely */
     je 2f
@@ -167,10 +171,24 @@ FUNC pool_worker
     lea par_slots(%rip), %rax
     add %rax, %rcx                  /* the worker's slot */
     movq $0, PW_STATE(%rcx)
+    sub $64, %rsp                   /* pthread_attr_t: a large stack, so */
+    lea 0(%rsp), %rdi               /* workers evaluate any expression */
+    call pthread_attr_init          /* the engine accepts (CR-6) */
     lea 0(%rsp), %rdi
-    xor %esi, %esi
+    mov $WORKER_STACK_SIZE, %esi
+    call pthread_attr_setstacksize
+    imul $PW_SIZE, %rbx, %rcx
+    lea par_slots(%rip), %rax
+    add %rax, %rcx
+    lea 64(%rsp), %rdi
+    lea 0(%rsp), %rsi
     lea par_worker(%rip), %rdx
     call pthread_create
+    mov %eax, 8(%rsp)               /* (attr no longer needed) */
+    lea 0(%rsp), %rdi
+    call pthread_attr_destroy
+    mov 8(%rsp), %eax
+    add $64, %rsp
     xor %ecx, %ecx
     test %eax, %eax
     jnz 9f
@@ -370,6 +388,7 @@ FUNC par_run
     test %rax, %rax
     jnz 3f
     call arena_new
+    movq $1, AR_PAR(%rax)
     lea par_arenas(%rip), %rcx
     mov %rax, (%rcx, %r15, 8)
 3:  mov g_arena(%rip), %rcx         /* same memory budget as the request */
@@ -463,7 +482,8 @@ FUNC par_reset
     call arena_reset
 2:  inc %rbx
     jmp 1b
-9:  pop %rbx
+9:  movq $0, g_par_mem(%rip)
+    pop %rbx
     ret
 ENDF par_reset
 

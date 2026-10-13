@@ -120,28 +120,16 @@ ENDF wrap_cast
 bind_type_error:
     RAISE E_TYPE_ERROR, "operand types are incompatible"
 
-    .bss
-    .p2align 3
-bind_depth: .quad 0
-    .text
-
-#define MAX_BIND_DEPTH 400000
-
 /* bind_expr(B rdi, node rsi) -> rax bound node (may be a replacement);
- * guards the recursion depth of very large expressions */
+ * guards the stack of very large expressions (CR-6) and the deadline */
 FUNC bind_expr
-    sub $8, %rsp
-    incq bind_depth(%rip)
-    cmpq $MAX_BIND_DEPTH, bind_depth(%rip)
-    ja 1f
-    call bind_expr_node
-    decq bind_depth(%rip)
-    add $8, %rsp
-    ret
-1:  RAISE E_PARSE_ERROR, "expression too complex"
+    STACK_CHECK
+    call deadline_tick
+    jmp bind_expr_node
 ENDF bind_expr
 
 FUNC bind_expr_node
+    STACK_CHECK
     ENTER 32
     mov %rdi, %rbx
     mov %rsi, %r12
@@ -821,6 +809,8 @@ ENDF int_digits
 
 /* expr_equal(a rdi, b rsi) -> eax 1 if structurally equal (semantics.md §5) */
 FUNC expr_equal
+    STACK_CHECK
+    call deadline_tick
     ENTER 16
     mov %rdi, %rbx
     mov %rsi, %r12
@@ -948,6 +938,7 @@ ENDF expr_equal
 
 /* has_agg(expr rdi) -> eax 1 if an aggregate occurs (outside subqueries) */
 FUNC has_agg
+    STACK_CHECK
     ENTER 0
     mov %rdi, %rbx
     xor %eax, %eax
@@ -978,6 +969,7 @@ ENDF has_agg
 /* check_grouped(expr rdi, plan rsi): SEMANTIC_ERROR if a column reference
  * remains outside aggregates after removing GROUP BY expressions */
 FUNC check_grouped
+    STACK_CHECK
     ENTER 0
     mov %rdi, %rbx
     mov %rsi, %r12
@@ -1900,6 +1892,7 @@ ENDF const_int
 
 /* bind_subplan(B rdi, subquery node rsi) -> rax plan (stored in V2) */
 FUNC bind_subplan
+    STACK_CHECK
     ENTER 0
     mov %rdi, %rbx
     mov %rsi, %r12
@@ -1918,7 +1911,6 @@ ENDF bind_subplan
 /* bind_statement(stmt rdi) -> rax plan of a top-level query */
 FUNC bind_statement
     sub $8, %rsp
-    movq $0, bind_depth(%rip)
     xor %esi, %esi
     xor %edx, %edx
     xor %ecx, %ecx
@@ -1929,6 +1921,7 @@ ENDF bind_statement
 
 /* bind_query(stmt rdi, parent scope rsi, ctes rdx, hide rcx) -> rax plan */
 FUNC bind_query
+    STACK_CHECK
     cmpq $0, SS_UNION(%rdi)
     jne bind_compound
     ENTER 32

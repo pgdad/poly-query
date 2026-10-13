@@ -47,6 +47,7 @@ ENDF is_from_tree
 /* scan_slot(slot rdi, rv rsi) -> rax slot holding the Scan of range
  * variable rv (or the pushed Filter directly above it), 0 if not found */
 FUNC scan_slot
+    STACK_CHECK
     ENTER 0
     mov %rdi, %rbx
     mov %rsi, %r12
@@ -79,6 +80,7 @@ ENDF scan_slot
 /* push_conjunct(pd rdi, expr rsi): moves one conjunct (AND chains are
  * split) to its scan, or keeps it in PD_RESID */
 FUNC push_conjunct
+    STACK_CHECK
     ENTER 0
     mov %rdi, %rbx
     mov %rsi, %r12
@@ -162,6 +164,7 @@ ENDF push_filter
 
 /* push_node(slot rdi, plan rsi): applies the rule to *slot and below */
 FUNC push_node
+    STACK_CHECK
     ENTER 0
     mov %rdi, %rbx
     mov %rsi, %r12

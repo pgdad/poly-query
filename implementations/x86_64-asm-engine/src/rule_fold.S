@@ -54,6 +54,7 @@ ENDF is_lit_bool
  * raise an error: literals, columns, IS NULL, comparisons and boolean
  * connectives of such expressions */
 FUNC expr_safe
+    STACK_CHECK
     ENTER 0
     mov $1, %eax
     test %rdi, %rdi
@@ -128,6 +129,7 @@ FUNC try_fold
     LEAVE
 8:  mov 264(%rsp), %rcx             /* error: keep the expression */
     mov %rcx, g_jmpbuf(%rip)
+    orl $NF_FOLDERR, N_FLAGS(%rbx)
     LEAVE
 ENDF try_fold
 
@@ -179,6 +181,8 @@ ENDF replace_node
 
 /* fold_expr(node rdi): bottom-up folding and simplification */
 FUNC fold_expr
+    STACK_CHECK
+    call deadline_tick
     ENTER 16
     test %rdi, %rdi
     jz 9f
@@ -211,7 +215,22 @@ FUNC fold_expr
     call expr_batch_const
     test %eax, %eax
     jz 3f
-    mov %rbx, %rdi
+    /* eval computes the first operand of a binary / unary operator or CAST
+     * unconditionally: when folding it failed, folding this node fails too
+     * (skipping it keeps long chains above an error linear, CR-6) */
+    mov N_KIND(%rbx), %eax
+    cmp $EK_BINARY, %eax
+    je 21f
+    cmp $EK_UNARY, %eax
+    je 21f
+    cmp $EK_CAST, %eax
+    jne 22f
+21: mov N_A(%rbx), %rcx
+    testl $NF_FOLDERR, N_FLAGS(%rcx)
+    jz 22f
+    orl $NF_FOLDERR, N_FLAGS(%rbx)
+    jmp 9f
+22: mov %rbx, %rdi
     call try_fold
     jmp 9f
 3:  cmpl $EK_BINARY, N_KIND(%rbx)
@@ -315,6 +334,7 @@ ENDF fold_list
 /* fold_node(slot rdi): folds the expressions of the operator in *slot and
  * of its inputs; a Filter folding to TRUE is replaced by its input */
 FUNC fold_node
+    STACK_CHECK
     ENTER 0
     mov %rdi, %rbx
 0:  mov (%rbx), %r12

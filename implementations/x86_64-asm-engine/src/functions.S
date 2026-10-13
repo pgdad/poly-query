@@ -176,6 +176,7 @@ ENDF floordiv
 /* expr_is_const(node rdi) -> eax 1 if the expression is constant: no column
  * references, aggregates or subqueries anywhere in it */
 FUNC expr_is_const
+    STACK_CHECK
     ENTER 0
     mov %rdi, %rbx
     mov N_KIND(%rbx), %eax
@@ -1198,6 +1199,7 @@ ENDF like_match
  * registers: rbx node, r12 ctx; strict functions get their (non-NULL)
  * arguments in r13, r14, r15 */
 FUNC eval_scalar_func
+    STACK_CHECK
     ENTER 48
     mov %rdi, %rbx
     mov %rsi, %r12
@@ -1863,6 +1865,7 @@ rp_put:
 /* eval_special(node rdi, ctx rsi) -> rax payload, rdx null flag
  * registers: rbx node, r12 ctx */
 FUNC eval_special
+    STACK_CHECK
     ENTER 16
     mov %rdi, %rbx
     mov %rsi, %r12

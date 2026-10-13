@@ -1,6 +1,43 @@
 # Working notes — x86-64 assembly engine
 
-## Current task: optimize latency of benchmarks/workloads/analytics.json (1m)
+## Current task: CR-6 expression size limits (`change.expression_limits`) — DONE
+
+Spec: `spec/changes/expression-limits.md`; README "Change CR-6" has the
+limits, design and module list. Public check:
+`python3 tests/regression/robustness_probe.py --engine implementations/x86_64-asm-engine/bin/polyquery --only expression_limits --require-pass`
+→ pass (exit 0). Conformance 660/660, `--modes` 3870/3870 (also with
+`PQ_PAR_MIN=1`), `--transport http` 660/660, http_suite 19/19,
+`make build test lint` pass (CR-6 cases at the end of
+`tests/session_test.sh`).
+What was done:
+1. Parser limits (`parser.S`): nesting depth 4096 parser levels
+   (`p_enter`), operand count 1,000,000 (`p_operand` in `parse_primary`),
+   both `RESOURCE_LIMIT` naming the measure. No text-length limit of its own.
+2. Stacks: request thread on the 1 GiB mmap'd stack (guard pages added),
+   pool workers 256 MiB (`par.S`), `STACK_CHECK` (pq.inc) at the entry of
+   every recursive walker against TLS `t_stack_lo` (util.S), fault handler
+   on an alternate stack in every thread maps stack faults to
+   `RESOURCE_LIMIT`. The binder's old 400,000-call depth guard
+   (`PARSE_ERROR`) is gone.
+3. Linear stages: cached `expr_batch_const` (NF_BCDONE/NF_BCONST), fold
+   skips parents of failed folds (NF_FOLDERR), lexer literal buffers,
+   `veval` scratch compaction, `||` chains via `concat_chain` (eval.S).
+4. Timeout: `deadline_tick` (every 1,024 calls, preserves all registers) in
+   parser / binder / optimizer / planner walkers.
+5. Memory: arena chunks mmap'd (not malloc: freed memory really returns),
+   worker arenas share the request budget (`AR_PAR`, `g_par_mem`), fixed
+   the 8 MiB vector-scratch leak per parallel part (`par_body`).
+Test scripts used (outside the repo, in /tmp/elx: stress.py, wide.py,
+wideb.py, deep.py, tmo.py, seq.py) generated hundreds of large statements
+in all four probe modes; all answers correct / RESOURCE_LIMIT / TIMEOUT.
+Also fixed (robustness_probe): budget left set after a failed query
+(`limit_after_failed_query`), CR/LF flood in `serve` (`http_crlf_flood`);
+`long_or_chain` now passes too.
+Ideas left: CTE lookup in the binder is linear per reference (100,000-CTE
+chains time out); a 100,000-branch UNION ALL exceeds the default budget in
+parallel modes (each branch's parallel scan allocates ~10 KiB per worker).
+
+## Previous task: optimize latency of benchmarks/workloads/analytics.json (1m)
 
 Measure: `python3 datasets/generators/pqgen.py generate --scale 1m --out /tmp/pqdata --jobs 1`
 (`--jobs` > 1 fails in this sandbox: no POSIX semaphores), then

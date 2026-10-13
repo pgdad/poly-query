@@ -57,7 +57,9 @@
 #define AR_CHUNKS  16
 #define AR_TOTAL   24
 #define AR_LIMIT   32      /* 0 = unlimited; else RESOURCE_LIMIT when exceeded */
-#define ARENA_SIZE 40
+#define AR_PAR     40      /* 1 = a parallel worker's arena: its chunks count
+                              towards the request's budget (g_par_mem, util.S) */
+#define ARENA_SIZE 48
 
 /* ------------------------------------------------------------ Buf (malloc-backed byte buffer) */
 #define BUF_DATA 0
@@ -252,6 +254,15 @@
     pop %rbx
     pop %rbp
     ret
+.endm
+
+/* CR-6 stack guard: raise RESOURCE_LIMIT (stack_exhausted, util.S) when the
+ * stack pointer is below the calling thread's safe limit t_stack_lo.  Used at
+ * the entry of every recursive tree walker; a thread whose limit was never
+ * set (t_stack_lo = 0) always passes. */
+.macro STACK_CHECK
+    cmp %fs:t_stack_lo@tpoff, %rsp
+    jb stack_exhausted
 .endm
 
 /* raise error with a constant message: RAISE E_CODE, "text" */

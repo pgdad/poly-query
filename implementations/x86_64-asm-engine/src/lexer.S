@@ -357,9 +357,24 @@ lex_qident:
 lex_quoted:
     mov %ecx, 16(%rsp)              /* quote char */
     mov %edx, 20(%rsp)              /* token kind */
-    /* decoded text is at most the remaining length */
-    mov %r12, %rdi
-    sub %r13, %rdi
+    /* decoded text is at most the raw text up to the closing quote (a
+     * doubled quote is skipped as a pair); allocating that span rather
+     * than the rest of the statement keeps many literals linear (CR-6) */
+    lea 1(%r13), %rdi
+1:  cmp %r12, %rdi
+    jae 2f                          /* unterminated: reported below */
+    cmpb %cl, (%rbx, %rdi)
+    jne 3f
+    lea 1(%rdi), %rax
+    cmp %r12, %rax
+    jae 2f
+    cmpb %cl, (%rbx, %rax)
+    jne 2f
+    add $2, %rdi
+    jmp 1b
+3:  inc %rdi
+    jmp 1b
+2:  sub %r13, %rdi
     add $9, %rdi
     call tmp_alloc
     mov %rax, 24(%rsp)              /* pstr */

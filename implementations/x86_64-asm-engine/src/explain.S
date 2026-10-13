@@ -76,6 +76,7 @@ ENDF put_int_prop
 
 /* explain_from(buf rdi, plan rsi, fp rdx) */
 FUNC explain_from
+    STACK_CHECK
     ENTER 16
     mov %rdi, %rbx
     mov %rsi, %r12
@@ -217,6 +218,7 @@ ENDF explain_from
 
 /* explain_plan(plan rdi, buf rsi) */
 FUNC explain_plan
+    STACK_CHECK
     ENTER 16
     mov %rdi, %r12
     mov %rsi, %rbx

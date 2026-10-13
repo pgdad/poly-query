@@ -27,6 +27,8 @@ g_deadline_ns:      .quad 0        /* CLOCK_MONOTONIC deadline of the running qu
 g_pending_arena:    .quad 0        /* arena of a table under construction; destroyed on error */
     .globl g_cancel_flag
 g_cancel_flag:      .quad 0        /* set asynchronously when the running query is cancelled */
+    .globl g_par_mem
+g_par_mem:          .quad 0        /* chunk bytes of the worker arenas (AR_PAR), reset by par_reset */
 
     .bss
     .p2align 4
@@ -38,12 +40,13 @@ g_err_msg:          .zero 512
  * Both are 0 on every other thread, which then uses the globals. */
     .section .tbss, "awT", @nobits
     .p2align 4
-    .globl t_arena, t_jmpbuf, t_err_code, t_err_msg
+    .globl t_arena, t_jmpbuf, t_err_code, t_err_msg, t_stack_lo
 t_arena:    .zero 8
 t_jmpbuf:   .zero 8
 t_err_code: .zero 8
-    .zero 8
+t_stack_lo: .zero 8            /* lowest safe %rsp of this thread (STACK_CHECK), 0 = unset */
 t_err_msg:  .zero 512
+t_tick:     .zero 8            /* deadline_tick calls of this thread */
 
     .text
 
@@ -213,10 +216,15 @@ FUNC chunk_get
     call pool_release
     jmp 9f
 5:  call pool_release
-    mov %rbx, %rdi
-    call malloc
-    test %rax, %rax
-    jnz 6f
+    xor %edi, %edi                  /* mapped directly (not malloc): a */
+    mov %rbx, %rsi                  /* released chunk returns its memory */
+    mov $3, %edx                    /* to the system instead of staying in */
+    mov $0x22, %ecx                 /* a fragmented malloc heap */
+    mov $-1, %r8d                   /* PROT_READ|PROT_WRITE, */
+    xor %r9d, %r9d                  /* MAP_PRIVATE|MAP_ANONYMOUS */
+    call mmap
+    cmp $-1, %rax
+    jne 6f
     RAISE E_RESOURCE_LIMIT, "out of memory"
 6:  mov %rbx, 8(%rax)
 9:  pop %r13
@@ -244,7 +252,8 @@ FUNC chunk_put
     ret
 1:  call pool_release
     mov %rbx, %rdi
-    call free
+    mov 8(%rbx), %rsi
+    call munmap
     pop %rbx
     ret
 ENDF chunk_put
@@ -301,15 +310,29 @@ arena_alloc_slow:
     cmova %rcx, %rax
     cmp %rax, %r13
     cmovb %rax, %r13
-    /* limit check */
+    /* limit check: a worker arena counts its chunks in g_par_mem and is
+     * checked against the request total (request arena + all workers) */
     mov AR_TOTAL(%rbx), %rax
     add %r13, %rax
     mov AR_LIMIT(%rbx), %rcx
     test %rcx, %rcx
     jz 1f
-    cmp %rcx, %rax
+    cmpq $0, AR_PAR(%rbx)
+    jne 2f
+    mov g_par_mem(%rip), %rdx       /* the request arena */
+    add %rax, %rdx
+    cmp %rcx, %rdx
     jbe 1f
-    RAISE E_RESOURCE_LIMIT, "query memory budget exceeded"
+    jmp 3f
+2:  mov %r13, %rdx                  /* a worker arena */
+    lock xadd %rdx, g_par_mem(%rip)
+    add %r13, %rdx
+    mov g_arena(%rip), %r8
+    add AR_TOTAL(%r8), %rdx
+    cmp %rcx, %rdx
+    jbe 1f
+    lock sub %r13, g_par_mem(%rip)
+3:  RAISE E_RESOURCE_LIMIT, "query memory budget exceeded"
 1:  mov %rax, AR_TOTAL(%rbx)
     mov %r13, %rdi
     call chunk_get
@@ -924,6 +947,44 @@ FUNC now_ns
     ret
 ENDF now_ns
 
+/* deadline_tick(): check_deadline every DEADLINE_TICKS calls; called once
+ * per node by the tree walkers of parsing, binding and planning, so that the
+ * timeout also interrupts those stages (CR-6 §4) */
+#define DEADLINE_TICKS 1024
+FUNC deadline_tick                  /* preserves all registers but flags */
+    incq %fs:t_tick@tpoff
+    testq $(DEADLINE_TICKS - 1), %fs:t_tick@tpoff
+    jz 1f
+    ret
+1:  push %rbp
+    mov %rsp, %rbp
+    and $-16, %rsp
+    push %rax
+    push %rcx
+    push %rdx
+    push %rsi
+    push %rdi
+    push %r8
+    push %r9
+    push %r10
+    push %r11
+    push %r11
+    call check_deadline
+    pop %r11
+    pop %r11
+    pop %r10
+    pop %r9
+    pop %r8
+    pop %rdi
+    pop %rsi
+    pop %rdx
+    pop %rcx
+    pop %rax
+    mov %rbp, %rsp                  /* (not `leave`: the LEAVE macro) */
+    pop %rbp
+    ret
+ENDF deadline_tick
+
 /* check_deadline(): raises CANCELLED when the query was cancelled (server
  * child: SIGUSR1) and TIMEOUT when the current query deadline has passed */
 FUNC check_deadline
@@ -943,3 +1004,58 @@ FUNC check_deadline
 3:  sub $8, %rsp
     RAISE E_CANCELLED, "query cancelled"
 ENDF check_deadline
+
+/* ======================================================== stack limits (CR-6) */
+
+#define STACK_RESERVE  (1024*1024)     /* kept free below the STACK_CHECK limit */
+#define ALT_STACK_SIZE (256*1024)
+
+/* stack_set_bottom(lowest rdi): the calling thread's stack starts (lowest
+ * usable address) at rdi; STACK_CHECK fails STACK_RESERVE bytes above it */
+FUNC stack_set_bottom
+    add $STACK_RESERVE, %rdi
+    mov %rdi, %fs:t_stack_lo@tpoff
+    ret
+ENDF stack_set_bottom
+
+/* thread_stack_init(): for a thread created by pthread_create: sets its
+ * STACK_CHECK limit from its stack attributes and gives it an alternate
+ * signal stack, so that a stack overflow that escapes the checks still
+ * reaches the fault handler (main.S), which reports it as RESOURCE_LIMIT */
+FUNC thread_stack_init
+    ENTER 112
+    call pthread_self
+    mov %rax, %rdi
+    lea 0(%rsp), %rsi               /* pthread_attr_t (56 bytes) */
+    call pthread_getattr_np
+    test %eax, %eax
+    jnz 1f
+    lea 0(%rsp), %rdi
+    lea 64(%rsp), %rsi              /* stack address (lowest) */
+    lea 72(%rsp), %rdx              /* stack size */
+    call pthread_attr_getstack
+    mov %eax, %ebx
+    lea 0(%rsp), %rdi
+    call pthread_attr_destroy
+    test %ebx, %ebx
+    jnz 1f
+    mov 64(%rsp), %rdi
+    call stack_set_bottom
+1:  mov $ALT_STACK_SIZE, %edi
+    call malloc
+    test %rax, %rax
+    jz 9f
+    mov %rax, 80(%rsp)              /* stack_t.ss_sp */
+    movl $0, 88(%rsp)               /* ss_flags */
+    movq $ALT_STACK_SIZE, 96(%rsp)  /* ss_size */
+    lea 80(%rsp), %rdi
+    xor %esi, %esi
+    call sigaltstack
+9:  LEAVE
+ENDF thread_stack_init
+
+/* stack_exhausted(): target of STACK_CHECK (noreturn) */
+FUNC stack_exhausted
+    and $-16, %rsp
+    RAISE E_RESOURCE_LIMIT, "statement too complex: stack exhausted (expression nesting depth or operand count)"
+ENDF stack_exhausted

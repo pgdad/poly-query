@@ -215,14 +215,25 @@ ENDF vnot
 
 /* expr_batch_const(node rdi) -> eax 1 if the value does not depend on the
  * tuple: no column / outer / aggregate references, no subqueries and no
- * PQ_SLEEP (which must run once per row) */
+ * PQ_SLEEP (which must run once per row).  The answer is cached in the
+ * node (NF_BCDONE / NF_BCONST), so asking it at every node of a tree stays
+ * linear (CR-6: long operator chains); parallel workers may set the bits
+ * concurrently, hence the locked update. */
 FUNC expr_batch_const
+    STACK_CHECK
     ENTER 0
     mov $1, %eax
     test %rdi, %rdi
     jz 9f
     mov %rdi, %rbx
-    mov N_KIND(%rbx), %ecx
+    mov N_FLAGS(%rbx), %ecx
+    test $NF_BCDONE, %ecx
+    jz 0f
+    xor %eax, %eax
+    test $NF_BCONST, %ecx
+    setnz %al
+    jmp 9f
+0:  mov N_KIND(%rbx), %ecx
     xor %eax, %eax
     cmp $EK_COL, %ecx
     je 9f
@@ -252,16 +263,58 @@ FUNC expr_batch_const
     mov (%rax), %rdi
     call expr_batch_const
     test %eax, %eax
-    jz 9f
+    jz 7f
     inc %r13
     jmp 2b
-8:  mov $1, %eax
+7:  lock orl $NF_BCDONE, N_FLAGS(%rbx)
+    jmp 9f
+8:  lock orl $(NF_BCDONE | NF_BCONST), N_FLAGS(%rbx)
+    mov $1, %eax
 9:  LEAVE
 ENDF expr_batch_const
 
 /* ================================================================ veval */
 
+/* veval(node rdi, batch rsi, active mask rdx|0) -> rax result vector.
+ * Everything the node allocates on the scratch stack besides its result
+ * (operand vectors, masks) is dead once it returns, so the result is moved
+ * down to the scratch top at entry and the rest released: a chain of any
+ * length (CR-6) uses scratch space for its nesting depth only, instead of
+ * one vector per node (which overflowed into the request arena). */
 FUNC veval
+    STACK_CHECK
+    ENTER 0
+    mov %rdi, %rbx
+    mov %rsi, %r12
+    mov %rdx, %r13
+    call vs_mark
+    mov %rax, %r14                  /* scratch top at entry */
+    mov %rbx, %rdi
+    mov %r12, %rsi
+    mov %r13, %rdx
+    call veval_node
+    mov %rax, %r15
+    cmp %r14, %r15                  /* result on the scratch stack above */
+    jb 5f                           /* the entry top? */
+    cmp %fs:t_vs_cur@tpoff, %r15
+    jae 5f
+    cmp %r14, %r15
+    je 4f
+    mov %r14, %rdi
+    mov %r15, %rsi
+    mov $VSIZE, %edx
+    call memmove
+    mov %r14, %r15
+4:  lea VSIZE(%r14), %rax
+    mov %rax, %fs:t_vs_cur@tpoff
+    mov %r15, %rax
+    LEAVE
+5:  mov %r14, %fs:t_vs_cur@tpoff    /* result elsewhere: release all */
+    mov %r15, %rax
+    LEAVE
+ENDF veval
+
+FUNC veval_node
     ENTER 96
     mov %rdi, %rbx                  /* node */
     mov %rsi, %r12                  /* batch */
@@ -1057,7 +1110,7 @@ v_logic:
 6:  inc %rcx
     jmp 4b
 9:  jmp v_done
-ENDF veval
+ENDF veval_node
 
 /* ================================================================ kernels */
 

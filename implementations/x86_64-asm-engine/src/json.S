@@ -689,6 +689,7 @@ jp_string:
 
 /* json_write(buf rdi, node rsi): compact serialization */
 FUNC json_write
+    STACK_CHECK
     ENTER 0
     mov %rdi, %rbx
     mov %rsi, %r12

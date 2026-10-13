@@ -14,7 +14,15 @@
     .section .note.GNU-stack, "", @progbits
     .text
 
-#define MAX_DEPTH 4000
+/* Statement size limits (CR-6, README "Change CR-6").  The nesting depth
+ * counts every construct that makes the parser recurse: an expression in
+ * parentheses, a function argument, CAST, CASE, IN list item, a unary
+ * operator, NOT and a subquery / derived table (two levels); a chain of one
+ * binary operator is parsed by a loop and adds nothing.  The operand count
+ * counts primary expressions (literals, column references, function calls,
+ * CASE, CAST, parenthesized expressions). */
+#define MAX_DEPTH    4096
+#define MAX_OPERANDS 1000000
 
 /* ================================================================ token helpers */
 
@@ -242,8 +250,24 @@ FUNC p_enter
     ja 1f
     ret
 1:  sub $8, %rsp
-    RAISE E_PARSE_ERROR, "expression nested too deeply"
+    mov $E_RESOURCE_LIMIT, %edi
+    CSTR %rsi, "expression nesting depth exceeds %d"
+    mov $MAX_DEPTH, %edx
+    call pq_raisef
 ENDF p_enter
+
+/* p_operand(P): counts one operand (primary expression) */
+FUNC p_operand
+    incq PS_NOPND(%rdi)
+    cmpq $MAX_OPERANDS, PS_NOPND(%rdi)
+    ja 1f
+    ret
+1:  sub $8, %rsp
+    mov $E_RESOURCE_LIMIT, %edi
+    CSTR %rsi, "expression operand count exceeds %d"
+    mov $MAX_OPERANDS, %edx
+    call pq_raisef
+ENDF p_operand
 
 /* ================================================================ statement */
 
@@ -253,7 +277,7 @@ FUNC sql_parse
     call sql_lex
     mov %rax, %r12
     mov %rdx, %r13
-    mov $PS_SIZE, %edi
+    mov $PARSER_SIZE, %edi
     call tmp_zalloc
     mov %rax, %rbx
     mov %r12, PS_TOKS(%rbx)
@@ -412,6 +436,7 @@ ENDF parse_drop_index
  * A single select_core is returned as is; several become a compound
  * statement (SS_UNION = branches) carrying WITH / ORDER BY / LIMIT. */
 FUNC parse_query
+    STACK_CHECK
     ENTER 16
     mov %rdi, %rbx
     call p_enter
@@ -682,6 +707,7 @@ ENDF new_from
 
 /* parse_from_item(P) -> FromItem*:  table_ref { join_clause }  (left-associative) */
 FUNC parse_from_item
+    STACK_CHECK
     ENTER 16
     mov %rdi, %rbx
     call p_enter
@@ -972,6 +998,7 @@ ENDF mk_binary
 
 /* parse_expr(P) -> node */
 FUNC parse_expr
+    STACK_CHECK
     ENTER 0
     mov %rdi, %rbx
     call p_enter
@@ -1034,6 +1061,7 @@ FUNC parse_and
 ENDF parse_and
 
 FUNC parse_not
+    STACK_CHECK
     ENTER 0
     mov %rdi, %rbx
     call p_cur
@@ -1359,6 +1387,7 @@ FUNC parse_mult
 ENDF parse_mult
 
 FUNC parse_unary
+    STACK_CHECK
     ENTER 0
     mov %rdi, %rbx
     call p_cur
@@ -1403,8 +1432,12 @@ ENDF parse_unary
 
 /* parse_primary(P) -> node */
 FUNC parse_primary
+    STACK_CHECK
+    call deadline_tick
     ENTER 32
     mov %rdi, %rbx
+    call p_operand
+    mov %rbx, %rdi
     call p_cur
     mov %rax, %r14
     mov TK_KIND(%r14), %ecx

@@ -102,6 +102,7 @@ ENDF wctx_init
 
 /* expr_has_subq(node rdi) -> eax 1 if the expression contains a subquery */
 FUNC expr_has_subq
+    STACK_CHECK
     ENTER 16
     xor %eax, %eax
     test %rdi, %rdi
@@ -136,6 +137,7 @@ ENDF expr_has_subq
 
 /* fp_has_subq(fp rdi) -> eax */
 FUNC fp_has_subq
+    STACK_CHECK
     ENTER 0
     mov %rdi, %rbx
     mov FP_FILTER(%rbx), %rdi

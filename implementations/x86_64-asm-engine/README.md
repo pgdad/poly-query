@@ -28,7 +28,10 @@ physical planner (see
 [plan separation](#change-cr-3-logical--physical-plan-separation)), and the
 architectural change CR-2: `DECIMAL` precision up to 38 with PQCF v2
 (capability `change.decimal38`, see
-[DECIMAL precision 38](#change-cr-2-decimal-precision-38)).
+[DECIMAL precision 38](#change-cr-2-decimal-precision-38)), and the
+requirement change CR-6: statement size limits (capability
+`change.expression_limits`, see
+[expression size limits](#change-cr-6-expression-size-limits)).
 
 ## Build prerequisites
 
@@ -673,6 +676,172 @@ Known limitations of CR-2: expressions with wide operands are evaluated tuple
 at a time inside vectorized batches (correct and parallel, but without SIMD);
 joins between DECIMALs of different scales stay nested-loop joins, as before.
 
+## Change CR-6: expression size limits
+
+Implements `spec/changes/expression-limits.md` (capability
+`change.expression_limits`, in addition to the earlier changes).
+
+### Limits of this engine
+
+| measure | limit | beyond it |
+|---|---|---|
+| text length | none of its own: `--max-request-bytes` (default 1 GiB) and the query memory budget | as the protocol specifies (`RESOURCE_LIMIT`, HTTP 413) / `RESOURCE_LIMIT` "query memory budget exceeded" |
+| nesting depth | 4,096 levels as counted by the parser (below) - at least 2,047 levels as CR-6 §1 counts them | `RESOURCE_LIMIT` "expression nesting depth exceeds 4096" |
+| operand count | 1,000,000 primary expressions | `RESOURCE_LIMIT` "expression operand count exceeds 1000000" |
+| memory | `--max-query-memory-mb` (default 4 GiB) per query, now shared by the query's parallel workers | `RESOURCE_LIMIT` "query memory budget exceeded" |
+| stack | 1 GiB for the request thread, 256 MiB per parallel worker, checked at every recursive step | `RESOURCE_LIMIT` "statement too complex: stack exhausted (...)" |
+| time | the query timeout, from receipt through parsing, binding, planning and execution | `TIMEOUT` |
+
+*Nesting depth as counted by the parser*: each of these makes the
+recursive-descent parser recurse and adds one level: an expression in
+parentheses, a function argument, the operand of CAST, each part of a CASE,
+an IN-list item, a unary `+`/`-`, `NOT`, a query (subquery, CTE body,
+derived table) and a FROM item. A chain of one binary operator is parsed by
+a loop and adds nothing, and so do comparisons, `BETWEEN`, `LIKE` and
+`IS NULL`. A scalar / `EXISTS` / `IN` subquery or a derived table costs two
+levels (its query and its expression or FROM item), every other CR-6
+construct at most one, so every statement whose CR-6 nesting depth is at most
+2,047 is accepted (4,094 nested parentheses, ABS calls, CASEs or NOTs;
+2,047 nested scalar subqueries or derived tables).
+
+*Operand count*: every primary expression parsed (literals, column
+references, function calls, CAST, CASE, parenthesized expressions,
+subqueries) counts one; this is at least the CR-6 operand count. 1,000,000
+operands means e.g. a 500,000-term `OR` chain of comparisons, a
+999,999-item `IN` list or a 999,999-term sum (all verified in every
+execution mode, see below).
+
+The limits are checked while parsing, so a statement beyond them fails
+early with `RESOURCE_LIMIT` (CR-6 §3 lets that take precedence over a
+syntax error further on). Valid SQL within the limits never fails with
+`PARSE_ERROR` because of its size: the binder's old depth guard (a
+`PARSE_ERROR` "expression too complex" at 400,000 nested binder calls) was
+removed in favour of the stack checks.
+
+### How large statements are processed
+
+* **Long chains.** A chain `a OR b OR c …` is a left-deep tree, so every
+  recursive tree walker (binder, optimizer rules, physical analysis,
+  evaluators, EXPLAIN) recurses once per term. That is safe because each
+  thread that processes queries has a large stack: the request thread runs
+  on the 1 GiB lazily committed stack `main` maps (now with a 64 KiB
+  `PROT_NONE` guard below it), the pool workers are created with 256 MiB
+  stacks (`par.S`), and the server's catalog thread keeps its 1 GiB stack.
+  The deepest walkers use about 230 bytes per level in a worker, so the
+  operand limit keeps every accepted statement well inside every stack.
+* **Stack checks.** Every recursive walker starts with `STACK_CHECK`
+  (`pq.inc`): it compares `%rsp` with the thread's limit `t_stack_lo`
+  (thread-local, `util.S`; 1 MiB above the stack bottom) and raises
+  `RESOURCE_LIMIT` through the normal error path, which in a worker reports
+  the error to `par_for` like any other part error. The limit comes from
+  `stack_set_bottom` (the request thread) or `thread_stack_init`
+  (`pthread_getattr_np`; pool workers and the catalog thread). As a last
+  resort the fault handler, which now runs on an alternate signal stack in
+  every thread (`thread_stack_init`), reports a fault whose stack pointer is
+  below the limit as `RESOURCE_LIMIT` (other faults stay
+  `INTERNAL_ERROR`).
+* **Linear work.** The stages are linear in the statement size:
+  * `expr_batch_const` (`vec.S`), asked at every node by constant folding
+    and by the vectorized evaluator, walked the whole subtree each time
+    (quadratic on long chains: a 100,000-term `OR` never finished); the
+    answer is now cached in the node (`NF_BCDONE` / `NF_BCONST`, set with a
+    locked `or` because workers may set it concurrently).
+  * Constant folding (`rule_fold.S`) re-evaluated the whole subtree of
+    every constant node whose child failed to fold (`1/0 + 1 + 1 …`); a
+    node whose first operand failed is now marked `NF_FOLDERR` and its
+    parent (binary / unary operator, CAST: `eval` computes that operand
+    first, so it would fail the same way) is not re-evaluated.
+  * The lexer (`lexer.S`) allocated "the rest of the statement" for every
+    string literal or quoted identifier (quadratic memory with many
+    literals); it now scans to the closing quote first.
+  * `a || b || c …` copied the growing prefix at every step (quadratic time
+    and arena memory per row: a 10,000-term chain over a 100-row column
+    exceeded the 4 GiB budget); `eval` now evaluates a whole `||` tree left
+    to right into one doubling buffer (`concat_chain`, `eval.S`), with the
+    same NULL rule (the first NULL operand ends the evaluation, as the
+    pairwise evaluation never computed the operands after it). The
+    vectorized engine evaluates `||` through `eval` per row, so every mode
+    shares it.
+  * The vectorized evaluator (`veval`, `vec.S`) left every intermediate
+    vector of a tree on the per-thread scratch stack until the batch ended
+    (one 9 KiB vector per node, spilling into the request arena on long
+    chains); `veval` now moves each node's result down to the scratch top it
+    found on entry and releases the rest, so a chain needs scratch space for
+    its nesting depth only.
+* **Timeout in every stage.** The deadline is set when the request is
+  received (as before) and checked by the executor's loops (as before) and
+  now also by the walkers of parsing (`parse_primary`), binding
+  (`bind_expr`), optimization (`fold_expr`, `prune_expr`) and physical
+  planning (`conj_rv`, `push_conj`, `analyze_conj`, `find_equi`,
+  `lp_print_expr`, `expr_equal`): `deadline_tick` (`util.S`) reads the clock every
+  1,024 calls and preserves all registers, so it can be called at any
+  function entry. Measured: `TIMEOUT` arrives 10-70 ms after expiry in every
+  stage and mode (also for statements whose binding takes ~10 s, such as a
+  100,000-CTE chain).
+* **Memory of large parallel queries.** Two problems surfaced with
+  statements that run many parallel operators (a 100,000-branch
+  `UNION ALL`) and were fixed, since a session must stay usable after a
+  failed statement: (1) `par_body` restored the worker's vector scratch
+  pointer to its value at entry, which was 0 before the first use, so every
+  later part allocated (and leaked) a fresh 8 MiB scratch stack; it now
+  initialises the scratch first. (2) Arena chunks came from `malloc` and,
+  once freed, stayed in fragmented per-thread malloc heaps (tens of GiB
+  resident after such a query); chunks are now mapped directly (`mmap` /
+  `munmap`, still pooled up to 1 GiB). Worker arenas (`AR_PAR`) count their
+  chunks in the shared counter `g_par_mem`, so the memory budget limits the
+  whole query instead of each thread separately.
+
+Two robustness defects found by `tests/regression/robustness_probe.py`
+along the way were fixed as well: a query that failed (e.g. over its memory
+budget) left the budget set on the request arena, so the next `load` of the
+session failed too (`protocol.S` / `server.S` now clear it at request start:
+`limit_after_failed_query` passes), and `serve` kept CR/LF bytes sent before
+a request line in the connection buffer (`server.S` `conn_process` drops
+them: `http_crlf_flood` passes).
+
+### Modules touched
+
+| Module | Change |
+|---|---|
+| `include/pq.inc` | `STACK_CHECK` macro; `AR_PAR` arena field |
+| `include/sql.inc` | parser operand counter `PS_NOPND`; node flags `NF_BCDONE`, `NF_BCONST`, `NF_FOLDERR` |
+| `src/util.S` | `t_stack_lo`, `stack_set_bottom`, `thread_stack_init`, `stack_exhausted`; `deadline_tick`; `mmap`ed arena chunks; shared worker memory budget `g_par_mem` |
+| `src/main.S` | guard pages and stack limit of the request stack; `SA_SIGINFO` fault handler reporting stack exhaustion as `RESOURCE_LIMIT` |
+| `src/par.S` | 256 MiB worker stacks, `thread_stack_init` per worker; worker arenas marked `AR_PAR`, `g_par_mem` reset; scratch initialised before it is saved |
+| `src/server.S` | the catalog thread uses `thread_stack_init`; budget cleared per catalog job; leading CR/LF bytes dropped |
+| `src/lexer.S` | literal buffers sized to the literal |
+| `src/parser.S` | `RESOURCE_LIMIT` for nesting depth (4,096) and operand count (1,000,000) |
+| `src/binder.S` | depth guard replaced by `STACK_CHECK`; `deadline_tick` |
+| `src/vec.S` | cached `expr_batch_const`; `veval` scratch compaction (`veval_node` holds the old body) |
+| `src/rule_fold.S` | `NF_FOLDERR` |
+| `src/eval.S` | `concat_chain` / `concat_append` / `concat_reserve` for `||` trees |
+| `src/eval.S`, `src/functions.S`, `src/exec.S`, `src/pexec.S`, `src/lplan.S`, `src/planner.S`, `src/explain.S`, `src/json.S`, `src/rule_prune.S`, `src/rule_pushdown.S` | `STACK_CHECK` (and `deadline_tick` in planning walkers) at the entry of every recursive function |
+| `src/protocol.S` | capability `change.expression_limits`; request arena budget cleared at request start |
+| `tests/session_test.sh` | CR-6 cases in four execution modes: depth-998 / 2,000 nesting, 10,000-term `OR` / sum / IN / 50,000-term `||`, a 200,000-term `OR`, both `RESOURCE_LIMIT`s, `TIMEOUT` while binding |
+
+### Verification
+
+`robustness_probe.py --only expression_limits` passes (all minimum cases in
+row, vectorized, parallel and auto mode in well under a second each;
+100,000 nested parentheses give `RESOURCE_LIMIT` at once; the 100,000-term
+`OR` chain and the 100,000-item `IN` list are computed in 0.01-0.2 s). The
+whole conformance suite passes with `--modes` (also with `PQ_PAR_MIN=1`)
+and `--transport http`, `http_suite` passes. Scripts kept outside the
+repository ran, in the four probe modes on one session: depth-998
+constructs of every CR-6 kind (CAST, nested CASE, COALESCE, scalar /
+EXISTS / IN subqueries, derived tables, CTEs, comparisons in parentheses,
+unary plus, mixed), 10,000-term `*` / `-` / `||` / `BETWEEN` / `LIKE` /
+FLOAT64 / DECIMAL chains, 25,000-item IN lists, 10,000-argument functions,
+25,000 select items, 10,000 ORDER BY / GROUP BY items, 5,000 UNION ALL
+branches, 1,000 chained CTEs, 100 joins, EXPLAIN of large statements; and
+beyond the minimums 500,000-term `+`, `-`, `AND` and `OR` chains over
+INT64, FLOAT64, DECIMAL(18) and DECIMAL(38) values (also with `mode:"row"`
+and 8 threads), 50,000-term `||` chains over a column, 1,000,000-operand statements, 100,000-deep
+nesting of every construct, and 100,000-branch / -CTE / -WHEN / -item
+statements: every answer was the correct result, `RESOURCE_LIMIT` or
+`TIMEOUT`, never a crash, a hang or a size-caused `PARSE_ERROR`, and the
+session stayed usable (resident memory back to ~0.5 GiB after each).
+
 ## Change CR-3: logical / physical plan separation
 
 Implements `spec/changes/refactor-plan-separation.md`, a behaviour-preserving
@@ -1050,6 +1219,11 @@ for many sort / group / DISTINCT queries beyond the workload.
 * Blocks whose expressions contain subqueries run their operators on one
   thread (subquery results are cached in the shared plan). The `native`
   option is accepted and ignored (`native.kernels` is not claimed).
+* Statement size limits (CR-6): nesting depth 4,096 parser levels (at
+  least 2,047 CR-6 levels), 1,000,000 operands; a 100,000-branch
+  `UNION ALL` exceeds the default memory budget in parallel modes (each
+  branch's scan allocates per worker), and binding a chain of CTEs is
+  quadratic in its length (a 100,000-CTE chain runs into the timeout).
 * `serve` binds IPv4 addresses only (`--host` must be an IPv4 address or
   `localhost`); at most 1000 simultaneous connections.
 * A client that half-closes its socket (`shutdown(SHUT_WR)`) while its query
