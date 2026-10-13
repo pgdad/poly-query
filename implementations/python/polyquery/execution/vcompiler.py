@@ -39,12 +39,17 @@ from .compiler import (
     INT64_MIN,
     Layout,
     arith_kernel,
+    checked,
     compare_kernel,
     compile_expr,
     evaluate_constant,
     like_regex,
 )
 from .context import ExecutionContext
+
+# a vector function processes a batch: checked more often than row closures
+# (compiler.CHECK_INTERVAL)
+VECTOR_CHECK_INTERVAL = 64
 from .functions import compile_function
 
 Columns = Sequence[Sequence[Any]]
@@ -235,8 +240,24 @@ class VectorCompiler:
     def __init__(self, ctx: ExecutionContext, layout: Layout):
         self.ctx = ctx
         self.layout = layout
+        self._countdown = (
+            VECTOR_CHECK_INTERVAL if ctx.cancel_event is not None or ctx.deadline is not None else None
+        )
 
     def compile(self, expr: b.Expr) -> VecFn:
+        if self._countdown is None:
+            return self._compile(expr)
+        # like the row compiler (CHECK_INTERVAL), more often: a vector
+        # function processes a whole batch
+        self._countdown -= 1
+        check = not self._countdown
+        if check:
+            self._countdown = VECTOR_CHECK_INTERVAL
+            self.ctx.check()
+        fn = self._compile(expr)
+        return checked(fn, self.ctx.check) if check else fn
+
+    def _compile(self, expr: b.Expr) -> VecFn:
         if not isinstance(expr, b.Literal) and b.is_constant(expr) and not b.has_side_effects(expr):
             return self._constant(expr)
         method = getattr(self, "_v_" + type(expr).__name__, None)

@@ -7,6 +7,7 @@ import logging
 from typing import Any, BinaryIO, Iterable
 
 from .. import errors
+from ..execution.context import gc_paused
 from .handlers import RequestHandler
 from .serialize import dumps
 
@@ -79,11 +80,16 @@ def handle_line(handler: RequestHandler, line: bytes) -> dict[str, Any] | None:
 
 def run_session(handler: RequestHandler, stdin: BinaryIO, stdout: BinaryIO) -> None:
     for line in stdin:
-        response = handle_line(handler, line)
-        if response is None:
-            continue
-        stdout.write(encode_response(response))
-        stdout.flush()
+        # the collector stays paused until the response is out: the pass
+        # that follows a large statement must not delay its answer (a
+        # TIMEOUT is due within 1 s of expiry, CR-6 §4)
+        with gc_paused():
+            response = handle_line(handler, line)
+            if response is None:
+                continue
+            stdout.write(encode_response(response))
+            stdout.flush()
+        handler.release_failed()
 
 
 def run_exec(handler: RequestHandler, payload: bytes, stdout: BinaryIO) -> None:
@@ -96,5 +102,7 @@ def run_exec(handler: RequestHandler, payload: bytes, stdout: BinaryIO) -> None:
         return
     requests: Iterable[Any] = doc if isinstance(doc, list) else [doc]
     for request in requests:
-        stdout.write(encode_response(handle_request(handler, request)))
-        stdout.flush()
+        with gc_paused():  # as in run_session
+            stdout.write(encode_response(handle_request(handler, request)))
+            stdout.flush()
+        handler.release_failed()

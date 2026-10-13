@@ -253,6 +253,8 @@ class RequestHandler:
     def __init__(self, engine: Engine):
         self.engine = engine
         self.config = engine.config
+        # per thread: the exception of the last failed request (see handle)
+        self._failed = threading.local()
 
     def handle(self, request: Any, control: QueryControl | None = None) -> dict[str, Any]:
         """Handles one decoded request; never raises."""
@@ -275,7 +277,18 @@ class RequestHandler:
                 response["stats"]["elapsed_us"] = int((time.perf_counter() - started) * 1e6)
             return response
         except Exception as e:  # noqa: BLE001 - must never crash the session
+            # The traceback holds everything the failed statement built
+            # (parse tree, plans, compiled closures): for a large statement,
+            # freeing it takes long enough to delay the answer (a TIMEOUT is
+            # due within 1 s of expiry). It is kept until the transport has
+            # sent the response and calls release_failed().
+            self._failed.error = e
             return {"id": req_id, "ok": False, "error": error_of(e).to_json()}
+
+    def release_failed(self) -> None:
+        """Frees what the last failed request of this thread left behind;
+        transports call it after sending the response."""
+        self._failed.error = None
 
     # ---------------------------------------------------------------- ops
 

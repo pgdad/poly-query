@@ -29,52 +29,100 @@ def _literal(e: b.Literal) -> str:
 
 
 def render_expr(e: b.Expr) -> str:
-    r = render_expr
+    """``e`` as SQL-like text. The pieces are collected in one list and
+    joined once: nesting f-strings would copy the text of every subtree at
+    each level, quadratic for long operator chains."""
+    out: list[str] = []
+    _render(e, out)
+    return "".join(out)
+
+
+def _render(e: b.Expr, out: list[str]) -> None:
+    r, emit = _render, out.append
     if isinstance(e, b.Literal):
-        return _literal(e)
-    if isinstance(e, b.ColumnRef):
-        return e.name
-    if isinstance(e, b.Unary):
-        return ("-" if e.op == "neg" else "+") + r(e.operand)
-    if isinstance(e, (b.Arith, b.Compare)):
-        return f"({r(e.left)} {e.op} {r(e.right)})"
-    if isinstance(e, b.Logical):
-        return f"({r(e.left)} {e.op} {r(e.right)})"
-    if isinstance(e, b.Concat):
-        return f"({r(e.left)} || {r(e.right)})"
-    if isinstance(e, b.Not):
-        return f"(NOT {r(e.operand)})"
-    if isinstance(e, b.IsNull):
-        return f"({r(e.operand)} IS {'NOT ' if e.negated else ''}NULL)"
-    if isinstance(e, b.Cast):
-        return r(e.operand) if e.implicit else f"CAST({r(e.operand)} AS {e.type.name})"
-    if isinstance(e, b.Like):
-        return f"({r(e.operand)} {'NOT ' if e.negated else ''}LIKE {r(e.pattern)})"
-    if isinstance(e, b.Between):
-        neg = "NOT " if e.negated else ""
-        return f"({r(e.operand)} {neg}BETWEEN {r(e.low)} AND {r(e.high)})"
-    if isinstance(e, b.InList):
-        neg = "NOT " if e.negated else ""
-        return f"({r(e.operand)} {neg}IN ({', '.join(r(i) for i in e.items)}))"
-    if isinstance(e, b.Case):
-        parts = ["CASE"]
+        emit(_literal(e))
+    elif isinstance(e, b.ColumnRef):
+        emit(e.name)
+    elif isinstance(e, b.Unary):
+        emit("-" if e.op == "neg" else "+")
+        r(e.operand, out)
+    elif isinstance(e, (b.Arith, b.Compare, b.Logical, b.Concat)):
+        emit("(")
+        r(e.left, out)
+        emit(" || " if isinstance(e, b.Concat) else f" {e.op} ")
+        r(e.right, out)
+        emit(")")
+    elif isinstance(e, b.Not):
+        emit("(NOT ")
+        r(e.operand, out)
+        emit(")")
+    elif isinstance(e, b.IsNull):
+        emit("(")
+        r(e.operand, out)
+        emit(f" IS {'NOT ' if e.negated else ''}NULL)")
+    elif isinstance(e, b.Cast):
+        if e.implicit:
+            r(e.operand, out)
+        else:
+            emit("CAST(")
+            r(e.operand, out)
+            emit(f" AS {e.type.name})")
+    elif isinstance(e, b.Like):
+        emit("(")
+        r(e.operand, out)
+        emit(f" {'NOT ' if e.negated else ''}LIKE ")
+        r(e.pattern, out)
+        emit(")")
+    elif isinstance(e, b.Between):
+        emit("(")
+        r(e.operand, out)
+        emit(f" {'NOT ' if e.negated else ''}BETWEEN ")
+        r(e.low, out)
+        emit(" AND ")
+        r(e.high, out)
+        emit(")")
+    elif isinstance(e, b.InList):
+        emit("(")
+        r(e.operand, out)
+        emit(f" {'NOT ' if e.negated else ''}IN (")
+        _render_list(e.items, out)
+        emit("))")
+    elif isinstance(e, b.Case):
+        emit("CASE")
         for cond, result in e.whens:
-            parts.append(f"WHEN {r(cond)} THEN {r(result)}")
+            emit(" WHEN ")
+            r(cond, out)
+            emit(" THEN ")
+            r(result, out)
         if e.else_ is not None:
-            parts.append(f"ELSE {r(e.else_)}")
-        parts.append("END")
-        return " ".join(parts)
-    if isinstance(e, b.Function):
-        return f"{e.name}({', '.join(r(a) for a in e.args)})"
-    if isinstance(e, b.AggCall):
+            emit(" ELSE ")
+            r(e.else_, out)
+        emit(" END")
+    elif isinstance(e, b.Function):
+        emit(f"{e.name}(")
+        _render_list(e.args, out)
+        emit(")")
+    elif isinstance(e, b.AggCall):
         if e.arg is None:
-            return f"{e.name}(*)"
-        return f"{e.name}({'DISTINCT ' if e.distinct else ''}{r(e.arg)})"
-    if isinstance(e, b.ScalarSubquery):
-        return f"(subquery #{e.subquery.id})"
-    if isinstance(e, b.Exists):
-        return f"EXISTS(subquery #{e.subquery.id})"
-    if isinstance(e, b.InSubquery):
-        neg = "NOT " if e.negated else ""
-        return f"({r(e.operand)} {neg}IN (subquery #{e.subquery.id}))"
-    return type(e).__name__
+            emit(f"{e.name}(*)")
+        else:
+            emit(f"{e.name}({'DISTINCT ' if e.distinct else ''}")
+            r(e.arg, out)
+            emit(")")
+    elif isinstance(e, b.ScalarSubquery):
+        emit(f"(subquery #{e.subquery.id})")
+    elif isinstance(e, b.Exists):
+        emit(f"EXISTS(subquery #{e.subquery.id})")
+    elif isinstance(e, b.InSubquery):
+        emit("(")
+        r(e.operand, out)
+        emit(f" {'NOT ' if e.negated else ''}IN (subquery #{e.subquery.id}))")
+    else:
+        emit(type(e).__name__)
+
+
+def _render_list(items: tuple[b.Expr, ...], out: list[str]) -> None:
+    for i, item in enumerate(items):
+        if i:
+            out.append(", ")
+        _render(item, out)

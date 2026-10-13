@@ -13,6 +13,7 @@ from typing import ClassVar
 
 from ...analysis import bound as b
 from ...datatypes import BOOLEAN
+from ...limits import Check, no_check
 from .. import logical as lp
 
 
@@ -49,10 +50,12 @@ class RewriteExpressions(Rule):
 
     name = "rewrite_expressions"
 
-    def __init__(self, rules: list[ExpressionRule]):
+    def __init__(self, rules: list[ExpressionRule], check: Check = no_check):
         self.rules = rules
+        self.check = check  # the statement's deadline check, at every node
 
     def rewrite(self, expr: b.Expr) -> b.Expr:
+        self.check()
         expr = b.map_children(expr, self.rewrite)
         for rule in self.rules:
             expr = rule.rewrite(expr)

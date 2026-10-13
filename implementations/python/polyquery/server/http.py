@@ -5,6 +5,7 @@ responses, NDJSON streaming with backpressure and the query lifecycle
 from __future__ import annotations
 
 import logging
+import re
 import select
 import socket
 import socketserver
@@ -16,6 +17,7 @@ from typing import TYPE_CHECKING, Any
 from urllib.parse import parse_qs, unquote, urlsplit
 
 from .. import errors
+from ..execution.context import gc_paused
 from ..protocol.handlers import QueryControl, capabilities_info, error_of, version_info
 from ..protocol.serialize import dumps
 from ..protocol.session import decode_request, encode_response, precheck_request
@@ -63,6 +65,8 @@ STREAM_ROWS_PER_LINE = 10_000
 # oversized request bodies up to this size are read and discarded so that
 # the 413 response reaches the client; larger ones close the connection
 _DISCARD_LIMIT = 64 * 1024 * 1024
+# a chunk-size line (without extensions)
+_CHUNK_SIZE = re.compile(rb"[0-9A-Fa-f]+")
 _WRITE_POLL_MS = 50
 
 # (path pattern, method -> endpoint); "{}" matches one percent-decoded segment
@@ -297,11 +301,13 @@ class ApiRequestHandler(BaseHTTPRequestHandler):
         total = 0
         while True:
             line = self.rfile.readline(65537)
-            try:
-                size = int(line.split(b";", 1)[0].strip(), 16)
-            except ValueError:
+            size_text = line.split(b";", 1)[0].strip()
+            # chunk-size is 1*HEXDIG (RFC 9112 §7.1): int() alone would also
+            # accept a sign, "0x" or "_" (and a negative size reads to EOF)
+            if not _CHUNK_SIZE.fullmatch(size_text):
                 self.close_connection = True
-                raise _HttpError(400, errors.invalid_request("malformed chunked body")) from None
+                raise _HttpError(400, errors.invalid_request("malformed chunked body"))
+            size = int(size_text, 16)
             if size == 0:
                 while self.rfile.readline(65537) not in (b"\r\n", b"\n", b""):
                     pass  # trailer fields are ignored
@@ -480,7 +486,17 @@ class ApiRequestHandler(BaseHTTPRequestHandler):
     # ------------------------------------------------------------ queries
 
     def _run_query(self, request: dict[str, Any], *, stream: bool) -> None:
-        """Registers, admits and executes one query, then reports it."""
+        """Registers, admits and executes one query, then reports it. For a
+        plain (not streamed) query the garbage collector stays paused until
+        the response is sent (see protocol.session.run_session); streams
+        pause it per batch."""
+        if stream:
+            self._register_and_run(request, stream=True)
+        else:
+            with gc_paused():
+                self._register_and_run(request, stream=False)
+
+    def _register_and_run(self, request: dict[str, Any], *, stream: bool) -> None:
         app = self.app
         started = time.monotonic()
         query_id, timeout_ms = _requested_control(request)
@@ -515,6 +531,7 @@ class ApiRequestHandler(BaseHTTPRequestHandler):
         app.query_finished(active.query_id, outcome.error, started, outcome.rows)
         if outcome.response is not None:
             self._send_protocol(outcome.response, headers=headers)
+        app.handler.release_failed()
 
     def _execute(self, request: dict[str, Any], control: QueryControl) -> _Outcome:
         response = self.app.handler.handle(request, control)

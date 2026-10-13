@@ -571,6 +571,7 @@ class PhysicalPlanner:
         return PhysicalPlan(root, logical.columns, self.subplans, mode, kernels)
 
     def plan(self, node: lp.LogicalNode) -> PhysicalNode:
+        self.options.check()
         result = self._plan(node)
         for expr in result.expressions():
             for sq in b.subqueries(expr):
@@ -1023,18 +1024,15 @@ def _signature(root: PhysicalNode) -> str:
         for key in n.layout:
             rels.setdefault(key[0], len(rels))
 
-    def canonical_expr(e: b.Expr) -> b.Expr:
-        if isinstance(e, b.ColumnRef):
-            return dataclasses.replace(e, rel=rels[e.rel])
-        return b.map_children(e, canonical_expr)
-
     def canonical(value: Any) -> Any:
         if isinstance(value, PhysicalNode):
             return None  # the subtree's structure: the walk order and input counts
         if isinstance(value, (Table, Index)):
             return ["object", id(value)]
         if isinstance(value, b.Expr):
-            return repr(canonical_expr(value))
+            out: list[str] = []
+            _expr_signature(value, rels, out)
+            return "".join(out)
         if isinstance(value, (list, tuple)):
             return [canonical(v) for v in value]
         return repr(value)
@@ -1049,6 +1047,38 @@ def _signature(root: PhysicalNode) -> str:
         layout = [[rels[key[0]], key[1]] for key in n.layout]
         parts.append([type(n).__name__, fields, layout, len(n.inputs())])
     return json.dumps(parts)
+
+
+def _expr_signature(e: b.Expr, rels: dict[int, int], out: list[str]) -> None:
+    """Appends the structure of ``e`` to ``out``: node types, operators,
+    literal values and types, with the relation ids of column keys
+    renumbered by ``rels``. Collected in one list (rendering each subtree
+    as a string would copy it again at every level of a deep tree)."""
+    out.append(type(e).__name__ + "(")
+    for f in dataclasses.fields(e):
+        value = getattr(e, f.name)
+        out.append(f.name + "=")
+        if isinstance(e, b.ColumnRef) and f.name == "rel":
+            out.append(repr(rels[value]))
+        elif isinstance(value, b.Expr):
+            _expr_signature(value, rels, out)
+        elif isinstance(value, tuple) and value and isinstance(value[0], (b.Expr, tuple)):
+            out.append("(")
+            for item in value:
+                if isinstance(item, tuple):  # CASE branches
+                    out.append("(")
+                    for part in item:
+                        _expr_signature(part, rels, out)
+                        out.append(",")
+                    out.append(")")
+                else:
+                    _expr_signature(item, rels, out)
+                out.append(",")
+            out.append(")")
+        else:
+            out.append(repr(value))
+        out.append(",")
+    out.append(")")
 
 
 def _share_common_subqueries(trees: list[PhysicalNode], subplans: dict[int, PhysicalNode]) -> None:

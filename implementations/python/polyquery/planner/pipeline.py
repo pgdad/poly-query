@@ -12,5 +12,7 @@ from .planner import LogicalPlanner
 
 def plan_statement(statement: b.BoundStatement, options: PlanOptions) -> PhysicalPlan:
     logical = LogicalPlanner(statement.ids).plan_statement(statement.query)
-    optimized = Optimizer.for_options(options.optimize, options.evaluate).optimize(logical)
+    options.check()
+    optimized = Optimizer.for_options(options.optimize, options.evaluate, options.check).optimize(logical)
+    options.check()
     return PhysicalPlanner(options).plan_statement(optimized)

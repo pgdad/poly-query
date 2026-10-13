@@ -208,13 +208,40 @@ def like_regex(pattern: str) -> re.Pattern[str]:
     return re.compile("".join(parts), re.DOTALL)
 
 
+# A large expression takes long to compile and to evaluate for one row:
+# every CHECK_INTERVAL-th compiled node checks the timeout / cancellation
+# (while compiling, and whenever its closure runs), so that operators keep
+# observing them however large the expressions are (CR-6 §4).
+CHECK_INTERVAL = 1024
+
+
+def checked(fn: Callable[..., Any], check: Callable[[], None]) -> Callable[..., Any]:
+    """``fn`` calling ``check()`` first."""
+
+    def run(*args: Any) -> Any:
+        check()
+        return fn(*args)
+
+    return run
+
+
 class Compiler:
     def __init__(self, ctx: ExecutionContext, layout: Layout):
         self.ctx = ctx
         self.layout = layout
+        # countdown to the next checked node (None: nothing to check)
+        self._countdown = CHECK_INTERVAL if ctx.cancel_event is not None or ctx.deadline is not None else None
 
     def compile(self, expr: b.Expr) -> RowFn:
-        return getattr(self, "_c_" + type(expr).__name__)(expr)
+        if self._countdown is None:
+            return getattr(self, "_c_" + type(expr).__name__)(expr)
+        self._countdown -= 1
+        check = not self._countdown
+        if check:
+            self._countdown = CHECK_INTERVAL
+            self.ctx.check()
+        fn = getattr(self, "_c_" + type(expr).__name__)(expr)
+        return checked(fn, self.ctx.check) if check else fn
 
     def _c_Literal(self, e: b.Literal) -> RowFn:
         value = e.value
