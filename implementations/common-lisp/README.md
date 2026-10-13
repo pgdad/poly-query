@@ -1634,6 +1634,17 @@ copy-free scans for grouped aggregation.
 * Each connection has its own thread; there is no limit on the number of
   connections. Request bodies are held in memory (up to
   `--max-request-bytes`).
+* Statements near the size limits are correct but not fast on large
+  tables: the vectorized executor allocates one vector per expression node
+  and batch (a 250,000-term sum allocates about 4 GB of short-lived vectors
+  per 2,048 rows), operators with more than 64 vector operands run row by
+  row, and very wide select lists and aggregations work on slices of a
+  batch. They keep the timeout and the memory budget; on 200,000 rows they
+  typically end with `TIMEOUT` (or `RESOURCE_LIMIT` for results and groups
+  beyond the memory budget).
+* `explain` requests over HTTP (`/v1/explain`) are planned on the
+  connection thread; they honour `options.timeout_ms` but not
+  `--query-timeout-ms`, and they do not count as queries for admission.
 * Operators that run for a long time between row boundaries (e.g. a large
   in-memory sort) notice cancellation only at their next check; the client
   still receives `CANCELLED`/`TIMEOUT` within ~50 ms, but the worker stays
