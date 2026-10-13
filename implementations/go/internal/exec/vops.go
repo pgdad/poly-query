@@ -235,11 +235,23 @@ type exprSet struct {
 	buf     types.Row
 }
 
+// maxVectorNodes is the size (in nodes) from which an expression is
+// evaluated row by row in vectorized operators: its vectorized form would
+// keep a batch-sized buffer per node (statements may have expressions of
+// hundreds of thousands of nodes, spec/changes/expression-limits.md).
+const maxVectorNodes = 1024
+
 func newExprSet(ec *Context, cols []plan.Column, exprs []plan.Expr) (*exprSet, error) {
 	vc := newVCompiler(ec, cols)
 	s := &exprSet{classes: vc.classes, buf: make(types.Row, len(cols))}
 	for _, e := range exprs {
-		v, err := vc.compile(e)
+		compile := vc.compile
+		if sizeAtLeast(e, maxVectorNodes) {
+			// Every vectorized node holds a batch of results: evaluate
+			// huge expressions row by row within the batch instead.
+			compile = vc.fallback
+		}
+		v, err := compile(e)
 		if err != nil {
 			return nil, err
 		}
