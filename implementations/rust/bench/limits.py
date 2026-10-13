@@ -213,6 +213,11 @@ def edge_cases() -> list:
         ("mixed_join_chain_6000", "SELECT count(*) FROM n t0 " + " ".join(
             (f"LEFT JOIN n t{i} ON t{i - 1}.x = t{i}.x" if i % 100 == 0 else f"JOIN n t{i} ON t{i - 1}.x = t{i}.x")
             for i in range(1, 6000)), 100),
+        ("cte_filter_chain_10000", "WITH c0 AS (SELECT x FROM n), " + ", ".join(
+            f"c{i} AS (SELECT x FROM c{i - 1} WHERE x > {-i})" for i in range(1, 10000))
+         + " SELECT count(*) FROM c9999", 100),
+        ("derived_filter_4000", "SELECT count(*) FROM " + "(SELECT x FROM " * 4000 + "n"
+         + "".join(f" WHERE x > {-i - 1}) t{i}" for i in range(4000)), 100),
         ("cte_star_chain_20000", "WITH c0 AS (SELECT * FROM n), " + ", ".join(
             f"c{i} AS (SELECT * FROM c{i - 1})" for i in range(1, 20000)) + " SELECT count(*) FROM c19999", 100),
         ("union_star_20000", "SELECT count(*) FROM (" + " UNION ALL ".join("SELECT * FROM n" for _ in range(20_000))

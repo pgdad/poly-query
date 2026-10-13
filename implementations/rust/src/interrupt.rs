@@ -6,7 +6,9 @@
 //! planning) do not carry a context; instead the engine installs the
 //! statement's [`Interrupt`] for the current thread while they run
 //! ([`install`]), and the work in those stages that grows with the size of
-//! the statement calls [`poll`].
+//! the statement calls [`poll`]. Plan rewrites that cannot return errors
+//! (optimizer rules, physical planning) call [`checkpoint`], which unwinds
+//! to the enclosing [`catching`] with the error.
 
 use std::cell::{Cell, RefCell};
 use std::sync::Arc;
@@ -92,6 +94,31 @@ pub fn poll() -> Result<()> {
     if due { check() } else { Ok(()) }
 }
 
+/// Unwinding payload of [`checkpoint`].
+struct Interrupted(Error);
+
+/// [`poll`] plus [`crate::stack::check`] for code that cannot return an
+/// error: a failure unwinds (without running the panic hook) to the
+/// enclosing [`catching`]. Must not be called while a lock is held.
+#[inline]
+pub fn checkpoint() {
+    if let Err(e) = poll().and_then(|()| crate::stack::check()) {
+        std::panic::resume_unwind(Box::new(Interrupted(e)));
+    }
+}
+
+/// Runs `f`, turning an unwinding [`checkpoint`] into its error (other
+/// panics continue unwinding).
+pub fn catching<T>(f: impl FnOnce() -> T) -> Result<T> {
+    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(f)) {
+        Ok(v) => Ok(v),
+        Err(payload) => match payload.downcast::<Interrupted>() {
+            Ok(i) => Err(i.0),
+            Err(other) => std::panic::resume_unwind(other),
+        },
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -116,5 +143,14 @@ mod tests {
             cancel: Some(flag),
         });
         assert_eq!(check().unwrap_err().code, ErrorCode::Cancelled);
+        let r = catching(|| {
+            for _ in 0..=POLL_INTERVAL {
+                checkpoint();
+            }
+            7
+        });
+        assert_eq!(r.unwrap_err().code, ErrorCode::Cancelled);
+        drop(_g);
+        assert_eq!(catching(|| 7).unwrap(), 7);
     }
 }

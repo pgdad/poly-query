@@ -491,7 +491,9 @@ impl Engine {
         let catalog = self.catalog();
         let logical = self.logical_plan(&catalog, q, opts)?;
         interrupt.check()?;
-        let plan = physical::plan(&logical, &catalog, self.physical_options(opts));
+        let plan = interrupt::catching(|| {
+            physical::plan(&logical, &catalog, self.physical_options(opts))
+        })?;
         interrupt.check()?;
         let json = plan.to_json();
         interrupt.check()?;
@@ -560,7 +562,8 @@ impl Engine {
                 interrupt.check()?;
                 let t2 = Instant::now();
                 let physical_opts = self.physical_options(opts);
-                let plan = physical::plan(&logical, &catalog, physical_opts);
+                let plan =
+                    interrupt::catching(|| physical::plan(&logical, &catalog, physical_opts))?;
                 interrupt.check()?;
                 if crate::log::enabled(crate::log::LogLevel::Debug) {
                     let us = |d: Duration| Json::uint(d.as_micros() as u64);
@@ -599,11 +602,15 @@ impl Engine {
                 // A vectorized/parallel execution that fails is re-run with
                 // the row-at-a-time reference engine (see `QueryCursor`),
                 // planned from the same logical plan.
-                let replay = plan.execution.vectorized.then(|| {
-                    let baseline = physical::plan(&logical, &catalog, physical_opts.row_baseline());
+                let replay = if plan.execution.vectorized {
+                    let baseline = interrupt::catching(|| {
+                        physical::plan(&logical, &catalog, physical_opts.row_baseline())
+                    })?;
                     let ctx = make_ctx(&baseline);
-                    (baseline.root, ctx)
-                });
+                    Some((baseline.root, ctx))
+                } else {
+                    None
+                };
                 Ok(QueryCursor {
                     columns,
                     source: CursorSource::Plan(build(plan.root, &ctx)),

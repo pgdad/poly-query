@@ -118,7 +118,8 @@ impl<'r> Optimizer<'r> {
         }
         for rule in self.rules {
             interrupt::check()?;
-            plan = rule.apply(plan);
+            // Rules call `interrupt::checkpoint` per plan node.
+            plan = interrupt::catching(|| rule.apply(plan))?;
         }
         Ok(plan)
     }

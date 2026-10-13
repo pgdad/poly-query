@@ -66,6 +66,7 @@ fn inner_join_inputs(plan: &LogicalPlan, limit: usize) -> usize {
 
 /// Reorders every inner-join chain of `plan` (bottom-up).
 fn reorder_joins(plan: LogicalPlan) -> LogicalPlan {
+    crate::interrupt::checkpoint();
     let b = |p: Box<LogicalPlan>| Box::new(reorder_joins(*p));
     match plan {
         LogicalPlan::Join {
