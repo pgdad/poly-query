@@ -1,6 +1,9 @@
 package optimizer
 
-import "polyquery/internal/plan"
+import (
+	"polyquery/internal/interrupt"
+	"polyquery/internal/plan"
+)
 
 // PredicatePushdown moves filter predicates as close to the table scans as
 // possible: WHERE conjuncts that reference a single join input are
@@ -13,19 +16,26 @@ import "polyquery/internal/plan"
 // aggregation or a LIMIT, out of the NULL-extended side of a LEFT join, or
 // across operators where an extra evaluation would be observable
 // (subqueries, PQ_SLEEP).
-type PredicatePushdown struct{}
+type PredicatePushdown struct {
+	// Interrupt aborts the rule at the query's deadline (nil: never).
+	Interrupt *interrupt.Checker
+}
 
 // Name implements Rule.
 func (PredicatePushdown) Name() string { return "predicate_pushdown" }
 
 // Apply implements Rule.
-func (PredicatePushdown) Apply(n plan.Node) plan.Node {
-	return everyPlan(n, func(n plan.Node) plan.Node { return push(n, nil) })
+func (r PredicatePushdown) Apply(n plan.Node) plan.Node {
+	pd := pusher{r.Interrupt}
+	return everyPlan(n, func(n plan.Node) plan.Node { return pd.push(n, nil) })
 }
+
+type pusher struct{ intr *interrupt.Checker }
 
 // push rewrites n with the given predicates (conjuncts that must hold on n's
 // output) placed as low as possible.
-func push(n plan.Node, preds []plan.Expr) plan.Node {
+func (pd pusher) push(n plan.Node, preds []plan.Expr) plan.Node {
+	tick(pd.intr)
 	switch x := n.(type) {
 	case *plan.Filter:
 		for _, c := range plan.Conjuncts(x.Pred) {
@@ -33,24 +43,24 @@ func push(n plan.Node, preds []plan.Expr) plan.Node {
 				preds = append(preds, c)
 			}
 		}
-		return push(x.Input, preds)
+		return pd.push(x.Input, preds)
 	case *plan.Join:
-		return pushJoin(x, preds)
+		return pd.pushJoin(x, preds)
 	case *plan.Project:
 		down, keep := throughProject(x, preds)
-		return filter(&plan.Project{Input: push(x.Input, down), Exprs: x.Exprs, Cols: x.Cols}, keep)
+		return filter(&plan.Project{Input: pd.push(x.Input, down), Exprs: x.Exprs, Cols: x.Cols}, keep)
 	case *plan.Aggregate:
 		c := *x
-		c.Input = push(x.Input, nil)
+		c.Input = pd.push(x.Input, nil)
 		return filter(&c, preds)
 	case *plan.Sort:
-		return &plan.Sort{Input: push(x.Input, preds), Keys: x.Keys}
+		return &plan.Sort{Input: pd.push(x.Input, preds), Keys: x.Keys}
 	case *plan.Limit:
-		return filter(&plan.Limit{Input: push(x.Input, nil), Count: x.Count, Offset: x.Offset}, preds)
+		return filter(&plan.Limit{Input: pd.push(x.Input, nil), Count: x.Count, Offset: x.Offset}, preds)
 	case *plan.Distinct:
-		return &plan.Distinct{Input: push(x.Input, preds)}
+		return &plan.Distinct{Input: pd.push(x.Input, preds)}
 	case *plan.UnionAll:
-		return pushUnion(x, preds)
+		return pd.pushUnion(x, preds)
 	}
 	return filter(n, preds)
 }
@@ -58,7 +68,7 @@ func push(n plan.Node, preds []plan.Expr) plan.Node {
 // pushUnion pushes predicates over a UNION ALL's output into every branch,
 // rewritten in terms of the branch's columns. Predicates containing
 // subqueries stay above (their plans must not be duplicated).
-func pushUnion(u *plan.UnionAll, preds []plan.Expr) plan.Node {
+func (pd pusher) pushUnion(u *plan.UnionAll, preds []plan.Expr) plan.Node {
 	var down, keep []plan.Expr
 	for _, p := range preds {
 		if hasSubquery(p) {
@@ -84,7 +94,7 @@ func pushUnion(u *plan.UnionAll, preds []plan.Expr) plan.Node {
 				return nil
 			})
 		}
-		out.Inputs[i] = push(in, mapped)
+		out.Inputs[i] = pd.push(in, mapped)
 	}
 	return filter(out, keep)
 }
@@ -144,7 +154,7 @@ func classify(e plan.Expr, left, right map[plan.ColumnID]bool) side {
 	return s
 }
 
-func pushJoin(j *plan.Join, preds []plan.Expr) plan.Node {
+func (pd pusher) pushJoin(j *plan.Join, preds []plan.Expr) plan.Node {
 	left, right := idSet(j.Left.Schema()), idSet(j.Right.Schema())
 	var lp, rp, cond, above []plan.Expr
 	on := plan.Conjuncts(j.Cond)
@@ -165,7 +175,7 @@ func pushJoin(j *plan.Join, preds []plan.Expr) plan.Node {
 				cond = append(cond, c)
 			}
 		}
-		out := &plan.Join{Kind: plan.JoinLeft, Left: push(j.Left, lp), Right: push(j.Right, rp), Cond: plan.And(cond)}
+		out := &plan.Join{Kind: plan.JoinLeft, Left: pd.push(j.Left, lp), Right: pd.push(j.Right, rp), Cond: plan.And(cond)}
 		return filter(out, above)
 	}
 	for _, p := range append(on, preds...) {
@@ -182,5 +192,5 @@ func pushJoin(j *plan.Join, preds []plan.Expr) plan.Node {
 	if len(cond) == 0 {
 		kind = plan.JoinCross
 	}
-	return &plan.Join{Kind: kind, Left: push(j.Left, lp), Right: push(j.Right, rp), Cond: plan.And(cond)}
+	return &plan.Join{Kind: kind, Left: pd.push(j.Left, lp), Right: pd.push(j.Right, rp), Cond: plan.And(cond)}
 }

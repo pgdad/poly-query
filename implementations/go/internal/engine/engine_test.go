@@ -157,7 +157,7 @@ func TestPhase2Queries(t *testing.T) {
 	if err != nil || len(res.Rows) != 1 || !strings.Contains(res.Rows[0][0].S, `"op":"TableScan"`) {
 		t.Errorf("EXPLAIN: %v %+v", err, res)
 	}
-	if _, err := e.Explain("SELECT nope FROM people", QueryOptions{}); !errs.Is(err, errs.SemanticError) {
+	if _, err := e.Explain(context.Background(), "SELECT nope FROM people", QueryOptions{}); !errs.Is(err, errs.SemanticError) {
 		t.Errorf("explain error: %v", err)
 	}
 }

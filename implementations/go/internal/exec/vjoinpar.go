@@ -37,6 +37,9 @@ func newBuildInput(ec *Context, buildNode physical.Node, keyExprs func() (*exprS
 	}
 	in := &buildInput{ranges: ranges, ops: ops, srcs: srcs, keys: make([]*exprSet, nw)}
 	for w := range in.keys {
+		if err := ec.Check(); err != nil {
+			return nil, err
+		}
 		if in.keys[w], err = keyExprs(); err != nil {
 			return nil, err
 		}

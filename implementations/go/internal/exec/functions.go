@@ -13,7 +13,7 @@ import (
 
 // compileFunc compiles a scalar function call (functions.md §1).
 func compileFunc(ec *Context, lay layout, x *plan.Func) (evalFn, error) {
-	args, err := compileAll(ec, lay, x.Args)
+	args, err := compileExprs(ec, lay, x.Args)
 	if err != nil {
 		return nil, err
 	}
@@ -457,11 +457,11 @@ func sleep(ec *Context, v types.Value) (types.Value, error) {
 // ---------------------------------------------------------------- LIKE
 
 func compileLike(ec *Context, lay layout, x *plan.Like) (evalFn, error) {
-	vf, err := compile(ec, lay, x.X)
+	vf, err := compileExpr(ec, lay, x.X)
 	if err != nil {
 		return nil, err
 	}
-	pf, err := compile(ec, lay, x.Pattern)
+	pf, err := compileExpr(ec, lay, x.Pattern)
 	if err != nil {
 		return nil, err
 	}

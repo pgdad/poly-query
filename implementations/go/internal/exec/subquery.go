@@ -74,6 +74,54 @@ type subResult struct {
 // maxMemo bounds the number of memoized results per correlated subquery.
 const maxMemo = 1 << 14
 
+// subqueryMemo returns the memo of a correlated subquery's results by the
+// values of its outer columns. It is shared by every evaluator of x in the
+// query: a correlated subquery nested in another one is compiled anew for
+// each evaluation of the enclosing one, and a memo per compilation would
+// make nested correlated subqueries exponential in their nesting depth.
+// x.Correlated lists every outer column x depends on (including those of
+// the subqueries nested in it), so equal keys mean equal results. A
+// subquery calling PQ_SLEEP keeps a memo per compilation (its number of
+// evaluations is observable).
+func (c *Context) subqueryMemo(x *plan.Subquery) map[string]*subResult {
+	if volatilePlan(x.Plan) {
+		return map[string]*subResult{}
+	}
+	if c.memos == nil {
+		c.memos = map[*plan.Subquery]map[string]*subResult{}
+	}
+	m, ok := c.memos[x]
+	if !ok {
+		m = map[string]*subResult{}
+		c.memos[x] = m
+	}
+	return m
+}
+
+// volatilePlan reports whether a plan, or a subquery in it, calls PQ_SLEEP.
+func volatilePlan(n plan.Node) bool {
+	for _, e := range plan.NodeExprs(n) {
+		found := false
+		plan.Walk(e, func(x plan.Expr) {
+			switch y := x.(type) {
+			case *plan.Func:
+				found = found || y.Name == "PQ_SLEEP"
+			case *plan.Subquery:
+				found = found || volatilePlan(y.Plan)
+			}
+		})
+		if found {
+			return true
+		}
+	}
+	for _, c := range n.Children() {
+		if volatilePlan(c) {
+			return true
+		}
+	}
+	return false
+}
+
 // compileSubquery compiles a subquery expression. Uncorrelated subqueries
 // are evaluated once per statement; correlated ones once per distinct
 // combination of outer values (semantics.md §8: logically once per row).
@@ -101,14 +149,14 @@ func compileSubquery(ec *Context, lay layout, x *plan.Subquery) (evalFn, error) 
 	} else {
 		getters := make([]evalFn, len(x.Correlated))
 		for i, c := range x.Correlated {
-			f, err := compile(ec, lay, c.Ref())
+			f, err := compileExpr(ec, lay, c.Ref())
 			if err != nil {
 				return nil, err
 			}
 			getters[i] = f
 		}
 		cells := make([]types.Value, len(x.Correlated))
-		memo := map[string]*subResult{}
+		memo := ec.subqueryMemo(x)
 		var key []byte
 		get = func(row types.Row) (*subResult, error) {
 			key = key[:0]
@@ -168,7 +216,7 @@ func compileSubquery(ec *Context, lay layout, x *plan.Subquery) (evalFn, error) 
 			return types.BoolValue(r.exists), nil
 		}, nil
 	}
-	xf, err := compile(ec, lay, x.X)
+	xf, err := compileExpr(ec, lay, x.X)
 	if err != nil {
 		return nil, err
 	}

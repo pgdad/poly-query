@@ -101,7 +101,24 @@ func columnIDs(cols []plan.Column) map[plan.ColumnID]bool {
 // expressions are parallel safe. (The build sides of the joins are
 // computed once and shared; they must not evaluate subqueries either,
 // since they are consumed by a worker.)
-func pipelineScan(n physical.Node) (*physical.TableScan, bool) {
+func pipelineScan(ec *Context, n physical.Node) (*physical.TableScan, bool) {
+	ec.pipeMu.Lock()
+	scan, known := ec.pipes[n]
+	ec.pipeMu.Unlock()
+	if !known {
+		// Memoized per node: operators deep in a long pipeline ask again.
+		scan, _ = findPipelineScan(ec, n)
+		ec.pipeMu.Lock()
+		if ec.pipes == nil {
+			ec.pipes = map[physical.Node]*physical.TableScan{}
+		}
+		ec.pipes[n] = scan
+		ec.pipeMu.Unlock()
+	}
+	return scan, scan != nil
+}
+
+func findPipelineScan(ec *Context, n physical.Node) (*physical.TableScan, bool) {
 	switch x := n.(type) {
 	case *physical.TableScan:
 		return x, true
@@ -109,7 +126,7 @@ func pipelineScan(n physical.Node) (*physical.TableScan, bool) {
 		if !parallelSafe(x.Pred, columnIDs(x.Input.Schema())) {
 			return nil, false
 		}
-		return pipelineScan(x.Input)
+		return pipelineScan(ec, x.Input)
 	case *physical.Project:
 		ids := columnIDs(x.Input.Schema())
 		for _, e := range x.Exprs {
@@ -117,7 +134,7 @@ func pipelineScan(n physical.Node) (*physical.TableScan, bool) {
 				return nil, false
 			}
 		}
-		return pipelineScan(x.Input)
+		return pipelineScan(ec, x.Input)
 	case *physical.HashJoin:
 		ids := columnIDs(x.Schema())
 		for _, e := range physical.Exprs(x) {
@@ -129,7 +146,7 @@ func pipelineScan(n physical.Node) (*physical.TableScan, bool) {
 		if !subtreeParallelSafe(build) {
 			return nil, false
 		}
-		return pipelineScan(probe)
+		return pipelineScan(ec, probe)
 	}
 	return nil, false
 }
@@ -167,7 +184,7 @@ func parallelMorsels(ec *Context, n physical.Node) ([]scanRange, bool) {
 	if ec.Threads <= 1 || ec.serial > 0 {
 		return nil, false
 	}
-	scan, ok := pipelineScan(n)
+	scan, ok := pipelineScan(ec, n)
 	if !ok {
 		return nil, false
 	}
@@ -332,6 +349,9 @@ func batchPipelines(ec *Context, n physical.Node, nw int) ([]BatchOperator, []*s
 		pc := &pipelineCtx{joins: joins, leaf: func(m *physical.TableScan) (BatchOperator, error) {
 			return newVScan(ec, m, src), nil
 		}}
+		if err := ec.Check(); err != nil { // per copy: expressions may be huge
+			return nil, nil, err
+		}
 		op, err := buildPipelineInput(ec, n, pc)
 		if err != nil {
 			return nil, nil, err
@@ -351,6 +371,9 @@ func rowPipelines(ec *Context, n physical.Node, nw int) ([]Operator, []*singleRa
 		pc := &pipelineCtx{rowJoins: joins, rowLeaf: func(m *physical.TableScan) Operator {
 			return newScan(ec, m, src)
 		}}
+		if err := ec.Check(); err != nil { // per copy: expressions may be huge
+			return nil, nil, err
+		}
 		op, err := rowPipeline(ec, n, pc)
 		if err != nil {
 			return nil, nil, err
@@ -570,6 +593,9 @@ func parallelAggregate(ec *Context, x *physical.HashAggregate) (BatchOperator, b
 	tables := make([]*aggTable, nw)
 	keyTypes := exprTypes(x.Keys)
 	for w := range inputs {
+		if err := ec.Check(); err != nil {
+			return nil, true, err
+		}
 		if inputs[w], err = newVAggInput(ec, x); err != nil {
 			return nil, true, err
 		}
@@ -642,6 +668,9 @@ func parallelRowAggregate(ec *Context, x *physical.HashAggregate) (Operator, boo
 	tables := make([]*rowAggTable, nw)
 	keyTypes := exprTypes(x.Keys)
 	for w := range inputs {
+		if err := ec.Check(); err != nil {
+			return nil, true, err
+		}
 		if inputs[w], err = newRowAggInput(ec, x); err != nil {
 			return nil, true, err
 		}

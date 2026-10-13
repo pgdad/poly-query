@@ -1,6 +1,7 @@
 package physical
 
 import (
+	"slices"
 	"strings"
 
 	"polyquery/internal/index"
@@ -113,6 +114,45 @@ func exactToDomain(ct types.Type, x types.Int128, vs int) domainValue {
 type bounder struct{ t types.Type }
 
 func (b bounder) cmp(x, y types.Value) int { return types.Compare(b.t, x, b.t, y) }
+
+// sorted returns a sorted copy of vs.
+func (b bounder) sorted(vs []types.Value) []types.Value {
+	out := slices.Clone(vs)
+	slices.SortFunc(out, b.cmp)
+	return out
+}
+
+// has reports whether the sorted list contains v.
+func (b bounder) has(sorted []types.Value, v types.Value) bool {
+	_, found := slices.BinarySearchFunc(sorted, v, b.cmp)
+	return found
+}
+
+// distinct removes duplicates from vs, keeping the first occurrence of
+// each value in its original position (O(n log n): IN lists may be long).
+func (b bounder) distinct(vs []types.Value) []types.Value {
+	if len(vs) < 2 {
+		return vs
+	}
+	order := make([]int, len(vs))
+	for i := range order {
+		order[i] = i
+	}
+	slices.SortStableFunc(order, func(i, j int) int { return b.cmp(vs[i], vs[j]) })
+	dup := make([]bool, len(vs))
+	for k := 1; k < len(order); k++ {
+		if b.cmp(vs[order[k-1]], vs[order[k]]) == 0 {
+			dup[order[k]] = true
+		}
+	}
+	out := vs[:0:0]
+	for i, v := range vs {
+		if !dup[i] {
+			out = append(out, v)
+		}
+	}
+	return out
+}
 
 // fromComparison returns the range of column values satisfying
 // `column op constant`; empty reports that none does.
@@ -306,16 +346,9 @@ func (p *planner) sarg(c plan.Expr, ords map[plan.ColumnID]int) (sarg, bool) {
 			if d.inf != 0 || !d.exact {
 				continue
 			}
-			dup := false
-			for _, q := range s.points {
-				if b.cmp(q, d.v) == 0 {
-					dup = true
-				}
-			}
-			if !dup {
-				s.points = append(s.points, d.v)
-			}
+			s.points = append(s.points, d.v)
 		}
+		s.points = b.distinct(s.points)
 		s.empty = len(s.points) == 0
 		return s, true
 	}
@@ -355,12 +388,10 @@ func columnFilters(sargs []sarg, t *storage.Table) []ColumnFilter {
 				f.Points = s.points
 			} else {
 				var keep []types.Value
+				other := b.sorted(s.points)
 				for _, v := range f.Points {
-					for _, w := range s.points {
-						if b.cmp(v, w) == 0 {
-							keep = append(keep, v)
-							break
-						}
+					if b.has(other, v) {
+						keep = append(keep, v)
 					}
 				}
 				f.Points = keep

@@ -29,6 +29,12 @@ type orderSpec struct {
 // query analyzes a query block (semantics.md §4). outer is the scope of the
 // enclosing query (nil at top level), env the visible CTEs.
 func (a *analyzer) query(q *ast.Query, outer *scope, env *cteEnv) (plan.Node, error) {
+	if err := a.cfg.Interrupt.Check(); err != nil {
+		return nil, err
+	}
+	if err := a.step(1 + len(q.Items)); err != nil {
+		return nil, err
+	}
 	seen := map[string]bool{}
 	for _, c := range q.With {
 		key := storage.FoldKey(c.Name)
@@ -37,7 +43,7 @@ func (a *analyzer) query(q *ast.Query, outer *scope, env *cteEnv) (plan.Node, er
 		}
 		seen[key] = true
 		def := &cteDef{def: c, env: env, outer: outer}
-		if _, _, err := a.cteRelation(def); err != nil { // validate even if unused
+		if err := a.validateCTE(def); err != nil { // validate even if unused
 			return nil, err
 		}
 		env = &cteEnv{def: def, parent: env}
@@ -121,6 +127,17 @@ func (a *analyzer) selectBlock(q *ast.Query, outer *scope, env *cteEnv) (plan.No
 
 	// ORDER BY expressions equal to a select item sort by that item; others
 	// become hidden output columns (not allowed with DISTINCT).
+	// Items are rendered once: the first equal visible item, else the last
+	// equal hidden item is used.
+	visibleIdx, hiddenIdx := map[string]int{}, map[string]int{}
+	for j := range items {
+		key := items[j].expr.String()
+		if _, dup := visibleIdx[key]; j < visible && !dup {
+			visibleIdx[key] = j
+		} else if j >= visible {
+			hiddenIdx[key] = j
+		}
+	}
 	for i := range orders {
 		o := &orders[i]
 		if o.expr == nil {
@@ -128,24 +145,20 @@ func (a *analyzer) selectBlock(q *ast.Query, outer *scope, env *cteEnv) (plan.No
 		}
 		key := o.expr.String()
 		o.index = -1
-		for j := 0; j < visible; j++ {
-			if items[j].expr.String() == key {
-				o.index = j
-				break
-			}
+		if j, ok := visibleIdx[key]; ok {
+			o.index = j
 		}
 		if o.index < 0 {
 			if q.Distinct {
 				return nil, semanticAt(q.OrderBy[i].Pos, "ORDER BY expressions must appear in the select list of a SELECT DISTINCT")
 			}
-			for j := visible; j < len(items); j++ {
-				if items[j].expr.String() == key {
-					o.index = j
-				}
+			if j, ok := hiddenIdx[key]; ok {
+				o.index = j
 			}
 			if o.index < 0 {
 				items = append(items, selItem{expr: o.expr, name: "_order" + strconv.Itoa(len(items)+1)})
 				o.index = len(items) - 1
+				hiddenIdx[key] = o.index
 			}
 		}
 	}
@@ -419,9 +432,35 @@ func (a *analyzer) from(item ast.FromItem, sc *scope, env *cteEnv) (plan.Node, e
 	return nil, errs.New(errs.InternalError, "unknown FROM item %T", item)
 }
 
+// validateCTE analyzes a CTE definition once, whether it is referenced or
+// not, and records its output columns.
+//
+// While validating, references to CTEs validated before resolve to an
+// empty relation of their recorded columns instead of being analyzed
+// again: analysis is deterministic, so they would succeed again, and the
+// plan is discarded. Without this, validating a chain of n CTEs each
+// referencing the previous one would analyze 1 + 2 + … + n definitions.
+func (a *analyzer) validateCTE(def *cteDef) error {
+	a.validating++
+	_, cols, err := a.cteRelation(def)
+	a.validating--
+	if err != nil {
+		return err
+	}
+	def.cols = cols
+	return nil
+}
+
 // cteRelation analyzes a CTE reference afresh (each reference gets its own
 // column IDs) and applies the CTE's column list.
 func (a *analyzer) cteRelation(def *cteDef) (plan.Node, []plan.Column, error) {
+	if a.validating > 0 && def.cols != nil {
+		stub := &plan.Values{Cols: make([]plan.Column, len(def.cols))}
+		for i, c := range def.cols {
+			stub.Cols[i] = a.newColumn(c.Name, c.Type)
+		}
+		return stub, stub.Cols, nil
+	}
 	node, err := a.query(def.def.Query, def.outer, def.env)
 	if err != nil {
 		return nil, nil, err

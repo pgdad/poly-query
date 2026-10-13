@@ -1,6 +1,7 @@
 package optimizer
 
 import (
+	"polyquery/internal/interrupt"
 	"polyquery/internal/plan"
 	"polyquery/internal/types"
 )
@@ -22,6 +23,8 @@ import (
 type ConstantFolding struct {
 	// Eval evaluates constant expressions (nil: the rule does nothing).
 	Eval EvalFunc
+	// Interrupt aborts the rule at the query's deadline (nil: never).
+	Interrupt *interrupt.Checker
 }
 
 // Name implements Rule.
@@ -39,20 +42,22 @@ func (r ConstantFolding) Apply(n plan.Node) plan.Node {
 			// are copied by foldExpr with their plans unchanged.)
 			return nil
 		}
-		return simplify(foldExpr(e, r.Eval))
+		return simplify(foldExpr(e, r.Eval, r.Interrupt))
 	})
 }
 
 // foldExpr replaces the maximal constant subexpressions of e by literals.
-func foldExpr(e plan.Expr, eval EvalFunc) plan.Expr {
+func foldExpr(e plan.Expr, eval EvalFunc, intr *interrupt.Checker) plan.Expr {
+	props := plan.NewProps()
 	return plan.Map(e, func(x plan.Expr) plan.Expr {
+		tick(intr)
 		switch x.(type) {
 		case *plan.Literal, *plan.ColumnRef:
 			return x
 		case *plan.Subquery:
 			return nil
 		}
-		if !plan.IsConstant(x) || !movable(x) {
+		if !props.IsConstant(x) || !props.Movable(x) {
 			return nil
 		}
 		v, err := eval(x)

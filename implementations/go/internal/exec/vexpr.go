@@ -37,10 +37,11 @@ type vcompiler struct {
 	ec      *Context
 	lay     layout
 	classes []vclass // classes of the batch columns
+	props   *plan.Props
 }
 
 func newVCompiler(ec *Context, cols []plan.Column) *vcompiler {
-	c := &vcompiler{ec: ec, lay: layoutOf(cols)}
+	c := &vcompiler{ec: ec, lay: layoutOf(cols), props: plan.NewProps()}
 	for _, col := range cols {
 		c.classes = append(c.classes, classOf(col.Type))
 	}
@@ -59,6 +60,11 @@ func volatile(e plan.Expr) bool {
 	return found
 }
 
+// constant reports whether e can be evaluated once at compile time.
+func (c *vcompiler) constant(e plan.Expr) bool {
+	return c.props.IsConstant(e) && !c.props.Volatile(e)
+}
+
 func (c *vcompiler) compile(e plan.Expr) (vexpr, error) {
 	t := e.Type()
 	if ref, ok := e.(*plan.ColumnRef); ok {
@@ -67,7 +73,7 @@ func (c *vcompiler) compile(e plan.Expr) (vexpr, error) {
 		}
 		return c.fallback(e)
 	}
-	if plan.IsConstant(e) && !volatile(e) {
+	if c.constant(e) {
 		if v, err := evalConstant(c.ec, e); err == nil {
 			return newVConst(v, classOf(t)), nil
 		}
@@ -84,7 +90,7 @@ func (c *vcompiler) compile(e plan.Expr) (vexpr, error) {
 		case x.Op.IsComparison():
 			return c.comparison(x)
 		case x.Op == plan.OpConcat:
-			return c.elementwise(e)
+			return c.concat(x)
 		}
 		return c.arithmetic(x)
 	case *plan.Unary:
@@ -115,7 +121,7 @@ func (c *vcompiler) compile(e plan.Expr) (vexpr, error) {
 		return c.elementwise(e)
 	case *plan.InList:
 		for _, item := range x.List {
-			if !plan.IsConstant(item) {
+			if !c.props.IsConstant(item) {
 				return c.fallback(e)
 			}
 		}
@@ -150,20 +156,35 @@ type vcol struct{ index int }
 func (v *vcol) eval(b *Batch, _ []int32) (*Vec, error) { return b.Cols[v.index], nil }
 
 // vconst returns a constant: a vector holding the value in every position.
+// The vector is filled when first needed: operators with a constant
+// operand mostly use val directly, and a statement may hold hundreds of
+// thousands of literals (one batch-sized vector each would be gigabytes).
 type vconst struct {
-	val types.Value
-	vec Vec
+	val    types.Value
+	cls    vclass
+	vec    Vec
+	filled bool
 }
 
-func newVConst(v types.Value, c vclass) *vconst {
-	k := &vconst{val: v}
+func newVConst(v types.Value, c vclass) *vconst { return &vconst{val: v, cls: c} }
+
+func (k *vconst) eval(*Batch, []int32) (*Vec, error) {
+	if !k.filled {
+		k.fill()
+	}
+	return &k.vec, nil
+}
+
+func (k *vconst) fill() {
+	k.filled = true
+	v := k.val
 	if v.Null {
 		k.vec.Nulls = make([]bool, BatchSize)
 		for i := range k.vec.Nulls {
 			k.vec.Nulls[i] = true
 		}
 	}
-	switch c {
+	switch k.cls {
 	case vInt:
 		k.vec.I = make([]int64, BatchSize)
 		for i := range k.vec.I {
@@ -185,10 +206,7 @@ func newVConst(v types.Value, c vclass) *vconst {
 			k.vec.S[i] = v.S
 		}
 	}
-	return k
 }
-
-func (k *vconst) eval(*Batch, []int32) (*Vec, error) { return &k.vec, nil }
 
 // vscalarSubquery is an uncorrelated scalar subquery: evaluated once (when
 // the first batch with active rows needs it, as row-mode evaluation would)
@@ -207,7 +225,7 @@ func (q *vscalarSubquery) eval(b *Batch, sel []int32) (*Vec, error) {
 		}
 		q.val = newVConst(v, q.cls)
 	}
-	return &q.val.vec, nil
+	return q.val.eval(b, sel)
 }
 
 // vfallback evaluates an expression row by row with the row-mode
@@ -995,7 +1013,7 @@ func (c *vcompiler) elementwise(e plan.Expr) (vexpr, error) {
 			first = false
 			return nil
 		}
-		if plan.IsConstant(x) && !volatile(x) {
+		if c.constant(x) {
 			return x
 		}
 		v, err := c.compile(x)
@@ -1012,12 +1030,51 @@ func (c *vcompiler) elementwise(e plan.Expr) (vexpr, error) {
 	if compileErr != nil {
 		return nil, compileErr
 	}
+	return c.newElementwise(mapped, lay, args, argCls)
+}
+
+// newElementwise evaluates the row expression mapped per element, over the
+// vectors of args bound to the column IDs of lay.
+func (c *vcompiler) newElementwise(mapped plan.Expr, lay layout, args []vexpr, argCls []vclass) (vexpr, error) {
 	fn, err := compile(c.ec, lay, mapped)
 	if err != nil {
 		return nil, err
 	}
-	return &velementwise{fn: fn, args: args, argCls: argCls, cls: classOf(e.Type()),
+	return &velementwise{fn: fn, args: args, argCls: argCls, cls: classOf(mapped.Type()),
 		row: make(types.Row, len(args)), vals: make([]*Vec, len(args))}, nil
+}
+
+// concat compiles a chain of || operators elementwise over its operands
+// (compiled separately), so that the row function concatenates them in one
+// step instead of materializing every prefix of the chain.
+func (c *vcompiler) concat(x *plan.Binary) (vexpr, error) {
+	ops := plan.ChainOperands(x, plan.OpConcat)
+	if len(ops) <= 2 {
+		return c.elementwise(x)
+	}
+	var args []vexpr
+	var argCls []vclass
+	lay := layout{}
+	var chain plan.Expr
+	for _, op := range ops {
+		if !c.constant(op) {
+			v, err := c.compile(op)
+			if err != nil {
+				return nil, err
+			}
+			id := plan.ColumnID(-1 - len(args))
+			lay[id] = len(args)
+			args = append(args, v)
+			argCls = append(argCls, classOf(op.Type()))
+			op = &plan.ColumnRef{ID: id, T: op.Type()}
+		}
+		if chain == nil {
+			chain = op
+		} else {
+			chain = &plan.Binary{Op: plan.OpConcat, L: chain, R: op, T: x.T}
+		}
+	}
+	return c.newElementwise(chain, lay, args, argCls)
 }
 
 func (v *velementwise) eval(b *Batch, sel []int32) (*Vec, error) {

@@ -131,9 +131,7 @@ func (n *Project) Schema() []Column { return n.Cols }
 func (n *Aggregate) Schema() []Column {
 	return append(append([]Column(nil), n.KeyCols...), n.AggCols...)
 }
-func (n *Join) Schema() []Column {
-	return append(append([]Column(nil), n.Left.Schema()...), n.Right.Schema()...)
-}
+func (n *Join) Schema() []Column     { return appendSchema(nil, n) }
 func (n *Sort) Schema() []Column     { return n.Input.Schema() }
 func (n *Limit) Schema() []Column    { return n.Input.Schema() }
 func (n *Distinct) Schema() []Column { return n.Input.Schema() }
@@ -302,4 +300,14 @@ func MapExprs(n Node, f func(Expr) Expr) Node {
 		return c
 	}
 	return n
+}
+
+// appendSchema appends the output columns of n to dst, descending into
+// joins: building each join's schema from its inputs' schemas would copy
+// O(n²) columns for a left-deep chain of n joins.
+func appendSchema(dst []Column, n Node) []Column {
+	if j, ok := n.(*Join); ok {
+		return appendSchema(appendSchema(dst, j.Left), j.Right)
+	}
+	return append(dst, n.Schema()...)
 }

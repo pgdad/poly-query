@@ -561,6 +561,24 @@ func ContainsAgg(e Expr) bool {
 	return found
 }
 
+// ChainOperands returns, in order, the operands of the chain of binary
+// operators op rooted at e (e itself if it is not such an operator). It
+// is iterative: chains may be very long.
+func ChainOperands(e Expr, op BinaryOp) []Expr {
+	var out []Expr
+	stack := []Expr{e}
+	for len(stack) > 0 {
+		x := stack[len(stack)-1]
+		stack = stack[:len(stack)-1]
+		if b, ok := x.(*Binary); ok && b.Op == op {
+			stack = append(stack, b.R, b.L)
+			continue
+		}
+		out = append(out, x)
+	}
+	return out
+}
+
 // Conjuncts splits a predicate into its top-level AND operands.
 func Conjuncts(e Expr) []Expr {
 	if e == nil {

@@ -235,11 +235,25 @@ type exprSet struct {
 	buf     types.Row
 }
 
+// vectorNodeBudget bounds the size (in nodes, over all worker threads) of
+// an expression evaluated vectorized: its vectorized form keeps a
+// batch-sized buffer per node and worker, about 600 MiB for this budget
+// (statements may have expressions of hundreds of thousands of nodes,
+// spec/changes/expression-limits.md). Larger expressions are evaluated
+// row by row within the batches.
+const vectorNodeBudget = 65536
+
 func newExprSet(ec *Context, cols []plan.Column, exprs []plan.Expr) (*exprSet, error) {
 	vc := newVCompiler(ec, cols)
 	s := &exprSet{classes: vc.classes, buf: make(types.Row, len(cols))}
 	for _, e := range exprs {
-		v, err := vc.compile(e)
+		compile := vc.compile
+		if sizeAtLeast(e, vectorNodeBudget/max(1, ec.Threads)) {
+			// Every vectorized node holds a batch of results (in every
+			// worker): evaluate huge expressions row by row instead.
+			compile = vc.fallback
+		}
+		v, err := compile(e)
 		if err != nil {
 			return nil, err
 		}

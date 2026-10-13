@@ -31,6 +31,9 @@ func input(ec *Context, n physical.Node, vec bool) (Operator, error) {
 // build builds the row operator of n; its inputs are vectorized if vec is
 // set.
 func build(ec *Context, n physical.Node, vec bool) (Operator, error) {
+	if err := ec.Check(); err != nil {
+		return nil, err
+	}
 	switch x := n.(type) {
 	case *physical.TableScan:
 		if op, ok, err := parallelRowPipeline(ec, x); ok || err != nil {

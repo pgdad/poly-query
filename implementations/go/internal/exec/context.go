@@ -5,12 +5,12 @@ package exec
 
 import (
 	"context"
-	"errors"
 	"sync"
 	"sync/atomic"
 	"unsafe"
 
 	"polyquery/internal/errs"
+	"polyquery/internal/interrupt"
 	"polyquery/internal/native"
 	"polyquery/internal/physical"
 	"polyquery/internal/plan"
@@ -50,6 +50,13 @@ type Context struct {
 	// shared holds the rows of shared aggregations by key.
 	sharedMu sync.Mutex
 	shared   map[string]*sharedResult
+	// memos holds the memoized results of correlated subqueries (see
+	// subqueryMemo).
+	memos map[*plan.Subquery]map[string]*subResult
+	// pipes memoizes the table scan at the bottom of the scan pipeline
+	// rooted at a node (nil: not a pipeline).
+	pipeMu sync.Mutex
+	pipes  map[physical.Node]*physical.TableScan
 }
 
 // checkEvery is how many rows operators process between cancellation checks.
@@ -64,12 +71,7 @@ func (c *Context) Check() error {
 }
 
 // ContextError maps a context error to a PolyQuery error.
-func ContextError(err error) error {
-	if errors.Is(err, context.DeadlineExceeded) {
-		return errs.New(errs.Timeout, "query exceeded its timeout")
-	}
-	return errs.New(errs.Cancelled, "query was cancelled")
-}
+func ContextError(err error) error { return interrupt.Error(err) }
 
 // MemTracker approximates the memory retained by a query's operators. It
 // is safe for concurrent use by parallel workers.

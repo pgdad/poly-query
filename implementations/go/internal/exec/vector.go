@@ -86,11 +86,13 @@ func (v *Vec) strs(n int) []string {
 }
 
 // grow returns a slice of length n reusing buf's storage when possible.
+// Storage is sized to the rows actually seen (doubling up to a batch):
+// expressions of many nodes over small tables keep small buffers.
 func grow[T any](buf []T, n int) []T {
 	if cap(buf) >= n {
 		return buf[:n]
 	}
-	return make([]T, n, max(n, BatchSize))
+	return make([]T, n, max(n, min(2*cap(buf), BatchSize)))
 }
 
 // vecBuf is an operator-owned output vector reused across batches.

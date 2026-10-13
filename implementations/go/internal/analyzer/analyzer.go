@@ -6,6 +6,7 @@ package analyzer
 
 import (
 	"polyquery/internal/errs"
+	"polyquery/internal/interrupt"
 	"polyquery/internal/plan"
 	"polyquery/internal/sql/ast"
 	"polyquery/internal/storage"
@@ -25,7 +26,18 @@ type Config struct {
 	// function parameters that determine a result type (ROUND digits) or are
 	// validated up front (DATE_TRUNC units).
 	EvalConst func(plan.Expr) (types.Value, error)
+	// Interrupt observes the query's deadline (nil: none).
+	Interrupt *interrupt.Checker
+	// MemoryLimit is the query's memory budget in bytes (≤ 0: none). The
+	// plan built by analysis is charged against it at an estimated
+	// planNodeBytes per bound expression and query block: inlined CTEs
+	// can make the plan exponentially larger than the statement.
+	MemoryLimit int64
 }
+
+// planNodeBytes estimates the memory a bound expression or query block
+// takes in the plan and in later planning stages.
+const planNodeBytes = 256
 
 // AnalyzeQuery validates a query and returns its logical plan. The plan's
 // schema carries the output column names.
@@ -39,6 +51,21 @@ type analyzer struct {
 	cfg    Config
 	nextID plan.ColumnID
 	subSeq int
+	// validating > 0 while a CTE definition is analyzed only to validate
+	// it (the plan is discarded).
+	validating int
+	// planBytes is the estimated size of the plan built so far.
+	planBytes int64
+}
+
+// step accounts the analysis of n plan elements: it checks the query's
+// deadline and memory budget.
+func (a *analyzer) step(n int) error {
+	a.planBytes += int64(n) * planNodeBytes
+	if limit := a.cfg.MemoryLimit; limit > 0 && a.planBytes > limit {
+		return errs.New(errs.ResourceLimit, "query exceeded its memory budget of %d MiB", limit>>20)
+	}
+	return a.cfg.Interrupt.Tick()
 }
 
 func (a *analyzer) newColumn(name string, t types.Type) plan.Column {
@@ -96,6 +123,9 @@ type cteDef struct {
 	def   *ast.CTE
 	env   *cteEnv // CTEs visible inside the definition
 	outer *scope  // enclosing query scope at the definition
+	// cols is the validated output (names and types); nil until the
+	// definition has been validated.
+	cols []plan.Column
 }
 
 // cteEnv is an immutable linked list of visible CTEs, innermost first.

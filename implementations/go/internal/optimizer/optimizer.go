@@ -19,6 +19,7 @@
 package optimizer
 
 import (
+	"polyquery/internal/interrupt"
 	"polyquery/internal/plan"
 	"polyquery/internal/types"
 )
@@ -39,11 +40,15 @@ type Options struct {
 	Disabled bool
 	// EvalConst evaluates constant expressions (nil disables folding).
 	EvalConst EvalFunc
+	// Interrupt observes the query's deadline (nil: none).
+	Interrupt *interrupt.Checker
 }
 
 // Optimizer applies its rules in order.
 type Optimizer struct {
 	Rules []Rule
+	// Interrupt is checked before each rule (nil: never).
+	Interrupt *interrupt.Checker
 }
 
 // New returns the optimizer configured by opts: the default rule sequence,
@@ -52,24 +57,54 @@ func New(opts Options) *Optimizer {
 	if opts.Disabled {
 		return &Optimizer{}
 	}
+	intr := opts.Interrupt
 	return &Optimizer{Rules: []Rule{
-		ConstantFolding{Eval: opts.EvalConst},
-		PredicatePushdown{},
-		JoinReorder{},
-		ColumnPruning{},
-	}}
+		ConstantFolding{Eval: opts.EvalConst, Interrupt: intr},
+		PredicatePushdown{Interrupt: intr},
+		JoinReorder{Interrupt: intr},
+		ColumnPruning{Interrupt: intr},
+	}, Interrupt: intr}
 }
 
-// Optimize applies every rule to the plan in order.
-func (o *Optimizer) Optimize(n plan.Node) plan.Node {
+// Optimize applies every rule to the plan in order. It stops with TIMEOUT
+// or CANCELLED when the query's deadline passes or it is cancelled, between
+// rules or inside one (see interrupted).
+func (o *Optimizer) Optimize(n plan.Node) (out plan.Node, err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			stop, ok := r.(interrupted)
+			if !ok {
+				panic(r)
+			}
+			out, err = nil, stop.err
+		}
+	}()
 	for _, r := range o.Rules {
+		if err := o.Interrupt.Check(); err != nil {
+			return nil, err
+		}
 		n = r.Apply(n)
 	}
-	return n
+	return n, nil
+}
+
+// interrupted aborts a rule whose work outlives the query's deadline.
+// Rules return plans, not errors, and stopping one halfway could leave an
+// inconsistent plan, so tick panics with it and Optimize recovers it; the
+// plan is discarded. Rules never modify their input, so nothing needs to
+// be undone.
+type interrupted struct{ err error }
+
+// tick counts one step of a rule's work and aborts the rule once the
+// query's deadline has passed (a nil checker never aborts).
+func tick(c *interrupt.Checker) {
+	if err := c.Tick(); err != nil {
+		panic(interrupted{err})
+	}
 }
 
 // Optimize returns the plan optimized with the rules selected by opts.
-func Optimize(n plan.Node, opts Options) plan.Node { return New(opts).Optimize(n) }
+func Optimize(n plan.Node, opts Options) (plan.Node, error) { return New(opts).Optimize(n) }
 
 // everyPlan applies a plan rewrite to n and then to the plans of all
 // subqueries nested in the result's expressions (recursively).

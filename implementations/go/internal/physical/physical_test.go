@@ -33,7 +33,11 @@ func buildWith(t *testing.T, sql string, oopts optimizer.Options, opts physical.
 	if err != nil {
 		t.Fatal(err)
 	}
-	p, err := physical.Build(optimizer.Optimize(logical, oopts), opts)
+	optimized, err := optimizer.Optimize(logical, oopts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	p, err := physical.Build(optimized, opts)
 	if err != nil {
 		t.Fatal(err)
 	}

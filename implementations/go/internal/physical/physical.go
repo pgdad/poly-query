@@ -11,6 +11,7 @@ package physical
 
 import (
 	"polyquery/internal/index"
+	"polyquery/internal/interrupt"
 	"polyquery/internal/plan"
 	"polyquery/internal/storage"
 	"polyquery/internal/types"
@@ -192,21 +193,15 @@ func (n *Project) Schema() []plan.Column   { return n.Cols }
 func (n *HashAggregate) Schema() []plan.Column {
 	return append(append([]plan.Column(nil), n.KeyCols...), n.AggCols...)
 }
-func (n *HashJoin) Schema() []plan.Column {
-	return append(append([]plan.Column(nil), n.Left.Schema()...), n.Right.Schema()...)
-}
-func (n *MergeJoin) Schema() []plan.Column {
-	return append(append([]plan.Column(nil), n.Left.Schema()...), n.Right.Schema()...)
-}
-func (n *NestedLoopJoin) Schema() []plan.Column {
-	return append(append([]plan.Column(nil), n.Left.Schema()...), n.Right.Schema()...)
-}
-func (n *Sort) Schema() []plan.Column         { return n.Input.Schema() }
-func (n *Limit) Schema() []plan.Column        { return n.Input.Schema() }
-func (n *HashDistinct) Schema() []plan.Column { return n.Input.Schema() }
-func (n *UnionAll) Schema() []plan.Column     { return n.Cols }
-func (n *ParamLookup) Schema() []plan.Column  { return n.Input.Schema() }
-func (n *Materialize) Schema() []plan.Column  { return n.Input.Schema() }
+func (n *HashJoin) Schema() []plan.Column       { return appendSchema(nil, n) }
+func (n *MergeJoin) Schema() []plan.Column      { return appendSchema(nil, n) }
+func (n *NestedLoopJoin) Schema() []plan.Column { return appendSchema(nil, n) }
+func (n *Sort) Schema() []plan.Column           { return n.Input.Schema() }
+func (n *Limit) Schema() []plan.Column          { return n.Input.Schema() }
+func (n *HashDistinct) Schema() []plan.Column   { return n.Input.Schema() }
+func (n *UnionAll) Schema() []plan.Column       { return n.Cols }
+func (n *ParamLookup) Schema() []plan.Column    { return n.Input.Schema() }
+func (n *Materialize) Schema() []plan.Column    { return n.Input.Schema() }
 
 // Children implementations.
 func (n *TableScan) Children() []Node      { return nil }
@@ -318,4 +313,21 @@ type Options struct {
 	Threads, DefaultThreads int
 	// Native requests the native kernels (only set when they are loaded).
 	Native bool
+	// Interrupt observes the query's deadline (nil: none).
+	Interrupt *interrupt.Checker
+}
+
+// appendSchema appends the output columns of n to dst, descending into
+// joins: building each join's schema from its inputs' schemas would copy
+// O(n²) columns for a left-deep chain of n joins.
+func appendSchema(dst []plan.Column, n Node) []plan.Column {
+	switch j := n.(type) {
+	case *HashJoin:
+		return appendSchema(appendSchema(dst, j.Left), j.Right)
+	case *MergeJoin:
+		return appendSchema(appendSchema(dst, j.Left), j.Right)
+	case *NestedLoopJoin:
+		return appendSchema(appendSchema(dst, j.Left), j.Right)
+	}
+	return append(dst, n.Schema()...)
 }

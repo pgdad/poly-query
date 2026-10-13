@@ -37,7 +37,10 @@ func apply(t *testing.T, sql string, rules ...optimizer.Rule) string {
 	t.Helper()
 	n := logical(t, sql)
 	before := plan.Format(n)
-	out := (&optimizer.Optimizer{Rules: rules}).Optimize(n)
+	out, err := (&optimizer.Optimizer{Rules: rules}).Optimize(n)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if plan.Format(n) != before {
 		t.Errorf("rules modified their input plan:\n%s", before)
 	}
@@ -81,7 +84,7 @@ func TestDisabledAppliesNoRule(t *testing.T) {
 		t.Fatalf("optimize: false must apply no rules, got %d", len(o.Rules))
 	}
 	n := logical(t, "SELECT name FROM emp e, dept d WHERE e.dept = d.code AND salary > 1 + 1")
-	if out := optimizer.Optimize(n, optimizer.Options{Disabled: true}); out != n {
+	if out, err := optimizer.Optimize(n, optimizer.Options{Disabled: true}); err != nil || out != n {
 		t.Fatalf("disabled optimizer changed the plan:\n%s", plan.Format(out))
 	}
 }
