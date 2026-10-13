@@ -26,7 +26,8 @@ stage, see *Expression size limits (CR-6)* below).
 
 **Statement limits** (CR-6): SQL text 16 MiB (16,777,216 bytes of UTF-8),
 expression nesting depth 4,096, 200,000 operands (literals, column references
-and `*` arguments). Beyond them a statement fails with `RESOURCE_LIMIT`
+and `*` arguments; also empty argument lists `f()` and table references, so
+that every leaf of the statement counts). Beyond them a statement fails with `RESOURCE_LIMIT`
 naming the measure (`details.measure`: `text_length`, `nesting_depth`,
 `operand_count`). There is no other size limit besides memory and time.
 
@@ -389,7 +390,22 @@ fingerprints are hash-consed ids (`ast.Fingerprints`) instead of nested
 tuples rebuilt for every nesting level; EXPLAIN text and shared-subquery
 signatures are built in one list instead of nested strings; and signatures
 are only computed for subquery scans whose inputs have equal sizes (nested
-derived tables never do).
+derived tables never do); `LIKE` is matched segment by segment between `%`s
+(`compiler.like_matcher`; the backtracking regex took minutes for a 1 MiB
+pattern); bound expressions hash once per node (`bound._expr_hash`, cached
+bottom-up and consistent with `==`), so GROUP BY keys, aggregate calls,
+ORDER BY targets and select-list aliases are found by hashing
+(`binder._SortTargets`, `_Grouping`), as are range variables and their
+columns (`Scope`, `RangeVar.find`). Join ordering keeps, per conjunct, the
+relations the current tree lacks and indexes the conjuncts by the single
+input that would complete them (the greedy choice was cubic in the number of
+joined inputs; the plans it chooses are unchanged).
+
+Work that stays superlinear in something that is not a CR-6 measure checks
+the deadline inside: predicate pushdown and column pruning at every plan
+node (quadratic in the length of a join chain), join ordering at every step.
+A 3,000-table join chain plans and runs in ~12 s; with any timeout the
+answer is `TIMEOUT` within ~0.3 s of expiry.
 
 **Timeout in every stage.** The deadline is set when the request is
 received (session and exec as well as HTTP) and covers lexing, parsing,
@@ -415,9 +431,9 @@ arrives 0.0–0.4 s after expiry in every mode.
 |---|---|---|
 | Limits | `limits.py` (new) | limits, `StatementMeter`, text length check, deadline checks, large-stack threads and recursion limit |
 | Lexer / parser | `sql/lexer.py`, `sql/parser.py`, `sql/ast.py` | lazy lexing with regex runs and deadline checks; measuring depth and operands; `RecursionError` → `RESOURCE_LIMIT`; `ast.Fingerprints` |
-| Analysis | `analysis/binder.py`, `analysis/bound.py`, `analysis/typing_rules.py` | deadline check per node; iterative `walk` / `conjuncts`, cached bottom-up summaries and column keys, identity-based `map_children`; linear IN-list typing |
-| Planner | `planner/pipeline.py`, `optimizer.py`, `rules/base.py`, `physical.py`, `logical.py`, `explain.py` | deadline checks; hashed conjunct deduplication; iterative walks; size-filtered, linear shared-subquery signatures; linear `render_expr` |
-| Execution | `execution/compiler.py`, `vcompiler.py`, `workers.py` | checked closures in large expressions; deadline checks while pickling plans |
+| Analysis | `analysis/binder.py`, `analysis/bound.py`, `analysis/scope.py`, `analysis/typing_rules.py` | deadline check per node; iterative `walk` / `conjuncts`, cached bottom-up summaries, column keys and hashes, identity-based `map_children`; hashed GROUP BY / ORDER BY / alias / name lookups; linear IN-list typing |
+| Planner | `planner/pipeline.py`, `optimizer.py`, `rules/base.py`, `rules/predicate_pushdown.py`, `rules/column_pruning.py`, `physical.py`, `logical.py`, `explain.py` | deadline checks (every rule gets the statement's `check`); hashed conjunct deduplication; iterative walks; size-filtered, linear shared-subquery signatures; indexed greedy join ordering; linear `render_expr` |
+| Execution | `execution/compiler.py`, `vcompiler.py`, `workers.py` | checked closures in large expressions; linear `like_matcher`; deadline checks while pickling plans |
 | Protocol / server | `protocol/handlers.py`, `protocol/session.py`, `server/http.py`, `server/app.py`, `cli.py` | deadline from receipt; GC paused until the response is written; `release_failed`; large-stack threads; capability `change.expression_limits`; (HTTP: a chunk size must be 1*HEXDIG — a negative size made the server read until EOF) |
 | Service | `service.py` | deadline check passed to every stage |
 

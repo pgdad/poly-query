@@ -6,7 +6,7 @@ from dataclasses import dataclass, field
 
 from .. import errors
 from ..datatypes import DataType
-from ..names import fold, same_name
+from ..names import fold
 from ..sql import ast
 from . import bound as b
 
@@ -83,19 +83,27 @@ class Scope:
     range_vars: list[RangeVar] = field(default_factory=list)
     outer_refs: dict[b.ColumnKey, b.ColumnRef] = field(default_factory=dict)
     opaque_parent: bool = False
+    # indexes of the range variables (a FROM clause may list thousands):
+    # by folded name, and their columns by folded column name in FROM order
+    _by_name: dict[str, RangeVar] = field(default_factory=dict, init=False, repr=False)
+    _columns: dict[str, list[tuple[RangeVar, int]]] = field(default_factory=dict, init=False, repr=False)
 
     def add(self, rv: RangeVar, node: ast.Node) -> None:
-        if any(same_name(r.name, rv.name) for r in self.range_vars):
+        key = fold(rv.name)
+        if key in self._by_name:
             raise errors.semantic_error(
                 f"duplicate table name or alias '{rv.name}' in FROM", **pos(node)
             )
+        self._by_name[key] = rv
         self.range_vars.append(rv)
+        for i, name in enumerate(rv.column_names):
+            self._columns.setdefault(fold(name), []).append((rv, i))
 
     def find_range_var(self, name: str) -> RangeVar | None:
-        for rv in self.range_vars:
-            if same_name(rv.name, name):
-                return rv
-        return None
+        return self._by_name.get(fold(name))
+
+    def has_local_column(self, name: str) -> bool:
+        return fold(name) in self._columns
 
     def _lookup_local(self, ref: ast.ColumnRef) -> b.ColumnRef | None:
         if ref.qualifier is not None:
@@ -112,9 +120,7 @@ class Scope:
                     f"column reference '{ref.qualifier}.{ref.name}' is ambiguous", **pos(ref)
                 )
             return rv.column(matches[0])
-        found: list[tuple[RangeVar, int]] = []
-        for rv in self.range_vars:
-            found += [(rv, i) for i in rv.find(ref.name)]
+        found = self._columns.get(fold(ref.name), [])
         if len(found) > 1:
             raise errors.semantic_error(f"column reference '{ref.name}' is ambiguous", **pos(ref))
         if found:

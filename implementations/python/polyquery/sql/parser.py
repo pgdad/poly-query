@@ -306,6 +306,7 @@ class Parser:
             self.meter.leave()
             return item
         name = self.expect_ident("table name")
+        self.meter.operand()  # a leaf of the FROM tree (see parse_function_call)
         alias = None
         if self.accept_keyword("AS"):
             alias = self.expect_alias("table alias")
@@ -537,6 +538,9 @@ class Parser:
             self.expect_op(")")
             return call
         if self.accept_op(")"):
+            # counted like an operand: every leaf counts, so that the size
+            # of a tree (e.g. a chain ``x + f() + f() …``) stays bounded
+            self.meter.operand()
             return call
         if self.accept_keyword("DISTINCT"):
             call.distinct = True

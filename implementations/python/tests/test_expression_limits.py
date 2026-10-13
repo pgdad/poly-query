@@ -62,13 +62,16 @@ class MeasureTests(unittest.TestCase):
 
     def test_operand_count(self):
         with mock.patch.object(limits, "MAX_OPERANDS", 100):
-            # count(*) and x are two of them
-            parse("SELECT count(*) FROM t WHERE x IN (" + ", ".join(["1"] * 98) + ")")
-            e = parse_error("SELECT count(*) FROM t WHERE x IN (" + ", ".join(["1"] * 99) + ")")
+            # *, t and x are three of them (every leaf counts: a table
+            # reference and an empty argument list too)
+            parse("SELECT count(*) FROM t WHERE x IN (" + ", ".join(["1"] * 97) + ")")
+            e = parse_error("SELECT count(*) FROM t WHERE x IN (" + ", ".join(["1"] * 98) + ")")
             self.assertEqual((e.code, e.details), (errors.RESOURCE_LIMIT, {"measure": "operand_count"}))
             self.assertIn("operand count exceeds 100", e.message)
             # function names, keywords and operators are not operands
-            parse("SELECT " + " + ".join(["ABS(DATE '2020-01-01' - DATE '2020-01-02')"] * 49))
+            parse("SELECT " + " + ".join(["ABS(DATE '2020-01-01' - DATE '2020-01-02')"] * 50))
+            self.assertEqual(parse_error("SELECT " + " + ".join(["f()"] * 101)).code, errors.RESOURCE_LIMIT)
+            self.assertEqual(parse_error("SELECT 1 FROM " + ", ".join(["t"] * 100)).code, errors.RESOURCE_LIMIT)
 
     def test_text_length(self):
         with mock.patch.object(limits, "MAX_SQL_BYTES", 64):

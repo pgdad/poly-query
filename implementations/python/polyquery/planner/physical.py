@@ -762,33 +762,70 @@ class PhysicalPlanner:
         the fewest rows, preferring inputs connected by a join condition
         (cross products come last). Each conjunct is evaluated by the first
         join that sees all the relations it references."""
+        check = self.options.check
         chain_rels = set().union(*(leaf.rels() for leaf in leaves))
         planned = [(self.plan(leaf), leaf.rels()) for leaf in leaves]
-        pending = list(conditions)
         first = min(range(len(planned)), key=lambda i: planned[i][0].estimated_rows)
         current, current_rels = planned[first]
+        # A conjunct is usable for joining input i once the relations it
+        # references and the current tree lacks (``missing``) all belong to
+        # input i: it is then listed in ``usable_with[i]`` (indexes into
+        # ``conditions``; inputs have disjoint relations). This keeps each
+        # step linear in the number of inputs (chains may be long).
+        refs = [_rels_within(p, chain_rels) for p in conditions]
+        missing = [r - current_rels for r in refs]
+        input_of = {rel: i for i, (_, rels) in enumerate(planned) for rel in rels}
+        by_rel: dict[int, list[int]] = {}
+        for k, r in enumerate(missing):
+            for rel in r:
+                by_rel.setdefault(rel, []).append(k)
+        usable_with: dict[int, list[int]] = {}
+        listed: set[int] = set()
+
+        def list_if_usable(k: int) -> None:
+            owners = {input_of[rel] for rel in missing[k]}
+            if len(owners) == 1 and k not in listed:
+                listed.add(k)
+                usable_with.setdefault(owners.pop(), []).append(k)
+
+        for k in range(len(conditions)):
+            if missing[k]:
+                list_if_usable(k)
+        # usable whatever is joined next: within the first input, or
+        # referencing no relation of the chain
+        always = [k for k in range(len(conditions)) if not missing[k]]
+        consumed: set[int] = set()
         remaining = [i for i in range(len(planned)) if i != first]
         while remaining:
+            check()
             best = None
             for i in remaining:
                 node, rels = planned[i]
-                usable = [p for p in pending if _rels_within(p, chain_rels) <= current_rels | rels]
-                connected = any(
-                    _rels_within(p, chain_rels) & rels and _rels_within(p, chain_rels) & current_rels
-                    for p in usable
-                )
+                own = [k for k in usable_with.get(i, ()) if k not in consumed]
+                usable_ks = sorted(always + own) if always else own
+                usable = [conditions[k] for k in usable_ks]
+                # connected: a conjunct also references the current tree
+                connected = any(len(missing[k]) < len(refs[k]) for k in own)
                 rows = self._join_rows("INNER", conjunction(usable), current, node)
                 rank = (not connected, rows)
                 if best is None or rank < best[0]:
-                    best = (rank, i, usable)
+                    best = (rank, i, usable_ks)
             assert best is not None
-            _, i, usable = best
+            _, i, usable_ks = best
             node, rels = planned[i]
-            pending = [p for p in pending if not any(p is u for u in usable)]
+            usable = [conditions[k] for k in usable_ks]
+            consumed.update(usable_ks)
+            always = []
             kind = "INNER" if usable else "CROSS"
             current = self._make_join(kind, conjunction(usable), current, node, current_rels, rels)
             current_rels = current_rels | rels
             remaining.remove(i)
+            for rel in rels:
+                for k in by_rel.get(rel, ()):
+                    if k not in consumed:
+                        missing[k].discard(rel)
+                        list_if_usable(k)
+        pending = [p for k, p in enumerate(conditions) if k not in consumed]
         if pending:  # conjuncts not referencing any relation of the chain
             current = self._filter(current, conjunction(pending))  # type: ignore[arg-type]
         return current
@@ -836,12 +873,20 @@ class PhysicalPlanner:
 
 
 def _inner_join_chain(node: lp.LogicalNode) -> tuple[list[lp.LogicalNode], list[b.Expr]]:
-    """The inputs and conjuncts of a maximal tree of inner/cross joins."""
-    if isinstance(node, lp.Join) and node.kind in ("INNER", "CROSS"):
-        left, lc = _inner_join_chain(node.left)
-        right, rc = _inner_join_chain(node.right)
-        return left + right, lc + rc + conjuncts(node.condition)
-    return [node], []
+    """The inputs (left to right) and conjuncts (inputs' before their join's)
+    of a maximal tree of inner/cross joins (iteratively: chains are deep)."""
+    leaves: list[lp.LogicalNode] = []
+    conditions: list[b.Expr] = []
+    stack: list[tuple[lp.LogicalNode, bool]] = [(node, False)]
+    while stack:
+        n, inputs_done = stack.pop()
+        if not (isinstance(n, lp.Join) and n.kind in ("INNER", "CROSS")):
+            leaves.append(n)
+        elif inputs_done:
+            conditions += conjuncts(n.condition)
+        else:
+            stack += [(n, True), (n.right, False), (n.left, False)]
+    return leaves, conditions
 
 
 def _rels_within(expr: b.Expr, rels: set[int]) -> set[int]:

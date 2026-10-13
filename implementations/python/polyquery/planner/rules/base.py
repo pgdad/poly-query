@@ -19,6 +19,9 @@ from .. import logical as lp
 
 class Rule(ABC):
     name: ClassVar[str]
+    # the statement's deadline check (set by the optimizer); rules whose work
+    # grows faster than linearly with the plan call it at every node
+    check: Check = staticmethod(no_check)
 
     @abstractmethod
     def apply(self, node: lp.LogicalNode) -> lp.LogicalNode:
@@ -52,7 +55,7 @@ class RewriteExpressions(Rule):
 
     def __init__(self, rules: list[ExpressionRule], check: Check = no_check):
         self.rules = rules
-        self.check = check  # the statement's deadline check, at every node
+        self.check = check  # at every expression node
 
     def rewrite(self, expr: b.Expr) -> b.Expr:
         self.check()

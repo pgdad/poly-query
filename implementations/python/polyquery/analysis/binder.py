@@ -300,7 +300,7 @@ class Binder:
 
     @staticmethod
     def _resolves_locally(node: ast.ColumnRef, scope: Scope) -> bool:
-        return any(rv.find(node.name) for rv in scope.range_vars)
+        return scope.has_local_column(node.name)
 
     def _bind_ctes(self, ctes: list[ast.CommonTableExpr], scope: Scope) -> CteEnv:
         env = CteEnv({}, scope.ctes)

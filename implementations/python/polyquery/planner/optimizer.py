@@ -48,6 +48,8 @@ class Optimizer:
         """``plan`` with every rule applied to each of its trees (the trees
         are modified)."""
         passes = _fuse_expression_rules(self.rules, self.check)
+        for rule in passes:
+            rule.check = self.check
         root = plan.root
         for rule in passes:
             self.check()
