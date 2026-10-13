@@ -596,4 +596,3 @@ def _bool_param(query: dict[str, list[str]], key: str) -> bool | None:
     if lowered in ("false", "0", "no"):
         return False
     raise _HttpError(400, errors.invalid_request(f"query parameter '{key}' must be true or false"))
-

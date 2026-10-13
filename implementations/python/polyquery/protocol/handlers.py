@@ -60,6 +60,7 @@ CAPABILITIES = [
     "native.kernels",
     "change.union_all",
     "change.decimal38",
+    "change.expression_limits",
 ]
 
 
