@@ -109,6 +109,53 @@ the dispatcher currently prefers SVE. Sources:
 [`kernels-x86-quiet`](../../results/performance/kernels-x86-quiet/bench.jsonl),
 `experiments/runs/a-kernels-arm64-asm-a1-*/native-arm/bench.jsonl`.
 
+## Runtime performance at 10m rows
+
+Same workload, harness settings (7 reps, 3 warmups, CPUs 0-15, HTTP 1/4/16 clients) and
+engines on main after CR-6, at ten times the data: the main tables have 10 million rows and the
+dataset is 1.9 GB of CSV. The memory cap was raised from 96 to 180 GiB so that Python fits.
+x86 (six engines and the x86-64 assembly engine):
+[`20261013T111035Z-10m-main-and-asm-x86`](../../results/performance/20261013T111035Z-10m-main-and-asm-x86/summary.json).
+AArch64 engine on spark:
+[`20261013T111147Z-10m-asm-arm`](../../results/performance/20261013T111147Z-10m-asm-arm/summary.json).
+
+| engine | queries ok | geomean latency 1m → 10m | growth | peak RSS 1m → 10m | load 9 tables 1m → 10m | HTTP q/s, 16 clients, 1m → 10m |
+|---|---:|---:|---:|---:|---:|---:|
+| Go | 20/20 | 1.9 → 12.9 ms | 6.9× | 2.1 → 18.1 GiB | 3 → 29 s | 3,691 → 387 |
+| Rust | 20/20 | 2.0 → 15.1 ms | 7.4× | 1.3 → 9.7 GiB | 3 → 29 s | 2,181 → 100 |
+| Java | 20/20 | 3.4 → 19.5 ms | 5.7× | 3.1 → 31.0 GiB | 5 → 40 s | 1,160 → 30 |
+| Clojure | 20/20 | 5.5 → 39.6 ms | 7.2× | 8.7 → 29.3 GiB | 10 → 94 s | 1,016 → 57 |
+| Python | 20/20 | 24.7 → 246.2 ms | 10.0× | 15.8 → 171.1 GiB | 25 → 325 s | 11 → 1.3 |
+| Common Lisp | **0/20** | 6.9 ms → — | — | 1.7 GiB → — | crashed while loading | 96 → — |
+| *x86-64 assembly (cohort)* | 20/20 | 2.9 → 70.7 ms | 24.8× | 1.6 → 11.0 GiB | 1 → 15 s | 232 → 17 |
+| *AArch64 assembly (cohort, ARM host)* | 20/20 | 2.7 → 24.6 ms | 9.2× | 0.7 → 7.5 GiB | 2 → 24 s | 881 → 59 |
+
+The 1m column is the 2026-10-12 benchmark
+([`20261012T115848Z-1m-main-and-asm-x86`](../../results/performance/20261012T115848Z-1m-main-and-asm-x86/),
+[`20261012T124929Z-1m-asm-arm`](../../results/performance/20261012T124929Z-1m-asm-arm/)), which predates
+the CR-6 changes, so the growth factors mix data scale with those code changes. The assembly
+engines are a separate cohort and are not ranked with the six engines; the AArch64 row is a
+different machine.
+
+* **Every engine that finished agrees on every query** after a harness fix (HI-010). Raw digests first
+  showed both assembly engines disagreeing on `q16_timeseries_hourly`. The only difference was one
+  FLOAT64 value printed as `79` instead of `79.0`, which the spec allows, and the harness's digest
+  treated as different
+  ([`q16-digest-recheck.json`](../../results/performance/20261013T111035Z-10m-main-and-asm-x86/q16-digest-recheck.json)).
+* **Common Lisp cannot run at 10m.** Its build fixes the SBCL heap at 8 GiB (`--dynamic-space-size 8192`
+  in its Makefile), and SBCL dies with "Heap exhausted, game over" while parsing the first 10m-row CSV
+  (`transactions`). The whole process exits instead of returning `RESOURCE_LIMIT`
+  ([stderr](../../results/performance/20261013T111035Z-10m-main-and-asm-x86/common-lisp-10m-stderr.txt)).
+  Not fixed by hand; it is an engine limitation and a robustness defect at this scale.
+* **The ranking at 1m holds for the six engines**: Go, Rust, Java, Clojure, then Python. Most grow
+  6-7× for 10× the data, because many queries are top-N, filtered or grouped down to small results.
+  Python grows linearly (10×) and needs 171 GiB.
+* **The x86-64 assembly engine does not scale like the others.** It grows 25× (`q01_filter_selective`
+  427×, 0.06 → 27 ms; most joins and sorts 26-30×). At 1m it was faster than Java (2.85 vs 3.41 ms); at
+  10m it is 3.6× slower (70.7 vs 19.5 ms). The AArch64 engine grows a more ordinary 9×.
+* **HTTP throughput drops 8-40×.** The HTTP benchmark sends workload queries, and at 10m they are
+  heavier.
+
 ## Code size (automated count, `report.py`)
 
 | language | source LOC | test LOC | files | largest file |
@@ -458,7 +505,7 @@ these is verified yet. No ABI violation was found
 
 ## Harness incidents
 
-Nine harness defects were found during the runs and fixed; each is logged with
+Ten harness defects were found during the runs and fixed; each is logged with
 its impact in [`experiments/telemetry/harness-incidents.jsonl`](../../experiments/telemetry/harness-incidents.jsonl).
 HI-002 (the runner overwrote explicit request ids) was visible to the Phase 1
 agents as two spurious failures. HI-005 (a CR-1 case expected DECIMAL from an
@@ -473,7 +520,9 @@ change, engine validation built the kernel library from mismatched sources and t
 native conformance check passed without native kernels; the six affected
 record-only runs were re-validated and all passed native conformance. HI-009: the
 before/after benchmark script kept stray files from HEAD in the measured trees;
-all before/after sets were re-measured.
+all before/after sets were re-measured. HI-010: the benchmark's result digest treated a
+FLOAT64 printed as `79` and as `79.0` as different results; at 10m it flagged a false
+`q16` disagreement for both assembly engines (re-checked; all engines agree).
 
 ## Reproducibility
 

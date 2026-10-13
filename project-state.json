@@ -56,9 +56,10 @@
   "Debugging family remains too easy for both engines and kernels (kernel variant with symptom-only report and hidden-only failures: fixed in ~1 min)",
   "AArch64 kernel review findings: verification harnesses not committed, no BTI/GNU property note, block-size test constants not overridable",
   "Repeated attempts (n>1) per language/task for statistics (docs/methodology/statistics.md)",
-  "10m-scale benchmark",
   "AArch64 assembly optimize-latency: 1.82x geomean but q01_filter_selective 8x slower (plus q16, q17 significantly slower)",
-  "Remaining unverified review findings: cross-thread longjmp via global jmp_buf (x86-64 asm), Go worker goroutines without recover (both need an internal fault), symlink-following data paths"
+  "Remaining unverified review findings: cross-thread longjmp via global jmp_buf (x86-64 asm), Go worker goroutines without recover (both need an internal fault), symlink-following data paths",
+  "Common Lisp at 10m: SBCL heap fixed at 8 GiB in its Makefile; 'Heap exhausted' kills the process while loading the first 10m table (no RESOURCE_LIMIT) - engine task candidate",
+  "x86-64 assembly engine scales 25x from 1m to 10m (q01_filter_selective 427x); slower than Java at 10m"
  ],
  "known_defects": [
   "See experiments/telemetry/harness-incidents.jsonl (HI-001..008 fixed; SPEC-Q-001 resolved for CR-2 engines)",
@@ -91,7 +92,7 @@
   "http_suite": "19/19 all engines (python fixed by its CR-6 run, 2026-10-13)"
  },
  "last_successful_commit": "3216d97bf70570d923a14ca1aaef2b7f28ec640b",
- "next_recommended_action": "CR-6 implemented by all eight engines (first attempt each, $119.43); every robustness probe and the HTTP suite pass on all engines. Next candidates: re-run the 1m benchmark on the CR-6 engines (latency numbers predate CR-6), the AArch64 q01 regression, repeated attempts (n>1), 10m-scale benchmark.",
+ "next_recommended_action": "10m benchmark done (all engines agree; Common Lisp crashes on load, heap-limited). CI green for the first time (JDK URL, python3 3.14, git safe.directory in the CI image). Next candidates: re-run the 1m benchmark on the CR-6 engines (1m latency numbers predate CR-6), a Common Lisp large-data task (heap/RESOURCE_LIMIT), the AArch64 q01 regression, x86 asm 10m scaling, repeated attempts (n>1).",
  "findings": [
   "go phase5 HTTP: single-client p95 ~40 ms vs median 1.2 ms (bimodal; consistent with Nagle/delayed-ACK interaction) — report as engine quality finding; clojure p95 16 ms",
   "CR-2 DECIMAL(38) was the most expensive change (6.25-16.50 USD); Go and Java needed a new wide-decimal representation",
@@ -105,7 +106,9 @@
   "Owner decision 2026-10-11: real-workload optimize-latency re-runs replace the first round on main (INT-001; all six 660/660)",
   "Option B pilot: x86-64 and AArch64 assembly engines both passed Phase 1 in one session ($20.99 / $23.82, 37 / 28 min, 249/249 incl. hidden)",
   "Track B jvm-tuning: Clojure startup 2.7x, first-run 5.8x, warm 1.39x (RSS +3 GiB); Java (timeout) startup 1.4x, warm 1.00x",
-  "HI-009: before/after trees kept stray files; clean re-measurement within the ~20% between-session spread"
+  "HI-009: before/after trees kept stray files; clean re-measurement within the ~20% between-session spread",
+  "10m benchmark (20261013T111035Z, 20261013T111147Z): Go 12.9 ms, Rust 15.1, Java 19.5, Clojure 39.6, Python 246.2 (171 GiB); Common Lisp heap exhausted on load; asm cohort x86 70.7 ms (25x growth, slower than Java), AArch64 24.6 ms; all results agree after HI-010 (digest treated 79 vs 79.0 as different)",
+  "GitHub CI green for the first time on 2026-10-13: all ten earlier runs failed building the CI image (404 on a JDK 'latest' URL); then Go (git safe.directory) and Python (python3 was 3.12, engine needs >= 3.13 for csv.QUOTE_NOTNULL) needed image fixes"
  ],
  "totals": {
   "track_a_runs": 116,

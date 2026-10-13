@@ -1,0 +1,40 @@
+{
+ "query": "q16_timeseries_hourly",
+ "scale": "10m",
+ "benchmark": "20261013T111035Z-10m-main-and-asm-x86",
+ "found": "2026-10-13",
+ "incident": "HI-010",
+ "finding": "The benchmark's result digest hashed FLOAT64 values by JSON form, so MAX(humidity) = 79.0 written as 79 by both assembly engines (allowed: spec/data-types/types.md, FLOAT64 'any representation that parses back to the identical binary64 value') counted as a different result. Re-run of q16 with the same sandboxed launchers; digest_before_fix reproduces the benchmark's digests exactly, digest_after_fix uses the corrected harness digest. arm64-asm-engine (spark) recorded the same pre-fix digest as x86_64-asm-engine (d14f29c02495a696).",
+ "engines": {
+  "python": {
+   "digest_before_fix": "74ea692cbeb88a08",
+   "digest_after_fix": "74ea692cbeb88a08",
+   "rows": 100
+  },
+  "x86_64-asm-engine": {
+   "digest_before_fix": "d14f29c02495a696",
+   "digest_after_fix": "74ea692cbeb88a08",
+   "rows": 100
+  },
+  "rust": {
+   "digest_before_fix": "74ea692cbeb88a08",
+   "digest_after_fix": "74ea692cbeb88a08",
+   "rows": 100
+  },
+  "java": {
+   "digest_before_fix": "74ea692cbeb88a08",
+   "digest_after_fix": "74ea692cbeb88a08",
+   "rows": 100
+  },
+  "go": {
+   "digest_before_fix": "74ea692cbeb88a08",
+   "digest_after_fix": "74ea692cbeb88a08",
+   "rows": 100
+  },
+  "clojure": {
+   "digest_before_fix": "74ea692cbeb88a08",
+   "digest_after_fix": "74ea692cbeb88a08",
+   "rows": 100
+  }
+ }
+}

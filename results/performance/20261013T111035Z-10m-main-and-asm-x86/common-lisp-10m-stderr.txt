@@ -1,0 +1,30 @@
+# Common Lisp at 10m: reproduction of the harness_error (engine stderr, tail)
+# Same sandboxed launcher as the benchmark; first table load (transactions, 10m rows).
+71224   0  0.0000
+Tot   1119  25285  25383    320    162 199045      5     28     24  26696      0  35864    0.1  8585165488 [99.9% of 8589934592 max]
+GC control variables:
+   *GC-INHIBIT* = true
+   *GC-PENDING* = true
+   *STOP-FOR-GC-PENDING* = false
+Collection trigger variables:
+   dynamic_space_size = 8589934592
+   bytes_allocated = 8585165488
+   auto_gc_trigger = 6525976656
+   bytes_consed_between_gcs = 536870912
+fatal error encountered in SBCL pid 2 tid 2:
+Heap exhausted, game over.
+
+   0: fp=0x76121bff7468 pc=0xb8002e702b SB-VM::REALLOCATE-VECTOR-WITH-WIDETAG
+   1: fp=0x76121bff74d8 pc=0xb8002e72b4 SB-VM::EXTEND-VECTOR
+   2: fp=0x76121bff7510 pc=0xb8002e75f7 VECTOR-PUSH-EXTEND
+   3: fp=0x76121bff75e8 pc=0xb80009dbf9 (LAMBDA (POLYQUERY::FIELDS POLYQUERY::RECORD-NO) :IN POLYQUERY::INGEST-CSV)
+   4: fp=0x76121bff7658 pc=0xb80009c52e POLYQUERY::PARSE-CSV-RECORDS
+   5: fp=0x76121bff7730 pc=0xb80009d1e9 POLYQUERY::INGEST-CSV
+   6: fp=0x76121bff77b0 pc=0xb80018802e POLYQUERY::LOAD-TABLE
+   7: fp=0x76121bff7850 pc=0xb80018ec84 POLYQUERY::OP-LOAD
+   8: fp=0x76121bff7a80 pc=0xb80018a2c8 POLYQUERY::CALL-WITH-ERROR-RESPONSE
+   9: fp=0x76121bff7ac0 pc=0xb8001ae18c POLYQUERY::RUN-SESSION
+  10: fp=0x76121bff7dd8 pc=0xb8001af5da POLYQUERY::MAIN
+  11: fp=0x76121bff7e70 pc=0xb800cd4cf9 (FLET SB-UNIX::BODY :IN SB-IMPL::START-LISP)
+  12: fp=0x76121bff7f30 pc=0xb800cd4afd (FLET "WITHOUT-INTERRUPTS-BODY-3" :IN SB-IMPL::START-LISP)
+  13: fp=0x76121bff7fc8 pc=0xb800cd4942 SB-IMPL::%START-LISP

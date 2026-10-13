@@ -385,7 +385,7 @@ def build(weights: dict) -> dict:
                 "conformance": (r["validation"].get("summary") or {}).get("total"),
             } for r in rs]
     # 3/4/6. performance, resources, optimization (latest benchmark per scale)
-    perf_rep, asm_perf = [], {}
+    perf_rep, asm_perf, asm_perf_by_scale = [], {}, {}
     for p in perf:
         meta = p["meta"]
         # Before/after benchmarks measure task branches (some never merged): they belong to report 6
@@ -407,7 +407,7 @@ def build(weights: dict) -> dict:
             q = {n: v["latency_seconds"]["median"] for n, v in (r.get("queries") or {}).items()
                  if v.get("status") == "ok" and v["latency_seconds"].get("n")}
             entry["engines"][l] = {
-                "status": r.get("status"), "median_latency_by_query": q,
+                "status": r.get("status"), "error": r.get("error"), "median_latency_by_query": q,
                 "queries_ok": len(q), "startup_median_s": (r.get("startup_seconds") or {}).get("median"),
                 "peak_rss_mib": ((r.get("memory") or {}).get("peak_tree_rss_bytes") or 0) / 2**20 or None,
                 "ingest_mb_s": {t: v.get("mb_per_s") for t, v in (r.get("ingest") or {}).items()},
@@ -418,8 +418,11 @@ def build(weights: dict) -> dict:
         # rankings or Pareto front (the latest benchmark per engine is kept for the cohort section).
         for l in ASM_ENGINES:
             if l in entry["engines"]:
-                asm_perf[l] = {**entry["engines"][l], "bench_id": entry["bench_id"], "scale": entry["scale"],
-                               "source": entry["source"], "host_cpu": entry["host_cpu"], "host_arch": entry["host_arch"]}
+                e = {**entry["engines"][l], "bench_id": entry["bench_id"], "scale": entry["scale"],
+                     "source": entry["source"], "host_cpu": entry["host_cpu"], "host_arch": entry["host_arch"]}
+                asm_perf_by_scale.setdefault(entry["scale"], {})[l] = e
+                if entry["scale"] == PRIMARY_SCALE:
+                    asm_perf[l] = e
         entry["engines"] = {l: e for l, e in entry["engines"].items() if l in LANGS}
         if entry["engines"]:
             perf_rep.append(entry)
@@ -487,6 +490,7 @@ def build(weights: dict) -> dict:
                 "3_runtime_performance": perf_rep,
                 "3_runtime_performance_kernel_cohort": {l: kern[l]["performance"] for l in ASM},
                 "3_runtime_performance_asm_engine_cohort": asm_perf,
+                "3_runtime_performance_asm_engine_cohort_by_scale": asm_perf_by_scale,
                 "4_resource_efficiency": [
                     {"bench_id": p["bench_id"], "engines": {l: {k: e[k] for k in ("peak_rss_mib", "query_cpu_s", "query_wall_s", "startup_median_s", "ingest_mb_s")}
                                                           for l, e in p["engines"].items()}} for p in perf_rep],
@@ -512,6 +516,36 @@ def build(weights: dict) -> dict:
 
 
 # ------------------------------------------------------------------ rendering
+
+PRIMARY_SCALE = "1m"   # headline charts: the scale every engine has been benchmarked at
+
+
+def scale_rows(scale: str) -> int:
+    n, unit = int(scale[:-1]), scale[-1]
+    return n * {"k": 10**3, "m": 10**6}[unit]
+
+
+def scale_charts(R: dict, lbl: dict) -> list[str]:
+    """Latency and memory at each larger scale (latest benchmark per scale), with the reason an engine has no data."""
+    out = []
+    by_scale = {p["scale"]: p for p in R["3_runtime_performance"]}
+    asm_by = R.get("3_runtime_performance_asm_engine_cohort_by_scale") or {}
+    for s in sorted((s for s in by_scale if scale_rows(s) > scale_rows(PRIMARY_SCALE)), key=scale_rows):
+        p = by_scale[s]
+        eng = {**p["engines"], **asm_by.get(s, {})}
+        miss = {l: f"{e.get('status')}: {e.get('error') or 'no successful query'}" for l, e in eng.items()
+                if not e.get("median_latency_by_query")}
+        note = (f"{s} rows ({p['bench_id']}). Same workload and settings as the {PRIMARY_SCALE} charts. The AArch64 engine "
+                "runs on the ARM host: not comparable with the x86 bars.")
+        out.append(bar_chart(f"Query latency at {s} rows, geometric mean of medians", "ms",
+                             {l: 1000 * geomean(list(e["median_latency_by_query"].values()))
+                              if e.get("median_latency_by_query") else None for l, e in eng.items()},
+                             lambda v: f"{v:,.2f}", missing=miss, note=note, labels=lbl))
+        out.append(bar_chart(f"Peak resident memory at {s} rows (engine process tree)", "MiB",
+                             {l: e["peak_rss_mib"] for l, e in eng.items()}, lambda v: f"{v:,.0f}",
+                             missing=miss, labels=lbl))
+    return out
+
 
 def bar_chart(title: str, unit: str, data: dict[str, float | None], fmt=lambda v: f"{v:,.1f}",
               missing: dict[str, str] | None = None, note: str = "", labels: dict[str, str] | None = None) -> str:
@@ -591,7 +625,8 @@ def render_asm_engine_reports(R: dict) -> str:
                      "assembly engines do not load the kernel library. Each family is one chain of at most two sessions.</p>"
                      "<table><tr><th>engine</th><th>task</th><th>sessions</th><th>outcome</th><th>cost USD</th><th>wall min</th>"
                      "<th>lines +/−</th></tr>" + "".join(rows) + "</table>")
-    perf = R.get("3_runtime_performance_asm_engine_cohort") or {}
+    perf = {f"{l} ({s})": e for s, d in sorted((R.get("3_runtime_performance_asm_engine_cohort_by_scale") or {}).items(),
+                                               key=lambda x: scale_rows(x[0])) for l, e in d.items()}
     if perf:
         body = "".join(
             f"<tr><td>{html.escape(l)}</td><td>{html.escape(str(e.get('host_cpu')))}</td>"
@@ -601,8 +636,8 @@ def render_asm_engine_reports(R: dict) -> str:
             f"<td>{' / '.join(f(((e.get('http') or {}).get(c) or {}).get('qps'), '{:,.0f}') for c in ('1', '4', '16'))}</td>"
             f"<td><a href='../../{html.escape(e['source'])}'>{html.escape(e['bench_id'])}</a></td></tr>"
             for l, e in perf.items())
-        parts.append("<h3>3/4. Runtime performance and resources</h3><p class='muted'>Same harness, workload (1m rows), "
-                     "repetitions and CPU pinning as the six engines. x86-64 on the quiet x86 host, AArch64 natively on the "
+        parts.append("<h3>3/4. Runtime performance and resources</h3><p class='muted'>Same harness, workload, scales "
+                     "(1m and 10m rows), repetitions and CPU pinning as the six engines. x86-64 on the quiet x86 host, AArch64 natively on the "
                      "ARM host: the two rows are not comparable with each other.</p><table><tr><th>engine</th><th>host</th>"
                      "<th>geomean latency s</th><th>queries ok</th><th>startup ms</th><th>peak RSS MiB</th>"
                      "<th>HTTP q/s (1/4/16 clients)</th><th>benchmark</th></tr>" + body + "</table>")
@@ -762,7 +797,7 @@ def render_html(rep: dict) -> str:
                 "(spark, Cortex-X925): different hardware, shown for completeness, not comparable with the x86 bars. "
                 "The six engines have not been benchmarked on the ARM host.")
     if R["3_runtime_performance"]:
-        last = R["3_runtime_performance"][-1]
+        last = ([p for p in R["3_runtime_performance"] if p["scale"] == PRIMARY_SCALE] or R["3_runtime_performance"])[-1]
         eng = {l: e for l in LANGS + ASM_ENGINES if (e := {**last["engines"], **asm_perf}.get(l))}
         geo = {l: (1000 * geomean(list(e["median_latency_by_query"].values()))
                    if e.get("median_latency_by_query") else None) for l, e in eng.items()}
@@ -793,6 +828,7 @@ def render_html(rep: dict) -> str:
     charts.append(bar_chart("Source lines of code (automated count)", "LOC",
                             {l: (R["5_code_quality"].get(l) or {}).get("source_loc") for l in ALL},
                             lambda v: f"{v:,.0f}", labels=lbl))
+    charts.extend(scale_charts(R, lbl))
 
     css_vars = "".join(f"--c-{k}:{v};" for k, v in COLORS.items())
     css_dark = "".join(f"--c-{k}:{v};" for k, v in COLORS_DARK.items())
