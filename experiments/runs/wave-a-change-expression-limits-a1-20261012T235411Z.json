@@ -34,5 +34,37 @@
   0.91015625,
   1.515625,
   1.552734375
+ ],
+ "finished": "2026-10-13T03:09:42+00:00",
+ "loadavg_end": [
+  1.86181640625,
+  3.10546875,
+  5.2919921875
+ ],
+ "results": [
+  {
+   "run_id": "a-change-expression-limits-clojure-a1-20261012T235413Z",
+   "outcome": "success"
+  },
+  {
+   "run_id": "a-change-expression-limits-common-lisp-a1-20261012T235412Z",
+   "outcome": "success"
+  },
+  {
+   "run_id": "a-change-expression-limits-rust-a1-20261012T235411Z",
+   "outcome": "success"
+  },
+  {
+   "run_id": "a-change-expression-limits-java-a1-20261012T235415Z",
+   "outcome": "success"
+  },
+  {
+   "run_id": "a-change-expression-limits-python-a1-20261012T235414Z",
+   "outcome": "success"
+  },
+  {
+   "run_id": "a-change-expression-limits-go-a1-20261012T235417Z",
+   "outcome": "success"
+  }
  ]
 }

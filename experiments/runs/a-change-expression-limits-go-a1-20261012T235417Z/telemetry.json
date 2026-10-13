@@ -1,0 +1,114 @@
+{
+ "schema": "polyquery-telemetry/1",
+ "run_id": "a-change-expression-limits-go-a1-20261012T235417Z",
+ "language": "go",
+ "task": "change-expression-limits",
+ "track": "A",
+ "attempt": 1,
+ "model": "claude-opus-5-5",
+ "effort": "high",
+ "agent_harness_version": "2.1.296",
+ "prompt_id": "track-a-change-expression-limits",
+ "prompt_sha256": "1ef3c131ae9264ada72f42962308c0bca2101ded8128eee1975fdaa5a6d54415",
+ "session_id": "8fd8651d-7285-40eb-8109-adf471b009da",
+ "tokens": {
+  "input": 486,
+  "output": 203528,
+  "cache_read": 55393680,
+  "cache_creation": 401002,
+  "thinking": null,
+  "thinking_estimated": 97727,
+  "source": "result events",
+  "api_messages": 243
+ },
+ "rate_limit": {
+  "events": 14,
+  "max_utilization": {
+   "seven_day": 0.69,
+   "five_hour": 0.29
+  },
+  "statuses": [
+   "allowed"
+  ]
+ },
+ "cost_usd": 18.359255999999988,
+ "cost_basis": "platform-reported list price (total_cost_usd)",
+ "agent_turns": 246,
+ "result_segments": 1,
+ "assistant_messages": 547,
+ "tool_calls": {
+  "Bash": 241,
+  "Write": 4
+ },
+ "tool_calls_total": 245,
+ "tool_failures": 2,
+ "build_invocations": 84,
+ "build_failures_heuristic": 4,
+ "conformance_runs": 9,
+ "conformance_progress": [
+  [
+   660,
+   660
+  ],
+  [
+   660,
+   660
+  ],
+  [
+   660,
+   660
+  ],
+  [
+   660,
+   660
+  ],
+  [
+   660,
+   660
+  ],
+  [
+   3870,
+   3870
+  ],
+  [
+   660,
+   660
+  ],
+  [
+   660,
+   660
+  ],
+  [
+   660,
+   660
+  ]
+ ],
+ "repair_iterations": 0,
+ "time": {
+  "wall_seconds": 4274.5,
+  "model_api_seconds": 2038.0,
+  "tool_seconds": 2238.3,
+  "waiting_seconds": null,
+  "human_seconds": 0
+ },
+ "human_interventions": 0,
+ "git": {
+  "commits": 12,
+  "files_changed": 42,
+  "lines_added": 2135,
+  "lines_removed": 450,
+  "uncommitted_changes": false,
+  "paths_outside_language_dir": []
+ },
+ "agent_exit_code": 0,
+ "result_subtype": "success",
+ "is_error": false,
+ "stop_reason": "completed",
+ "final_message": "CR-6 is implemented in `implementations/go/` and every definition-of-done check passes: the probe exits 0, the conformance runs show 0 failures, 0 errors and 0 not-implemented, and all work is committed (12 commits, clean tree).\n\n**Test results**\n- `robustness_probe.py --only expression_limits --require-pass`: `expression_limits: pass`, exit 0. The engine now claims the capability, so the report is no longer marked informational.\n- `runner.py`: `TOTAL: 660/660 pass`\n- `runner.py --modes`: `TOTAL: 3870/3870 pass`\n- `runner.py --transport http`: `TOTAL: 660/660 pass`\n- `http_suite.py`: `19/19 passed`\n- `make build test lint`: all pass. The capability list keeps everything it had before, plus `change.expression_limits`.\n- Beyond the public probe, I ran about 60 extra cases through its `--extra-cases` hook (nested CAST/CASE/COALESCE/subqueries/derived tables/EXISTS, CTE chains, `||`/`*`/`-` chains, string IN lists, big GROUP BY/HAVING/ORDER BY, 1,000-table joins, 1 MiB comments and aliases). All gave the right result in every mode; the only exception, doubling CTEs, is covered under limitations.\n\n**The engine's limits** (documented in the README, `RESOURCE_LIMIT` beyond them, with the measure named in the message):\n- SQL text: 16 MiB\n- nesting depth: 4,096, measured exactly as CR-6 defines it, with a chain of one operator level counting once\n- operands: 250,000\n\nThese are set so no goroutine stack can run out. Go's stack overflow is fatal and can't be recovered, so preventing it is the only option. The deepest pass uses at most about 256 MiB of the 1 GB limit, in the main goroutine or a parallel worker.\n\n**Main design decisions**\n- **Parser:** reads tokens lazily, so a huge statement never builds a full token array. It counts open constructs to stop early on runaway input. A lexical error later in the text still wins over a syntax error, as before.\n- **Timeout:** it now counts from receipt of the request and is checked inside parsing, analysis, each optimizer rule, planning, operator construction and execution. Expressions of 4,096+ nodes check it on every evaluation. Optimizer rules can't return errors, so an expired rule panics with a private value that `Optimize` turns into `TIMEOUT`; the abandoned plan is simply dropped. Measured lateness was at most 0.4 s.\n- **Removed quadratic or exponential work**, which had caused the original hang and 18 s answers:\n  - constant checks, GROUP BY and ORDER BY matching\n  - IN-list dedup and `||` chains\n  - CTE validation\n  - join schemas and join reordering: a 1,000-table join went from 16 s to 0.2 s, with the same join order as before\n  - nested correlated subqueries, which were exponential in depth\n- **Memory:**\n  - The analyzed plan now counts against the per-query memory budget. Previously, 30 CTEs that each reference the previous one twice reached 25 GiB before timing out.\n  - Very large expressions are evaluated row by row inside vectorized operators. A 250,000-term sum peaked at 5 GiB vectorized; it now stays under 600 MiB.\n\n**Known limitations**\n- `TIMEOUT` can still arrive up to about 0.4 s late. The longest unchecked stretches are single passes over one 250,000-node expression (about 150 ms each); on a much slower machine they could come closer to the 1 s rule.\n- On large tables, huge expressions run at row-mode speed. For example, a 10,000-term sum over 200k rows takes about 2 s single-threaded but 6.5 s with 8 threads, because the vectorization budget is split across workers.\n- CTEs are still inlined. A small statement that doubles its plan with each CTE ends in `RESOURCE_LIMIT` or `TIMEOUT` instead of a result.\n- `spec_version` stays `1.0.0`, as it did for CR-1 and CR-2, because a conformance test pins it.",
+ "notes": {
+  "human_seconds": "0 by construction: unattended run, no human input after launch",
+  "waiting_seconds": "not exposed by the platform",
+  "build_failures_heuristic": "Bash build commands whose output matched compiler-error patterns",
+  "repair_iterations": "conformance runner invocations after the first one reporting failures"
+ }
+}

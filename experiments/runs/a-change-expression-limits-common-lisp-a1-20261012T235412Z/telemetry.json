@@ -1,0 +1,78 @@
+{
+ "schema": "polyquery-telemetry/1",
+ "run_id": "a-change-expression-limits-common-lisp-a1-20261012T235412Z",
+ "language": "common-lisp",
+ "task": "change-expression-limits",
+ "track": "A",
+ "attempt": 1,
+ "model": "claude-opus-5-5",
+ "effort": "high",
+ "agent_harness_version": "2.1.296",
+ "prompt_id": "track-a-change-expression-limits",
+ "prompt_sha256": "9f439146a750fe8b4c691d1ab2e181f4e5ca983ba23bcd66fdebead52d01f055",
+ "session_id": "81562470-9eab-4022-ac99-fa5dff827a68",
+ "tokens": {
+  "input": 326,
+  "output": 167347,
+  "cache_read": 41353794,
+  "cache_creation": 418539,
+  "thinking": null,
+  "thinking_estimated": 83092,
+  "source": "result events",
+  "api_messages": 163
+ },
+ "rate_limit": {
+  "events": 17,
+  "max_utilization": {
+   "seven_day": 0.67,
+   "five_hour": 0.17
+  },
+  "statuses": [
+   "allowed"
+  ]
+ },
+ "cost_usd": 14.967314799999997,
+ "cost_basis": "platform-reported list price (total_cost_usd)",
+ "agent_turns": 166,
+ "result_segments": 1,
+ "assistant_messages": 382,
+ "tool_calls": {
+  "Bash": 163,
+  "Read": 1,
+  "Write": 1
+ },
+ "tool_calls_total": 165,
+ "tool_failures": 4,
+ "build_invocations": 71,
+ "build_failures_heuristic": 4,
+ "conformance_runs": 3,
+ "conformance_progress": [],
+ "repair_iterations": 0,
+ "time": {
+  "wall_seconds": 5338.3,
+  "model_api_seconds": 1602.9,
+  "tool_seconds": 3736.4,
+  "waiting_seconds": null,
+  "human_seconds": 0
+ },
+ "human_interventions": 0,
+ "git": {
+  "commits": 5,
+  "files_changed": 22,
+  "lines_added": 1080,
+  "lines_removed": 244,
+  "uncommitted_changes": false,
+  "paths_outside_language_dir": []
+ },
+ "agent_exit_code": 0,
+ "result_subtype": "success",
+ "is_error": false,
+ "stop_reason": "completed",
+ "final_message": "CR-6 is implemented and committed, and every item in the definition of done is met.\n\n**Test results** (final build)\n- `robustness_probe.py --only expression_limits --require-pass`: `expression_limits: pass`, exit 0. All minimum cases succeed in row, vectorized, parallel and auto mode. Of the beyond cases, 100,000 parentheses get `RESOURCE_LIMIT`; the 100,000-term `OR` and the 100,000-item `IN` list return the correct result in under 0.3 s.\n- Conformance runner: `TOTAL: 660/660 pass`, the same with `--transport http`, and `TOTAL: 3870/3870 pass` with `--modes`. No fails, errors or not-implemented.\n- `http_suite.py`: `19/19 passed`.\n- `make build test`: clean build, 296 unit tests, \"No tests failed\"; `make lint` reports no warnings.\n- The full probe set (without `--only`) still exits 1 because `fd_after_failed_loads`, `session_huge_line` and `parallel_memory_budget` report \"not_triggered\"/\"observation\". I built the baseline commit and got the same verdicts, so this is pre-existing and not caused by this change.\n- The engine claims `change.expression_limits` and keeps every capability it claimed before.\n\n**What I implemented**\n- **Limits** (new `src/sql/limits.lisp`): 16 MiB of SQL text, nesting depth 4,096, 250,000 operands. The parser measures as it reads, and a chain of one binary operator counts as one level. Beyond a limit the error is `RESOURCE_LIMIT` naming the measure, e.g. `expression nesting depth exceeds 4096`. The old parser refused anything deeper than 400 with `PARSE_ERROR`.\n- **Linear processing:** planning a 10,000-term chain took 1\u20132 s and 4,000 chained CTEs took 7 s; both now take milliseconds. Most of the fix is caching per-node facts (constant? can fail? which columns?) on expressions instead of rescanning subtrees.\n- **Timeout covers every stage:** it counts from receipt of the request. The lexer, parser, binder, optimizer and both compilers now check it, as do compiled expressions themselves (only large ones, so normal queries pay nothing). The `explain` op now honours `timeout_ms`.\n- **Stack:** every thread now gets 1 GiB of stack. That space is reserved but only used by deep statements, and thread start-up cost is unchanged. The worst case at my limits needed under 256 MB. Stack exhaustion in any thread, including parallel workers, is reported as `RESOURCE_LIMIT`.\n\n**Bugs found beyond the public probe.** I ran about 60 extra statements at and beyond the limits, over session and HTTP, with timeouts from 50 ms to 30 s. On a 200,000-row table they exposed bugs the probe can't see:\n- The engine crashed (fatal out-of-memory) on a 240,000-term string concatenation. Intermediate vectors were being kept alive by arrays allocated before the operands were evaluated. Fixed.\n- An 80,000-branch `CASE` and 20,000 aggregates could also exhaust memory. Very wide operators now run row by row, branch by branch, or on slices of a batch.\n- Vectorized timeouts arrived up to 47 s late, because the checks ran before the expensive part of the work. Fixed: every mode now answers within about 0.45 s of the deadline.\n\n**Known limitations** (also in the README)\n- Statements near the limits are correct but slow on big tables: a 250,000-term sum allocates about 4 GB of short-lived memory per 2,048 rows. They do respect the timeout and the memory budget.\n- HTTP `/v1/explain` honours `options.timeout_ms` but not the server's `--query-timeout-ms`.\n- `spec_version` stays `1.0.0`, because a conformance case requires that exact value (CR-2 made the same choice).\n\nThe README has a CR-6 section with the limits, the reasons for them, and the list of modules touched.",
+ "notes": {
+  "human_seconds": "0 by construction: unattended run, no human input after launch",
+  "waiting_seconds": "not exposed by the platform",
+  "build_failures_heuristic": "Bash build commands whose output matched compiler-error patterns",
+  "repair_iterations": "conformance runner invocations after the first one reporting failures"
+ }
+}

@@ -4,3 +4,23 @@
 2026-10-12T23:54:28+00:00 [a-change-expression-limits-clojure-a1-20261012T235413Z] agent queued (usage gate, then launch)
 2026-10-13T01:20:22+00:00 [a-change-expression-limits-clojure-a1-20261012T235413Z] agent finished; collecting telemetry
 2026-10-13T01:20:22+00:00 [a-change-expression-limits-clojure-a1-20261012T235413Z] validating (clean clone, sandboxed)
+2026-10-13T01:21:37+00:00 [a-change-expression-limits-clojure-a1-20261012T235413Z] outcome=success cost=$9.0152788 turns=132 wall=3473.8s
+2026-10-13T01:21:37+00:00 [a-change-expression-limits-python-a1-20261012T235414Z] agent queued (usage gate, then launch)
+2026-10-13T01:51:21+00:00 [a-change-expression-limits-common-lisp-a1-20261012T235412Z] agent finished; collecting telemetry
+2026-10-13T01:51:21+00:00 [a-change-expression-limits-common-lisp-a1-20261012T235412Z] validating (clean clone, sandboxed)
+2026-10-13T01:51:46+00:00 [a-change-expression-limits-common-lisp-a1-20261012T235412Z] outcome=success cost=$14.967314799999997 turns=166 wall=5338.3s
+2026-10-13T01:51:46+00:00 [a-change-expression-limits-java-a1-20261012T235415Z] agent queued (usage gate, then launch)
+2026-10-13T01:57:31+00:00 [a-change-expression-limits-rust-a1-20261012T235411Z] agent finished; collecting telemetry
+2026-10-13T01:57:31+00:00 [a-change-expression-limits-rust-a1-20261012T235411Z] validating (clean clone, sandboxed)
+2026-10-13T01:57:58+00:00 [a-change-expression-limits-rust-a1-20261012T235411Z] outcome=success cost=$21.517409000000008 turns=224 wall=5713.2s
+2026-10-13T01:57:58+00:00 [a-change-expression-limits-go-a1-20261012T235417Z] agent queued (usage gate, then launch)
+2026-10-13T03:00:21+00:00 [a-change-expression-limits-java-a1-20261012T235415Z] agent finished; collecting telemetry
+2026-10-13T03:00:21+00:00 [a-change-expression-limits-java-a1-20261012T235415Z] validating (clean clone, sandboxed)
+2026-10-13T03:00:54+00:00 [a-change-expression-limits-java-a1-20261012T235415Z] outcome=success cost=$12.958079399999997 turns=149 wall=4114.2s
+2026-10-13T03:07:53+00:00 [a-change-expression-limits-python-a1-20261012T235414Z] agent finished; collecting telemetry
+2026-10-13T03:07:53+00:00 [a-change-expression-limits-python-a1-20261012T235414Z] validating (clean clone, sandboxed)
+2026-10-13T03:08:46+00:00 [a-change-expression-limits-python-a1-20261012T235414Z] outcome=success cost=$20.985685800000006 turns=235 wall=6376.4s
+2026-10-13T03:09:12+00:00 [a-change-expression-limits-go-a1-20261012T235417Z] agent finished; collecting telemetry
+2026-10-13T03:09:12+00:00 [a-change-expression-limits-go-a1-20261012T235417Z] validating (clean clone, sandboxed)
+2026-10-13T03:09:42+00:00 [a-change-expression-limits-go-a1-20261012T235417Z] outcome=success cost=$18.359255999999988 turns=246 wall=4274.5s
+2026-10-13T03:09:42+00:00 wave wave-a-change-expression-limits-a1-20261012T235411Z finished: expression=success, expression=success, expression=success, expression=success, expression=success, expression=success

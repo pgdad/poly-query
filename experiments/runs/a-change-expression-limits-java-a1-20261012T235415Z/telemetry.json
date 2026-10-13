@@ -1,0 +1,91 @@
+{
+ "schema": "polyquery-telemetry/1",
+ "run_id": "a-change-expression-limits-java-a1-20261012T235415Z",
+ "language": "java",
+ "task": "change-expression-limits",
+ "track": "A",
+ "attempt": 1,
+ "model": "claude-opus-5-5",
+ "effort": "high",
+ "agent_harness_version": "2.1.296",
+ "prompt_id": "track-a-change-expression-limits",
+ "prompt_sha256": "87231d5f716b34679538e152f2e24c0a6bf4d0745788f87cfc0c1436b8995d0f",
+ "session_id": "707ebfec-2c2e-445c-850d-24541d65c1d6",
+ "tokens": {
+  "input": 292,
+  "output": 160544,
+  "cache_read": 33637757,
+  "cache_creation": 377310,
+  "thinking": null,
+  "thinking_estimated": 77242,
+  "source": "result events (summed over 2 segments)",
+  "api_messages": 146
+ },
+ "rate_limit": {
+  "events": 12,
+  "max_utilization": {
+   "seven_day": 0.68,
+   "five_hour": 0.27
+  },
+  "statuses": [
+   "allowed"
+  ]
+ },
+ "cost_usd": 12.958079399999997,
+ "cost_basis": "platform-reported list price (total_cost_usd)",
+ "agent_turns": 149,
+ "result_segments": 2,
+ "assistant_messages": 322,
+ "tool_calls": {
+  "Bash": 142,
+  "Write": 4,
+  "ToolSearch": 1
+ },
+ "tool_calls_total": 147,
+ "tool_failures": 0,
+ "build_invocations": 32,
+ "build_failures_heuristic": 2,
+ "conformance_runs": 5,
+ "conformance_progress": [
+  [
+   660,
+   660
+  ],
+  [
+   3870,
+   3870
+  ],
+  [
+   3870,
+   3870
+  ]
+ ],
+ "repair_iterations": 0,
+ "time": {
+  "wall_seconds": 4114.2,
+  "model_api_seconds": 1471.8,
+  "tool_seconds": 2608.4,
+  "waiting_seconds": null,
+  "human_seconds": 0
+ },
+ "human_interventions": 0,
+ "git": {
+  "commits": 4,
+  "files_changed": 28,
+  "lines_added": 1529,
+  "lines_removed": 373,
+  "uncommitted_changes": false,
+  "paths_outside_language_dir": []
+ },
+ "agent_exit_code": 0,
+ "result_subtype": "success",
+ "is_error": false,
+ "stop_reason": "completed",
+ "final_message": "CR-6 is implemented in the Java engine and every check in the definition of done passes on a clean build. Everything is committed in four commits on `main`.\n\n**Test results (final run after `make clean`):**\n- `make build test`: succeeds, 111 unit tests passed, 0 failed.\n- `robustness_probe.py --only expression_limits --require-pass`: pass, exit 0. The whole probe takes about 2.5 s. Before the change it took 169 s and failed: 100,000 nested parentheses gave `PARSE_ERROR` and the 100,000-term `OR` chain ran past its timeout.\n- Conformance, session mode: 660/660 pass.\n- Conformance, `--modes`: 3870/3870 pass.\n- Conformance, `--transport http`: 660/660 pass.\n- `http_suite.py`: 19/19 passed.\n- I also built the native-kernel library in a /tmp copy and ran the unit tests and conformance `--modes` with it: all pass. Lint is clean.\n- The engine claims `change.expression_limits` and keeps all its earlier capabilities.\n\n**Engine limits (documented in the README):**\n\n| Measure | This engine | CR-6 minimum |\n|---|---|---|\n| SQL text | 64 MiB | 1 MiB |\n| Nesting depth | 4,096 | 1,000 |\n| Operands | 200,000 | 25,000 |\n\nBeyond a limit the statement fails with `RESOURCE_LIMIT`, e.g. `expression nesting depth exceeds 4096` (HTTP status 413).\n\n**What I implemented:**\n- **Parser:** it reads tokens on demand instead of building a full token list. It measures nesting depth the way the change request defines it, so a chain of one operator such as `a OR b OR c` counts as one level. It counts operands and checks the text length. 100,000 nested parentheses are rejected in under 10 ms.\n- **Timeout in every stage:** parsing, binding, optimization, planning and expression compilation now check the deadline regularly. Deep expressions also check it during evaluation in row, vectorized and parallel mode. Measured on a 200,000-row table with statements at the engine's limits, every `TIMEOUT` arrived 0\u20130.10 s after the deadline; before, it was up to 62 s late in parallel mode.\n- **Removed slow spots that long chains exposed:**\n  - Constant folding, predicate simplification and vectorized compilation re-scanned whole subtrees at every node. A 10,000-term `OR` took 1.6 s and a 100,000-term one never finished.\n  - Predicate pushdown was cubic for nested derived tables: 999 levels took 6 s, now 0.3 s.\n  - Join schemas and join reordering were cubic for very long join chains: a 2,000-table chain took 23\u201331 s, now 4.5\u20139 s.\n  - `||` chains now build the result string once instead of copying it at every step.\n- **Memory:** every vectorized expression node holds a buffer of batch size, so a 200,000-node expression held about 3.6 GB per worker and the heap reached 26 GB. Batches now shrink for very large expressions; ordinary queries keep the default size.\n- **Tests and docs:** a new `ExpressionLimitsTest`, and a README section covering the limits, the depth rules, the stages and the modules touched.\n\n**Main design decisions:**\n- Limits are enforced only in the parser, so every later stage sees a statement of bounded size.\n- Expression trees stay binary. Rebalancing or merging chains into one node would change overflow behaviour and error order, and the existing large thread stacks (512 MB main/HTTP, 256 MB workers) have several times the headroom needed at the limits. A stack overflow in any thread is reported as `RESOURCE_LIMIT` and the process keeps running.\n- Timeouts are cooperative checks inside each stage rather than a watchdog thread, so nothing keeps computing after a `TIMEOUT` is sent.\n- `spec_version` stays `1.0.0` because the existing conformance case `catalog.pqt` requires it, as with the earlier change requests.\n\n**Known limitations:**\n- The probe's environment variables for forcing parallel execution are ignored by this engine, so its 100-row \"parallel\" cases actually run on one thread. I checked real parallel evaluation of the same statements separately, on a 200,000-row table and with tiny work units in the unit tests.\n- Joins, `UNION ALL` branches and",
+ "notes": {
+  "human_seconds": "0 by construction: unattended run, no human input after launch",
+  "waiting_seconds": "not exposed by the platform",
+  "build_failures_heuristic": "Bash build commands whose output matched compiler-error patterns",
+  "repair_iterations": "conformance runner invocations after the first one reporting failures"
+ }
+}

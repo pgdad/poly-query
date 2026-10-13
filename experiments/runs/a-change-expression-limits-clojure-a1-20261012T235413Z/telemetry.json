@@ -1,0 +1,79 @@
+{
+ "schema": "polyquery-telemetry/1",
+ "run_id": "a-change-expression-limits-clojure-a1-20261012T235413Z",
+ "language": "clojure",
+ "task": "change-expression-limits",
+ "track": "A",
+ "attempt": 1,
+ "model": "claude-opus-5-5",
+ "effort": "high",
+ "agent_harness_version": "2.1.296",
+ "prompt_id": "track-a-change-expression-limits",
+ "prompt_sha256": "52beb2efdf46395f4969ff2a906a8d7d38105f9957ebff5b40f3c027a98ea572",
+ "session_id": "c59657e2-8bf2-4006-9bd1-a9171f4d0a59",
+ "tokens": {
+  "input": 256,
+  "output": 106978,
+  "cache_read": 23138154,
+  "cache_creation": 280883,
+  "thinking": null,
+  "thinking_estimated": 45981,
+  "source": "result events (summed over 2 segments)",
+  "api_messages": 128
+ },
+ "rate_limit": {
+  "events": 12,
+  "max_utilization": {
+   "five_hour": 0.12,
+   "seven_day": 0.66
+  },
+  "statuses": [
+   "allowed"
+  ]
+ },
+ "cost_usd": 9.0152788,
+ "cost_basis": "platform-reported list price (total_cost_usd)",
+ "agent_turns": 132,
+ "result_segments": 2,
+ "assistant_messages": 257,
+ "tool_calls": {
+  "Bash": 124,
+  "Write": 2,
+  "ToolSearch": 1,
+  "Monitor": 3
+ },
+ "tool_calls_total": 130,
+ "tool_failures": 3,
+ "build_invocations": 62,
+ "build_failures_heuristic": 3,
+ "conformance_runs": 1,
+ "conformance_progress": [],
+ "repair_iterations": 0,
+ "time": {
+  "wall_seconds": 3473.8,
+  "model_api_seconds": 1008.3,
+  "tool_seconds": 2187.6,
+  "waiting_seconds": null,
+  "human_seconds": 0
+ },
+ "human_interventions": 0,
+ "git": {
+  "commits": 3,
+  "files_changed": 23,
+  "lines_added": 833,
+  "lines_removed": 218,
+  "uncommitted_changes": false,
+  "paths_outside_language_dir": []
+ },
+ "agent_exit_code": 0,
+ "result_subtype": "success",
+ "is_error": false,
+ "stop_reason": "completed",
+ "final_message": "That notification is only the stress-case monitor timing out; the run it was watching had already finished with every case passing. Nothing has changed since my summary: the work is committed and nothing more is pending.",
+ "notes": {
+  "human_seconds": "0 by construction: unattended run, no human input after launch",
+  "waiting_seconds": "not exposed by the platform",
+  "build_failures_heuristic": "Bash build commands whose output matched compiler-error patterns",
+  "repair_iterations": "conformance runner invocations after the first one reporting failures"
+ }
+}

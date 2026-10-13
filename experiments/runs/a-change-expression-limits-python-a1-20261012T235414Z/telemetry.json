@@ -1,0 +1,122 @@
+{
+ "schema": "polyquery-telemetry/1",
+ "run_id": "a-change-expression-limits-python-a1-20261012T235414Z",
+ "language": "python",
+ "task": "change-expression-limits",
+ "track": "A",
+ "attempt": 1,
+ "model": "claude-opus-5-5",
+ "effort": "high",
+ "agent_harness_version": "2.1.296",
+ "prompt_id": "track-a-change-expression-limits",
+ "prompt_sha256": "2c66f706227aa10ccef4bd45e5f5258bf77e5816db86147c2b0b050c545e01cc",
+ "session_id": "ad8406df-9072-4692-8dc9-9fbcfc415808",
+ "tokens": {
+  "input": 464,
+  "output": 225341,
+  "cache_read": 63960209,
+  "cache_creation": 460621,
+  "thinking": null,
+  "thinking_estimated": 109114,
+  "source": "result events",
+  "api_messages": 232
+ },
+ "rate_limit": {
+  "events": 20,
+  "max_utilization": {
+   "seven_day": 0.69,
+   "five_hour": 0.28
+  },
+  "statuses": [
+   "allowed"
+  ]
+ },
+ "cost_usd": 20.985685800000006,
+ "cost_basis": "platform-reported list price (total_cost_usd)",
+ "agent_turns": 235,
+ "result_segments": 1,
+ "assistant_messages": 555,
+ "tool_calls": {
+  "Bash": 232,
+  "Write": 2
+ },
+ "tool_calls_total": 234,
+ "tool_failures": 4,
+ "build_invocations": 52,
+ "build_failures_heuristic": 3,
+ "conformance_runs": 11,
+ "conformance_progress": [
+  [
+   660,
+   660
+  ],
+  [
+   660,
+   660
+  ],
+  [
+   0,
+   0
+  ],
+  [
+   3870,
+   3870
+  ],
+  [
+   660,
+   660
+  ],
+  [
+   660,
+   660
+  ],
+  [
+   660,
+   660
+  ],
+  [
+   3870,
+   3870
+  ],
+  [
+   660,
+   660
+  ],
+  [
+   660,
+   660
+  ],
+  [
+   660,
+   660
+  ]
+ ],
+ "repair_iterations": 0,
+ "time": {
+  "wall_seconds": 6376.4,
+  "model_api_seconds": 2130.9,
+  "tool_seconds": 4246.9,
+  "waiting_seconds": null,
+  "human_seconds": 0
+ },
+ "human_interventions": 0,
+ "git": {
+  "commits": 10,
+  "files_changed": 29,
+  "lines_added": 1642,
+  "lines_removed": 321,
+  "uncommitted_changes": false,
+  "paths_outside_language_dir": []
+ },
+ "agent_exit_code": 0,
+ "result_subtype": "success",
+ "is_error": false,
+ "stop_reason": "completed",
+ "final_message": "CR-6 is implemented in the Python engine and every definition-of-done check passes. The engine now claims `change.expression_limits` and keeps its 30 earlier capabilities; all work is committed and the working tree is clean.\n\n**Test results (final run, from a clean `make build test`):**\n- `robustness_probe.py --only expression_limits --require-pass`: `expression_limits: pass`, exit 0\n- Conformance runner: `TOTAL: 660/660 pass`, also 660/660 with `--transport http`\n- Conformance with `--modes`: `TOTAL: 3870/3870 pass`\n- `http_suite.py`: `19/19 passed`\n- Unit tests: 209 run, OK (10 skipped)\n\n**What I built:**\n- **Limits** (new `polyquery/limits.py`, documented in the README): 16 MiB of SQL text, nesting depth 4,096 and 200,000 operands. The parser measures these as it goes and fails early with `RESOURCE_LIMIT`, naming the measure (e.g. `expression nesting depth exceeds 4096`). Statements far beyond a limit fail in under a second.\n- **Linear processing of huge statements:** at the baseline, 10k-term `OR`/`AND` chains and the 10k-term sum failed (recursion overflow), and the 100k-item `IN` list hung. The 10k-item `IN` list and 998 nested `ABS` calls took seconds, and nested subqueries, derived tables, long GROUP BY/ORDER BY lists, a 1 MiB `LIKE` pattern and joins of many tables were quadratic or worse. All of these are now linear, with query plans unchanged.\n- **Deep nesting can't crash the engine:** walks, hashing and equality of expression trees are iterative, so the deepest allowed statements run even on a small stack. Statement threads still get a 256 MiB stack as headroom. Any remaining stack exhaustion becomes `RESOURCE_LIMIT`, in worker processes too.\n- **Timeout in every stage:** the clock starts when the request is received and is checked in lexing, binding, optimization, planning, plan pickling for workers, and inside large compiled expressions. In my measurements `TIMEOUT` arrived within 0.4 s of expiry in every mode.\n\n**Fixes outside CR-6 (both found during testing):**\n- **HTTP suite failure:** `malformed_chunked_body` failed on the original engine too. A negative chunk size made the server read until the connection closed. It's fixed, so the suite now passes 19/19.\n- **`INTERNAL_ERROR` on huge numbers:** ORDER BY/GROUP BY ordinals and CAST parameters longer than 4,300 digits crashed this way. They now give `SEMANTIC_ERROR`.\n\n**Checks beyond the public probe:** about 80 extra cases of other constructs (nested CASE/CAST/subqueries/derived tables/CTEs, 25k-operand chains of every operator, 1 MiB comments and literals, over-limit variants). I ran them in all modes, through forked worker processes, with native kernels and over HTTP. Results also match the original engine on about 3,200 random queries, and benchmark timings are unchanged within noise.\n\n**Known limitations:**\n- **Row-mode speed at the limit:** statements near the operand limit are slow in row mode (a 200k-operand sum takes about 10\u201313 s; about 4\u20135 s vectorized).\n- **Cleanup delay:** after a very large statement fails, freeing its state takes about 0.5 s. This happens after the response is sent, so it can delay reading the next request on the same session.\n- **Wide joins:** joins of thousands of tables still plan in quadratic time (not a CR-6 measure), but they observe the timeout promptly.\n- **Spec version:** `spec_version` stays `1.0.0`, because a public conformance case expects it (CR-6 names `1.3.0-cr6`).\n\n**Design decisions:**\n- **Approach:** I kept the existing tree representation and made deep recursion safe, rather than rewriting every pass around flattened operator chains.\n- **Operand counting:** empty argument lists `f()` and table references also count as operands. Without that, `x + f() + f() \u2026` or `FROM t, t, \u2026` could build an unbounded tree while staying under every limit.",
+ "notes": {
+  "human_seconds": "0 by construction: unattended run, no human input after launch",
+  "waiting_seconds": "not exposed by the platform",
+  "build_failures_heuristic": "Bash build commands whose output matched compiler-error patterns",
+  "repair_iterations": "conformance runner invocations after the first one reporting failures"
+ }
+}

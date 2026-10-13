@@ -1,0 +1,83 @@
+{
+ "schema": "polyquery-telemetry/1",
+ "run_id": "a-change-expression-limits-rust-a1-20261012T235411Z",
+ "language": "rust",
+ "task": "change-expression-limits",
+ "track": "A",
+ "attempt": 1,
+ "model": "claude-opus-5-5",
+ "effort": "high",
+ "agent_harness_version": "2.1.296",
+ "prompt_id": "track-a-change-expression-limits",
+ "prompt_sha256": "0bc91d01e66bcb719ce8088241da79d4121d50eb144f556cc2301ba1e002b269",
+ "session_id": "6da7586a-682a-4816-9b03-fefb9ed62dbd",
+ "tokens": {
+  "input": 440,
+  "output": 258437,
+  "cache_read": 62449785,
+  "cache_creation": 482119,
+  "thinking": null,
+  "thinking_estimated": 137132,
+  "source": "result events",
+  "api_messages": 220
+ },
+ "rate_limit": {
+  "events": 20,
+  "max_utilization": {
+   "seven_day": 0.67,
+   "five_hour": 0.18
+  },
+  "statuses": [
+   "allowed"
+  ]
+ },
+ "cost_usd": 21.517409000000008,
+ "cost_basis": "platform-reported list price (total_cost_usd)",
+ "agent_turns": 224,
+ "result_segments": 1,
+ "assistant_messages": 551,
+ "tool_calls": {
+  "Bash": 221,
+  "Write": 1,
+  "Read": 1
+ },
+ "tool_calls_total": 223,
+ "tool_failures": 3,
+ "build_invocations": 55,
+ "build_failures_heuristic": 6,
+ "conformance_runs": 4,
+ "conformance_progress": [
+  [
+   660,
+   660
+  ]
+ ],
+ "repair_iterations": 0,
+ "time": {
+  "wall_seconds": 5713.2,
+  "model_api_seconds": 2437.0,
+  "tool_seconds": 3287.4,
+  "waiting_seconds": null,
+  "human_seconds": 0
+ },
+ "human_interventions": 0,
+ "git": {
+  "commits": 8,
+  "files_changed": 33,
+  "lines_added": 2527,
+  "lines_removed": 377,
+  "uncommitted_changes": false,
+  "paths_outside_language_dir": []
+ },
+ "agent_exit_code": 0,
+ "result_subtype": "success",
+ "is_error": false,
+ "stop_reason": "completed",
+ "final_message": "CR-6 is done: the engine meets the definition of done, claims `change.expression_limits` alongside all 30 capabilities it claimed before, and everything is committed.\n\n**Test results (final binary):**\n- `robustness_probe.py --only expression_limits --require-pass`: **pass, exit 0**\n- Conformance: `TOTAL: 660/660 pass`; with `--modes`: `TOTAL: 3870/3870 pass`; with `--transport http`: `TOTAL: 660/660 pass`. No failures, errors or not-implemented.\n- `http_suite.py`: `19/19 passed`\n- `make build test`: 174 unit tests pass; `make lint` (clippy, warnings as errors) is clean.\n- The other robustness probes give the same results as the baseline engine.\n\n**Engine limits.** Beyond any of these a statement fails early with `RESOURCE_LIMIT` naming the measure:\n\n| measure | limit | CR-6 minimum |\n|---|---|---|\n| SQL text | 16 MiB | 1 MiB |\n| nesting depth (counted as CR-6 defines it) | 4,096 | 1,000 |\n| operands | 100,000 | 25,000 |\n| table references | 262,144 | \u2013 |\n| plan size | 4,000,000 units | \u2013 |\n\nThe last two aren't CR-6 measures. I added them because a short statement can still describe a huge plan, through repeated CTE references or long LEFT JOIN chains, and that could otherwise exhaust memory.\n\n**What I changed:**\n- **Parser:** a chain like `a OR b OR \u2026` now counts as one nesting level, as the spec requires. Before, each operator counted, so 10,000-term chains failed with `PARSE_ERROR`.\n- **No stack crashes:** every thread that handles a query has a large stack with a guard, so deep recursion returns `RESOURCE_LIMIT` instead of overflowing. Long operator chains are evaluated in a loop rather than recursively. Before, a 100,000-term sum crashed a parallel worker.\n- **Timeout covers every stage:** it now counts from receipt of the request and is checked during parsing, binding, optimizing and planning. Stages that can't return an error stop by unwinding back to the engine, which reports `TIMEOUT`. Measured lateness is at most 0.5 s after the deadline, usually about 20 ms.\n- **Slow cases fixed:**\n\n  | statement | before | after |\n  |---|---|---|\n  | 100,000-item `IN` list | 10\u201320 s | 0.09 s |\n  | 20,000 chained CTEs | 84 s, `TIMEOUT` 8 s late | 0.09 s |\n  | 12,000-table join | 58 s, 13 GB memory | 0.6 s |\n  | 10,000-term `\\|\\|` chain, parallel | 108 s | 0.05 s |\n\n  Long inner-join chains are now built as balanced join trees.\n- **A separate bug:** with very small parallel work units (`POLYQUERY_MORSEL_ROWS=1`), a query like `SELECT max(x) FROM n` returned one row per worker instead of one. That is fixed.\n\n**Known limitations:**\n- A chain of more than about 2,800 LEFT JOINs, or CTE references whose copies exceed the plan-size limit, fail with `RESOURCE_LIMIT` even though such a statement can be within the CR-6 minimums.\n- Some statements that fit the minimums are still slow, though the deadline is observed in all of them:\n  - a chain of 10,000 filtering CTEs takes 7 s\n  - 25,000 distinct aggregates take 2 s\n- Row mode executes about 2% more instructions because of the stack guard; vectorized and parallel speed is unchanged.\n- `spec_version` stays `1.0.0`, because an existing conformance case expects it (the earlier changes did the same).\n\n**Design decisions:**\n- I chose fixed limits well above the minimums, plus large guarded stacks, rather than rewriting every compiler pass to avoid recursion.\n- The deadline and cancellation are attached to the thread while a statement is compiled, instead of being passed through every planner function.\n\nThe README section \"Change CR-6\" documents the limits, how depth is counted, the modules touched and the verification. `bench/limits.py` is the stress test I used: about 120 statements across all modes, including forced parallel workers.",
+ "notes": {
+  "human_seconds": "0 by construction: unattended run, no human input after launch",
+  "waiting_seconds": "not exposed by the platform",
+  "build_failures_heuristic": "Bash build commands whose output matched compiler-error patterns",
+  "repair_iterations": "conformance runner invocations after the first one reporting failures"
+ }
+}
