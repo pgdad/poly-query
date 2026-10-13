@@ -341,7 +341,11 @@ public catalog case expects (CR-2 names `1.2.0-cr2`). Unit tests:
 
 **Limits.** `polyquery/limits.py` defines them: `MAX_SQL_BYTES` = 16 MiB,
 `MAX_NESTING_DEPTH` = 4,096, `MAX_OPERANDS` = 200,000 (the minimums are 1 MiB,
-1,000 and 25,000). The parser measures a statement while it parses it
+1,000 and 25,000). Operands are literals, column references and `*`
+arguments as CR-6 §1 defines them, plus empty argument lists `f()` and table
+references, so that every leaf of a statement counts and no statement within
+the limits can build an unbounded tree (`x + f() + f() …` or
+`FROM t, t, …` would otherwise contain no operand). The parser measures a statement while it parses it
 (`StatementMeter`) and fails with `RESOURCE_LIMIT` as soon as a limit is
 passed, e.g. `expression nesting depth exceeds 4096` with
 `details: {"measure": "nesting_depth"}`, so a statement far beyond a limit
@@ -1214,6 +1218,11 @@ python3 tools/native_difftest.py --lib ../../native-kernels/build/x86_64/libpqke
   process exits with status 0.
 
 ## Design decisions (where the spec leaves room)
+
+* **Statement limits (CR-6).** 16 MiB of text, nesting depth 4,096 and
+  200,000 operands — 16, 4 and 8 times the minimums — chosen so that a
+  statement at the limits still runs in seconds; beyond them
+  `RESOURCE_LIMIT` with `details.measure` (see *Expression size limits*).
 
 * **CSV**: completely empty lines (also `\r\n`-only lines) are skipped.
   A field consisting only of spaces/tabs is treated like an empty field for
