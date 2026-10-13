@@ -22,7 +22,7 @@ from ..datatypes import (
     TypeKind,
     resolve_type,
 )
-from ..names import fold, same_name
+from ..names import fold
 from ..sql import ast
 from ..storage.catalog import Catalog, CatalogSnapshot
 from . import bound as b
@@ -122,12 +122,13 @@ class Binder:
 
         out_ctx = ExprContext(scope, "SELECT", aggregates_allowed=True)
         outputs = [self._bind_output(e, i, out_ctx) for i, e in enumerate(entries)]
-        hidden: list[b.Expr] = []
+        targets = _SortTargets(outputs)
         order_ctx = ExprContext(scope, "ORDER BY", aggregates_allowed=True)
         order = [
-            self._bind_order_item(item, outputs, hidden, select.distinct, order_ctx, None)
+            self._bind_order_item(item, targets, select.distinct, order_ctx, None)
             for item in query.order_by
         ]
+        hidden = targets.hidden
         return (
             b.BoundQuery(
                 from_=from_,
@@ -174,8 +175,9 @@ class Binder:
             for i, (o, t) in enumerate(zip(branches[0].outputs, types))
         ]
         order = []
+        targets = _SortTargets(outputs)
         for item in query.order_by:
-            position = self._output_position(item.expr, outputs)
+            position = targets.output_position(item.expr)
             if position is None:
                 raise errors.semantic_error(
                     "ORDER BY of a UNION ALL query must be an output column name or position",
@@ -207,16 +209,23 @@ class Binder:
         select = query.body
         group_ctx = ExprContext(scope, "GROUP BY")
         keys: list[b.Expr] = []
+        seen: set[b.Expr] = set()
+        aliases: dict[str, _SelectEntry] = {}
+        for entry in entries:
+            if entry.alias is not None:
+                aliases.setdefault(fold(entry.alias), entry)
         for node in select.group_by:
-            key = self._bind_group_key(node, entries, group_ctx)
-            if key not in keys:
+            key = self._bind_group_key(node, entries, aliases, group_ctx)
+            if key not in seen:
+                seen.add(key)
                 keys.append(key)
 
         aggregation = b.Aggregation(self.ids.next(), keys, [])
+        grouping = _Grouping(aggregation)
         local_rels = scope.local_rels()
 
         def finish(expr: b.Expr, node: ast.Node) -> b.Expr:
-            result = _substitute_grouped(expr, aggregation)
+            result = grouping.substitute(expr)
             for e in b.walk(result):
                 if isinstance(e, b.ColumnRef) and e.rel in local_rels:
                     raise errors.semantic_error(
@@ -239,12 +248,13 @@ class Binder:
             having = finish(self.bind_expr(select.having, having_ctx), select.having)
             tr.require_boolean(having, "HAVING condition")
 
-        hidden: list[b.Expr] = []
+        targets = _SortTargets(outputs)
         order_ctx = ExprContext(scope, "ORDER BY", aggregates_allowed=True)
         order = [
-            self._bind_order_item(item, outputs, hidden, select.distinct, order_ctx, finish)
+            self._bind_order_item(item, targets, select.distinct, order_ctx, finish)
             for item in query.order_by
         ]
+        hidden = targets.hidden
         return b.BoundQuery(
             from_=from_,
             where=where,
@@ -259,8 +269,14 @@ class Binder:
         )
 
     def _bind_group_key(
-        self, node: ast.Expr, entries: list[_SelectEntry], ctx: ExprContext
+        self,
+        node: ast.Expr,
+        entries: list[_SelectEntry],
+        aliases: dict[str, _SelectEntry],
+        ctx: ExprContext,
     ) -> b.Expr:
+        """A GROUP BY item: an ordinal, a select-list alias (``aliases``: the
+        first entry of each folded alias) or an expression."""
         if _is_ordinal(node):
             assert isinstance(node, ast.NumberLit)
             k = int(node.text)
@@ -269,9 +285,9 @@ class Binder:
             return self._bind_entry_expr(entries[k - 1], ctx)
         if isinstance(node, ast.ColumnRef) and node.qualifier is None:
             if not self._resolves_locally(node, ctx.scope):
-                for entry in entries:
-                    if entry.alias is not None and same_name(entry.alias, node.name):
-                        return self._bind_entry_expr(entry, ctx)
+                entry = aliases.get(fold(node.name))
+                if entry is not None:
+                    return self._bind_entry_expr(entry, ctx)
         return self.bind_expr(node, ctx)
 
     def _bind_entry_expr(self, entry: _SelectEntry, ctx: ExprContext) -> b.Expr:
@@ -388,58 +404,27 @@ class Binder:
     def _bind_order_item(
         self,
         item: ast.OrderItem,
-        outputs: list[b.OutputColumn],
-        hidden: list[b.Expr],
+        targets: _SortTargets,
         distinct: bool,
         ctx: ExprContext,
         finish: Any,
     ) -> b.SortKey:
         nulls_first = (not item.descending) if item.nulls_first is None else item.nulls_first
         expr = item.expr
-        position = self._output_position(expr, outputs)
+        position = targets.output_position(expr)
         if position is None:
             bound_expr = self.bind_expr(expr, ctx)
             if finish is not None:
                 bound_expr = finish(bound_expr, expr)
-            for i, o in enumerate(outputs):
-                if o.expr == bound_expr:
-                    position = i
-                    break
-            else:
+            position = targets.output_of(bound_expr)
+            if position is None:
                 if distinct:
                     raise errors.semantic_error(
                         "ORDER BY expressions must appear in the select list for SELECT DISTINCT",
                         **pos(expr),
                     )
-                for i, h in enumerate(hidden):
-                    if h == bound_expr:
-                        position = len(outputs) + i
-                        break
-                else:
-                    hidden.append(bound_expr)
-                    position = len(outputs) + len(hidden) - 1
+                position = targets.hidden_key(bound_expr)
         return b.SortKey(position, item.descending, nulls_first)
-
-    @staticmethod
-    def _output_position(expr: ast.Expr, outputs: list[b.OutputColumn]) -> int | None:
-        """The output column an ORDER BY item denotes by 1-based position or
-        by (unqualified) output name; None if it is neither."""
-        if _is_ordinal(expr):
-            assert isinstance(expr, ast.NumberLit)
-            k = int(expr.text)
-            if not 1 <= k <= len(outputs):
-                raise errors.semantic_error(f"ORDER BY position {k} is out of range", **pos(expr))
-            return k - 1
-        if isinstance(expr, ast.ColumnRef) and expr.qualifier is None:
-            matches = [i for i, o in enumerate(outputs) if same_name(o.name, expr.name)]
-            if matches:
-                first = outputs[matches[0]].expr
-                if any(outputs[i].expr != first for i in matches[1:]):
-                    raise errors.semantic_error(
-                        f"ORDER BY name '{expr.name}' is ambiguous", **pos(expr)
-                    )
-                return matches[0]
-        return None
 
     def _bind_limit(self, expr: ast.Expr | None, clause: str) -> b.Expr | None:
         if expr is None:
@@ -652,22 +637,80 @@ def _is_ordinal(node: ast.Expr) -> bool:
     )
 
 
-def _substitute_grouped(expr: b.Expr, aggregation: b.Aggregation) -> b.Expr:
+class _SortTargets:
+    """What the ORDER BY items of a query refer to: output columns (by
+    1-based position, by name or by expression) and hidden sort keys.
+    Names and expressions are looked up by hashing: a statement may have
+    thousands of output columns and sort keys."""
+
+    def __init__(self, outputs: list[b.OutputColumn]):
+        self.outputs = outputs
+        self.hidden: list[b.Expr] = []
+        self._by_name: dict[str, list[int]] = {}
+        self._by_expr: dict[b.Expr, int] = {}
+        for i, o in enumerate(outputs):
+            self._by_name.setdefault(fold(o.name), []).append(i)
+            self._by_expr.setdefault(o.expr, i)
+        self._hidden_positions: dict[b.Expr, int] = {}
+
+    def output_position(self, expr: ast.Expr) -> int | None:
+        """The output column an ORDER BY item denotes by 1-based position or
+        by (unqualified) output name; None if it is neither."""
+        if _is_ordinal(expr):
+            assert isinstance(expr, ast.NumberLit)
+            k = int(expr.text)
+            if not 1 <= k <= len(self.outputs):
+                raise errors.semantic_error(f"ORDER BY position {k} is out of range", **pos(expr))
+            return k - 1
+        if isinstance(expr, ast.ColumnRef) and expr.qualifier is None:
+            matches = self._by_name.get(fold(expr.name))
+            if matches:
+                first = self.outputs[matches[0]].expr
+                if any(self.outputs[i].expr != first for i in matches[1:]):
+                    raise errors.semantic_error(
+                        f"ORDER BY name '{expr.name}' is ambiguous", **pos(expr)
+                    )
+                return matches[0]
+        return None
+
+    def output_of(self, expr: b.Expr) -> int | None:
+        """The first output column computing ``expr``."""
+        return self._by_expr.get(expr)
+
+    def hidden_key(self, expr: b.Expr) -> int:
+        """The position of the hidden sort key ``expr`` (added if new)."""
+        position = self._hidden_positions.get(expr)
+        if position is None:
+            self.hidden.append(expr)
+            position = self._hidden_positions[expr] = len(self.outputs) + len(self.hidden) - 1
+        return position
+
+
+class _Grouping:
     """Replaces GROUP BY expressions and aggregate calls by references to the
-    Aggregate operator's output (semantics.md §5)."""
-    for i, key in enumerate(aggregation.keys):
-        if expr == key:
+    Aggregate operator's output (semantics.md §5), collecting the aggregate
+    calls. Keys and calls are found by hashing."""
+
+    def __init__(self, aggregation: b.Aggregation):
+        self.aggregation = aggregation
+        self._keys: dict[b.Expr, int] = {}
+        for i, key in enumerate(aggregation.keys):
+            self._keys.setdefault(key, i)
+        self._aggregates: dict[b.Expr, int] = {}
+
+    def substitute(self, expr: b.Expr) -> b.Expr:
+        aggregation = self.aggregation
+        i = self._keys.get(expr)
+        if i is not None:
             name = expr.name if isinstance(expr, b.ColumnRef) else f"key{i}"
             return b.ColumnRef(expr.type, aggregation.rel, i, name)
-    if isinstance(expr, b.AggCall):
-        aggregates = aggregation.aggregates
-        try:
-            index = aggregates.index(expr)
-        except ValueError:
-            aggregates.append(expr)
-            index = len(aggregates) - 1
-        return b.ColumnRef(expr.type, aggregation.rel, len(aggregation.keys) + index, expr.name)
-    return b.map_children(expr, lambda child: _substitute_grouped(child, aggregation))
+        if isinstance(expr, b.AggCall):
+            index = self._aggregates.get(expr)
+            if index is None:
+                aggregation.aggregates.append(expr)
+                index = self._aggregates[expr] = len(aggregation.aggregates) - 1
+            return b.ColumnRef(expr.type, aggregation.rel, len(aggregation.keys) + index, expr.name)
+        return b.map_children(expr, self.substitute)
 
 
 def _contains_aggregate(node: ast.Expr | None) -> bool:

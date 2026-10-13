@@ -43,7 +43,7 @@ from .compiler import (
     compare_kernel,
     compile_expr,
     evaluate_constant,
-    like_regex,
+    like_matcher,
 )
 from .context import ExecutionContext
 
@@ -161,8 +161,7 @@ def _like_predicate(pattern: str) -> Callable[[str], bool]:
                 return lambda v: v.endswith(inner)
             if not starts and not ends:
                 return partial(operator.eq, pattern)
-    match = like_regex(pattern).fullmatch
-    return lambda v: match(v) is not None
+    return like_matcher(pattern)
 
 
 def _arith_vector(e: b.Arith) -> Callable[[Sequence[Any], Sequence[Any]], list[Any] | None] | None:

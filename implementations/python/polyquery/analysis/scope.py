@@ -24,10 +24,17 @@ class RangeVar:
     column_names: list[str]
     column_types: list[DataType]
     relation: b.TableRelation | b.DerivedRelation
+    # folded column name -> positions, built on first lookup (a derived
+    # table may have thousands of columns, each referenced)
+    _positions: dict[str, list[int]] | None = field(default=None, init=False, repr=False)
 
     def find(self, name: str) -> list[int]:
-        key = fold(name)
-        return [i for i, c in enumerate(self.column_names) if fold(c) == key]
+        if self._positions is None:
+            positions: dict[str, list[int]] = {}
+            for i, c in enumerate(self.column_names):
+                positions.setdefault(fold(c), []).append(i)
+            self._positions = positions
+        return list(self._positions.get(fold(name), ()))
 
     def column(self, index: int) -> b.ColumnRef:
         if isinstance(self.relation, b.TableRelation):

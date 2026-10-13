@@ -448,6 +448,46 @@ def subqueries(expr: Expr) -> Iterator[Subquery]:
             yield e.subquery
 
 
+# ------------------------------------------------------------------ hashing
+
+# per expression class: its compared fields that are not child expressions
+_SCALAR_FIELDS: dict[type, tuple[str, ...]] = {}
+
+
+def _scalar_fields(cls: type) -> tuple[str, ...]:
+    names = _SCALAR_FIELDS.get(cls)
+    if names is None:
+        names = _SCALAR_FIELDS[cls] = tuple(
+            f.name for f in dataclasses.fields(cls) if f.compare and f.name not in _CHILD_FIELDS
+        )
+    return names
+
+
+# fields holding child expressions (``children()``), hashed through them
+_CHILD_FIELDS = frozenset({"operand", "left", "right", "pattern", "low", "high", "items", "whens", "else_", "args", "arg"})
+
+
+def _combine_hash(e: Expr, children: list[int]) -> int:
+    return hash((type(e), *[getattr(e, name) for name in _scalar_fields(type(e))], *children))
+
+
+def _expr_hash(self: Expr) -> int:
+    """The hash of an expression, consistent with its structural ``==`` and
+    computed once per node from its children's hashes (the generated
+    dataclass hash would rehash the whole subtree on every call, quadratic
+    when the nodes of a deep tree are looked up in dicts)."""
+    return _bottom_up(self, "_hash", _combine_hash)
+
+
+def _install_hash(cls: type) -> None:
+    cls.__hash__ = _expr_hash  # type: ignore[method-assign]
+    for sub in cls.__subclasses__():
+        _install_hash(sub)
+
+
+_install_hash(Expr)
+
+
 # ------------------------------------------------------------------ queries
 
 
