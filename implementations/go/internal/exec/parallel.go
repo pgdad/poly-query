@@ -349,6 +349,9 @@ func batchPipelines(ec *Context, n physical.Node, nw int) ([]BatchOperator, []*s
 		pc := &pipelineCtx{joins: joins, leaf: func(m *physical.TableScan) (BatchOperator, error) {
 			return newVScan(ec, m, src), nil
 		}}
+		if err := ec.Check(); err != nil { // per copy: expressions may be huge
+			return nil, nil, err
+		}
 		op, err := buildPipelineInput(ec, n, pc)
 		if err != nil {
 			return nil, nil, err
@@ -368,6 +371,9 @@ func rowPipelines(ec *Context, n physical.Node, nw int) ([]Operator, []*singleRa
 		pc := &pipelineCtx{rowJoins: joins, rowLeaf: func(m *physical.TableScan) Operator {
 			return newScan(ec, m, src)
 		}}
+		if err := ec.Check(); err != nil { // per copy: expressions may be huge
+			return nil, nil, err
+		}
 		op, err := rowPipeline(ec, n, pc)
 		if err != nil {
 			return nil, nil, err
@@ -587,6 +593,9 @@ func parallelAggregate(ec *Context, x *physical.HashAggregate) (BatchOperator, b
 	tables := make([]*aggTable, nw)
 	keyTypes := exprTypes(x.Keys)
 	for w := range inputs {
+		if err := ec.Check(); err != nil {
+			return nil, true, err
+		}
 		if inputs[w], err = newVAggInput(ec, x); err != nil {
 			return nil, true, err
 		}
@@ -659,6 +668,9 @@ func parallelRowAggregate(ec *Context, x *physical.HashAggregate) (Operator, boo
 	tables := make([]*rowAggTable, nw)
 	keyTypes := exprTypes(x.Keys)
 	for w := range inputs {
+		if err := ec.Check(); err != nil {
+			return nil, true, err
+		}
 		if inputs[w], err = newRowAggInput(ec, x); err != nil {
 			return nil, true, err
 		}

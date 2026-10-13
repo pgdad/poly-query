@@ -224,14 +224,15 @@ func fileError(p string, err error) error {
 type QueryOptions struct {
 	MaxRows    int64 // < 0 = unlimited
 	Timeout    time.Duration
-	CountOnly  bool   // do not retain rows (result: "count")
-	NoOptimize bool   // skip logical optimization (optimize: false)
-	NoIndexes  bool   // never use indexes (use_indexes: false)
-	Join       string // forced join algorithm ("", "auto", "hash", "merge", "nested_loop")
-	Mode       string // execution model ("", "auto", "row", "vectorized")
-	Threads    int    // worker threads (0: the engine default)
-	QueryID    string // client-assigned query id (HTTP cancellation)
-	Native     bool   // use the native kernels if loaded (native: true)
+	Received   time.Time // when the request arrived (zero: now); the timeout counts from here
+	CountOnly  bool      // do not retain rows (result: "count")
+	NoOptimize bool      // skip logical optimization (optimize: false)
+	NoIndexes  bool      // never use indexes (use_indexes: false)
+	Join       string    // forced join algorithm ("", "auto", "hash", "merge", "nested_loop")
+	Mode       string    // execution model ("", "auto", "row", "vectorized")
+	Threads    int       // worker threads (0: the engine default)
+	QueryID    string    // client-assigned query id (HTTP cancellation)
+	Native     bool      // use the native kernels if loaded (native: true)
 }
 
 // Result is a query result.
@@ -309,7 +310,7 @@ type Cursor struct {
 // counts from here and covers every stage: parsing, analysis,
 // optimization, planning and execution.
 func (e *Engine) Start(ctx context.Context, sql string, opts QueryOptions) (*Cursor, error) {
-	ctx, cancel := queryContext(ctx, opts.Timeout)
+	ctx, cancel := queryContext(ctx, opts)
 	cur, err := e.start(interrupt.New(ctx), sql, opts)
 	if err != nil {
 		cancel()
@@ -323,11 +324,16 @@ func (e *Engine) Start(ctx context.Context, sql string, opts QueryOptions) (*Cur
 	return cur, nil
 }
 
-// queryContext bounds ctx by the query timeout. The cancel function also
-// stops the parallel workers of an unfinished query.
-func queryContext(ctx context.Context, timeout time.Duration) (context.Context, context.CancelFunc) {
-	if timeout > 0 {
-		return context.WithTimeout(ctx, timeout)
+// queryContext bounds ctx by the query timeout, counted from the arrival
+// of the request. The cancel function also stops the parallel workers of
+// an unfinished query.
+func queryContext(ctx context.Context, opts QueryOptions) (context.Context, context.CancelFunc) {
+	if opts.Timeout > 0 {
+		start := opts.Received
+		if start.IsZero() {
+			start = time.Now()
+		}
+		return context.WithDeadline(ctx, start.Add(opts.Timeout))
 	}
 	return context.WithCancel(ctx)
 }
@@ -446,7 +452,7 @@ func (c *Cursor) Close() {
 // Explain plans a query and returns its EXPLAIN plan tree. The timeout
 // covers parsing and planning.
 func (e *Engine) Explain(ctx context.Context, sql string, opts QueryOptions) (*physical.Object, error) {
-	ctx, cancel := queryContext(ctx, opts.Timeout)
+	ctx, cancel := queryContext(ctx, opts)
 	defer cancel()
 	intr := interrupt.New(ctx)
 	stmt, err := e.parse(intr, sql)

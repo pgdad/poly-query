@@ -101,7 +101,7 @@ func compileSubquery(ec *Context, lay layout, x *plan.Subquery) (evalFn, error) 
 	} else {
 		getters := make([]evalFn, len(x.Correlated))
 		for i, c := range x.Correlated {
-			f, err := compile(ec, lay, c.Ref())
+			f, err := compileExpr(ec, lay, c.Ref())
 			if err != nil {
 				return nil, err
 			}
@@ -168,7 +168,7 @@ func compileSubquery(ec *Context, lay layout, x *plan.Subquery) (evalFn, error) 
 			return types.BoolValue(r.exists), nil
 		}, nil
 	}
-	xf, err := compile(ec, lay, x.X)
+	xf, err := compileExpr(ec, lay, x.X)
 	if err != nil {
 		return nil, err
 	}

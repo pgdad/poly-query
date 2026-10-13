@@ -156,20 +156,35 @@ type vcol struct{ index int }
 func (v *vcol) eval(b *Batch, _ []int32) (*Vec, error) { return b.Cols[v.index], nil }
 
 // vconst returns a constant: a vector holding the value in every position.
+// The vector is filled when first needed: operators with a constant
+// operand mostly use val directly, and a statement may hold hundreds of
+// thousands of literals (one batch-sized vector each would be gigabytes).
 type vconst struct {
-	val types.Value
-	vec Vec
+	val    types.Value
+	cls    vclass
+	vec    Vec
+	filled bool
 }
 
-func newVConst(v types.Value, c vclass) *vconst {
-	k := &vconst{val: v}
+func newVConst(v types.Value, c vclass) *vconst { return &vconst{val: v, cls: c} }
+
+func (k *vconst) eval(*Batch, []int32) (*Vec, error) {
+	if !k.filled {
+		k.fill()
+	}
+	return &k.vec, nil
+}
+
+func (k *vconst) fill() {
+	k.filled = true
+	v := k.val
 	if v.Null {
 		k.vec.Nulls = make([]bool, BatchSize)
 		for i := range k.vec.Nulls {
 			k.vec.Nulls[i] = true
 		}
 	}
-	switch c {
+	switch k.cls {
 	case vInt:
 		k.vec.I = make([]int64, BatchSize)
 		for i := range k.vec.I {
@@ -191,10 +206,7 @@ func newVConst(v types.Value, c vclass) *vconst {
 			k.vec.S[i] = v.S
 		}
 	}
-	return k
 }
-
-func (k *vconst) eval(*Batch, []int32) (*Vec, error) { return &k.vec, nil }
 
 // vscalarSubquery is an uncorrelated scalar subquery: evaluated once (when
 // the first batch with active rows needs it, as row-mode evaluation would)
@@ -213,7 +225,7 @@ func (q *vscalarSubquery) eval(b *Batch, sel []int32) (*Vec, error) {
 		}
 		q.val = newVConst(v, q.cls)
 	}
-	return &q.val.vec, nil
+	return q.val.eval(b, sel)
 }
 
 // vfallback evaluates an expression row by row with the row-mode

@@ -34,8 +34,9 @@ func NewHandler(eng *engine.Engine) *Handler {
 
 // request is a decoded request object.
 type request struct {
-	id     []byte
-	fields map[string]json.RawMessage
+	id       []byte
+	fields   map[string]json.RawMessage
+	received time.Time // when decoding started: query timeouts count from here
 }
 
 // Request is a decoded protocol request (protocol.md §4).
@@ -43,11 +44,12 @@ type Request = request
 
 // DecodeRequest decodes a request object given as JSON text.
 func DecodeRequest(line []byte) (*Request, *errs.Error) {
+	received := time.Now()
 	var fields map[string]json.RawMessage
 	if err := json.Unmarshal(line, &fields); err != nil || fields == nil {
 		return nil, errs.New(errs.InvalidRequest, "request is not a JSON object")
 	}
-	req := &request{id: []byte("null"), fields: fields}
+	req := &request{id: []byte("null"), fields: fields, received: received}
 	if raw, ok := fields["id"]; ok {
 		var buf bytes.Buffer
 		if json.Compact(&buf, raw) == nil {
@@ -59,7 +61,7 @@ func DecodeRequest(line []byte) (*Request, *errs.Error) {
 
 // NewRequest creates a request for op with the given string fields.
 func NewRequest(op string, fields map[string]string) *Request {
-	req := &request{id: []byte("null"), fields: map[string]json.RawMessage{}}
+	req := &request{id: []byte("null"), fields: map[string]json.RawMessage{}, received: time.Now()}
 	for k, v := range fields {
 		req.Set(k, v)
 	}
@@ -601,7 +603,7 @@ func ParseQueryOptions(req *Request) (engine.QueryOptions, error) {
 const maxThreads = 256
 
 func parseQueryOptions(req *request) (engine.QueryOptions, error) {
-	qo := engine.QueryOptions{MaxRows: -1}
+	qo := engine.QueryOptions{MaxRows: -1, Received: req.received}
 	opts, err := req.object("options")
 	if err != nil {
 		return qo, err

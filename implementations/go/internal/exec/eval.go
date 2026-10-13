@@ -22,10 +22,61 @@ var (
 
 func overflowErr(msg string) error { return errs.New(errs.NumericOverflow, "%s", msg) }
 
-// compile turns a bound expression into an evaluator over rows with the
+// compile turns a bound expression evaluated by an operator into an
+// evaluator over rows with the given layout (see compileExpr). Operators
+// check the query's deadline every checkEvery rows; an expression of
+// bigExpr nodes or more also checks it at every evaluation, which costs
+// little next to evaluating it, so that statements with huge expressions
+// stop promptly too (spec/changes/expression-limits.md §4).
+func compile(ec *Context, lay layout, e plan.Expr) (evalFn, error) {
+	f, err := compileExpr(ec, lay, e)
+	if err != nil || ec.Ctx == nil || !sizeAtLeast(e, bigExpr) {
+		return f, err
+	}
+	ctx := ec.Ctx
+	return func(row types.Row) (types.Value, error) {
+		if err := ctx.Err(); err != nil {
+			return null, ContextError(err)
+		}
+		return f(row)
+	}, nil
+}
+
+// compileAll compiles operator expressions (see compile).
+func compileAll(ec *Context, lay layout, exprs []plan.Expr) ([]evalFn, error) {
+	fns := make([]evalFn, len(exprs))
+	for i, e := range exprs {
+		f, err := compile(ec, lay, e)
+		if err != nil {
+			return nil, err
+		}
+		fns[i] = f
+	}
+	return fns, nil
+}
+
+// bigExpr is the size (in nodes) from which an expression checks the
+// query's deadline at every evaluation.
+const bigExpr = 4096
+
+// sizeAtLeast reports whether e has at least n nodes, visiting at most n.
+func sizeAtLeast(e plan.Expr, n int) bool {
+	stack := []plan.Expr{e}
+	for len(stack) > 0 {
+		x := stack[len(stack)-1]
+		stack = stack[:len(stack)-1]
+		if n--; n <= 0 {
+			return true
+		}
+		stack = append(stack, plan.Children(x)...)
+	}
+	return false
+}
+
+// compileExpr turns a bound expression into an evaluator over rows with the
 // given layout. Columns absent from the layout are outer references of a
 // correlated subquery and read the current parameter cell.
-func compile(ec *Context, lay layout, e plan.Expr) (evalFn, error) {
+func compileExpr(ec *Context, lay layout, e plan.Expr) (evalFn, error) {
 	switch x := e.(type) {
 	case *plan.ColumnRef:
 		if i, ok := lay[x.ID]; ok {
@@ -43,7 +94,7 @@ func compile(ec *Context, lay layout, e plan.Expr) (evalFn, error) {
 	case *plan.Binary:
 		return compileBinary(ec, lay, x)
 	case *plan.IsNull:
-		f, err := compile(ec, lay, x.X)
+		f, err := compileExpr(ec, lay, x.X)
 		if err != nil {
 			return nil, err
 		}
@@ -56,7 +107,7 @@ func compile(ec *Context, lay layout, e plan.Expr) (evalFn, error) {
 			return types.BoolValue(v.Null != not), nil
 		}, nil
 	case *plan.Cast:
-		f, err := compile(ec, lay, x.X)
+		f, err := compileExpr(ec, lay, x.X)
 		if err != nil {
 			return nil, err
 		}
@@ -84,10 +135,10 @@ func compile(ec *Context, lay layout, e plan.Expr) (evalFn, error) {
 	return nil, errs.New(errs.InternalError, "cannot evaluate %T", e)
 }
 
-func compileAll(ec *Context, lay layout, exprs []plan.Expr) ([]evalFn, error) {
+func compileExprs(ec *Context, lay layout, exprs []plan.Expr) ([]evalFn, error) {
 	fns := make([]evalFn, len(exprs))
 	for i, e := range exprs {
-		f, err := compile(ec, lay, e)
+		f, err := compileExpr(ec, lay, e)
 		if err != nil {
 			return nil, err
 		}
@@ -97,7 +148,7 @@ func compileAll(ec *Context, lay layout, exprs []plan.Expr) ([]evalFn, error) {
 }
 
 func compileUnary(ec *Context, lay layout, x *plan.Unary) (evalFn, error) {
-	f, err := compile(ec, lay, x.X)
+	f, err := compileExpr(ec, lay, x.X)
 	if err != nil {
 		return nil, err
 	}
@@ -152,11 +203,11 @@ func compileBinary(ec *Context, lay layout, x *plan.Binary) (evalFn, error) {
 			return compileConcat(ec, lay, ops)
 		}
 	}
-	lf, err := compile(ec, lay, x.L)
+	lf, err := compileExpr(ec, lay, x.L)
 	if err != nil {
 		return nil, err
 	}
-	rf, err := compile(ec, lay, x.R)
+	rf, err := compileExpr(ec, lay, x.R)
 	if err != nil {
 		return nil, err
 	}
@@ -218,7 +269,7 @@ func compileBinary(ec *Context, lay layout, x *plan.Binary) (evalFn, error) {
 // Operands are evaluated left to right like the nested form: the first
 // error wins, and any NULL operand makes the result NULL.
 func compileConcat(ec *Context, lay layout, ops []plan.Expr) (evalFn, error) {
-	fns, err := compileAll(ec, lay, ops)
+	fns, err := compileExprs(ec, lay, ops)
 	if err != nil {
 		return nil, err
 	}
@@ -470,17 +521,17 @@ func compileCase(ec *Context, lay layout, x *plan.Case) (evalFn, error) {
 	conds, results := make([]evalFn, n), make([]evalFn, n)
 	for i, w := range x.Whens {
 		var err error
-		if conds[i], err = compile(ec, lay, w.Cond); err != nil {
+		if conds[i], err = compileExpr(ec, lay, w.Cond); err != nil {
 			return nil, err
 		}
-		if results[i], err = compile(ec, lay, w.Result); err != nil {
+		if results[i], err = compileExpr(ec, lay, w.Result); err != nil {
 			return nil, err
 		}
 	}
 	elseFn := func(types.Row) (types.Value, error) { return null, nil }
 	if x.Else != nil {
 		var err error
-		if elseFn, err = compile(ec, lay, x.Else); err != nil {
+		if elseFn, err = compileExpr(ec, lay, x.Else); err != nil {
 			return nil, err
 		}
 	}
@@ -498,7 +549,7 @@ func compileCase(ec *Context, lay layout, x *plan.Case) (evalFn, error) {
 			return elseFn(row)
 		}, nil
 	}
-	operand, err := compile(ec, lay, x.Operand)
+	operand, err := compileExpr(ec, lay, x.Operand)
 	if err != nil {
 		return nil, err
 	}
@@ -534,7 +585,7 @@ func compileCase(ec *Context, lay layout, x *plan.Case) (evalFn, error) {
 }
 
 func compileBetween(ec *Context, lay layout, x *plan.Between) (evalFn, error) {
-	fns, err := compileAll(ec, lay, []plan.Expr{x.X, x.Lo, x.Hi})
+	fns, err := compileExprs(ec, lay, []plan.Expr{x.X, x.Lo, x.Hi})
 	if err != nil {
 		return nil, err
 	}
@@ -579,14 +630,14 @@ func compileBetween(ec *Context, lay layout, x *plan.Between) (evalFn, error) {
 }
 
 func compileInList(ec *Context, lay layout, x *plan.InList) (evalFn, error) {
-	vf, err := compile(ec, lay, x.X)
+	vf, err := compileExpr(ec, lay, x.X)
 	if err != nil {
 		return nil, err
 	}
 	if f := constantInSet(ec, vf, x); f != nil {
 		return f, nil
 	}
-	list, err := compileAll(ec, lay, x.List)
+	list, err := compileExprs(ec, lay, x.List)
 	if err != nil {
 		return nil, err
 	}
