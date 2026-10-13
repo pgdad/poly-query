@@ -1,12 +1,15 @@
 """Change request CR-6: statement size limits (spec/changes/expression-limits.md)."""
 
+import random
+import re
 import time
 import unittest
 from unittest import mock
 
 from polyquery import errors, limits
 from polyquery.analysis import bound as b
-from polyquery.datatypes import BOOLEAN, INT64
+from polyquery.datatypes import BOOLEAN, FLOAT64, INT64
+from polyquery.execution.compiler import like_matcher
 from polyquery.limits import run_with_large_stack
 from polyquery.planner.explain import render_expr
 from polyquery.sql.parser import parse
@@ -141,6 +144,21 @@ class LargeStatementTests(unittest.TestCase):
             self.assertEqual(response["error"]["code"], errors.RESOURCE_LIMIT)
 
 
+class LargeNumberTests(unittest.TestCase):
+    def test_huge_ordinals_and_type_parameters(self):
+        handler = make_handler()
+        handler.handle({"op": "load", "table": "n", "format": "csv", "data": "x\n1\n"})
+        digits = "1" + "0" * 5000  # beyond Python's int/str conversion limit
+        for sql, code in (
+            (f"SELECT x FROM n ORDER BY {digits}", errors.SEMANTIC_ERROR),
+            (f"SELECT x FROM n GROUP BY {digits}", errors.SEMANTIC_ERROR),
+            (f"SELECT CAST(x AS DECIMAL({digits}, 2)) FROM n", errors.SEMANTIC_ERROR),
+            (f"SELECT x FROM n LIMIT {digits}", errors.NUMERIC_OVERFLOW),
+        ):
+            response = handler.handle({"op": "query", "sql": sql})
+            self.assertEqual(response["error"]["code"], code, sql[:40])
+
+
 class TimeoutTests(unittest.TestCase):
     def test_timeout_covers_parsing_binding_and_planning(self):
         handler = make_handler()
@@ -155,12 +173,44 @@ class TimeoutTests(unittest.TestCase):
             self.assertLess(time.monotonic() - started, 1.0)
             handler.release_failed()
 
+    def test_timeout_while_planning_a_long_join_chain(self):
+        handler = make_handler()
+        handler.handle({"op": "load", "table": "o", "format": "csv", "data": "y\n1\n"})
+        tables = [f"o t{i}" if i == 0 else f"o t{i} ON t{i}.y = t{i - 1}.y" for i in range(3000)]
+        request = {"op": "query", "sql": "SELECT count(*) FROM " + " JOIN ".join(tables), "options": {"timeout_ms": 300}}
+        started = time.monotonic()
+        response = run_with_large_stack(lambda: handler.handle(request))
+        self.assertEqual(response["error"]["code"], errors.TIMEOUT)
+        self.assertLess(time.monotonic() - started, 1.3)
+        handler.release_failed()
+
     def test_deadline_check(self):
         limits.no_check()
         self.assertIs(limits.deadline_check(None), limits.no_check)
         with self.assertRaises(errors.PolyQueryError) as cm:
             limits.deadline_check(time.monotonic() - 1)()
         self.assertEqual(cm.exception.code, errors.TIMEOUT)
+
+
+class LikeMatcherTests(unittest.TestCase):
+    def test_agrees_with_a_regex(self):
+        def reference(pattern):
+            parts = [".*" if c == "%" else "." if c == "_" else re.escape(c) for c in pattern]
+            return re.compile("".join(parts), re.DOTALL)
+
+        rng = random.Random(7)
+        for _ in range(20_000):
+            pattern = "".join(rng.choice("ab%_\n") for _ in range(rng.randint(0, 6)))
+            value = "".join(rng.choice("ab%_\n") for _ in range(rng.randint(0, 8)))
+            expected = reference(pattern).fullmatch(value) is not None
+            self.assertEqual(like_matcher(pattern)(value), expected, (pattern, value))
+
+    def test_long_pattern(self):
+        value = "b" * 600_000
+        started = time.monotonic()
+        self.assertTrue(like_matcher("%" + value + "%")(value))
+        self.assertFalse(like_matcher("%" + value + "_%")(value))
+        self.assertLess(time.monotonic() - started, 1.0)
 
 
 class LinearTimeHelperTests(unittest.TestCase):
@@ -199,6 +249,21 @@ class LinearTimeHelperTests(unittest.TestCase):
         text = render_expr(e)
         self.assertTrue(text.startswith("(" * 100_000 + "x + 0) + 1)"), text[:20])
         self.assertTrue(text.endswith(" + 99999)"))
+
+    def test_iterative_equality_and_hash(self):
+        a, c = self.chain(200_000), self.chain(200_000)  # equal, built separately
+        self.assertTrue(a == c)  # deeper than the main thread's C stack allows recursing
+        self.assertEqual(hash(a), hash(c))
+        self.assertFalse(a == self.chain(199_999))
+        x, renamed = b.ColumnRef(INT64, 1, 0, "x"), b.ColumnRef(INT64, 1, 0, "other name")
+        self.assertEqual(x, renamed)  # names are not compared
+        self.assertEqual(hash(x), hash(renamed))
+        self.assertNotEqual(b.Literal(INT64, 1), b.Literal(BOOLEAN, True))
+        nan = b.Literal(FLOAT64, float("nan"))
+        self.assertNotEqual(nan, b.Literal(FLOAT64, float("nan")))
+        case = b.Case(INT64, ((b.Literal(BOOLEAN, True), x),), None)
+        self.assertEqual(case, b.Case(INT64, ((b.Literal(BOOLEAN, True), renamed),), None))
+        self.assertNotEqual(case, b.Case(INT64, ((b.Literal(BOOLEAN, True), x),), b.Literal(INT64, 1)))
 
     def test_conjuncts_keep_order(self):
         parts = [b.Compare(BOOLEAN, "=", b.ColumnRef(INT64, 1, 0, "x"), b.Literal(INT64, i)) for i in range(5)]
