@@ -660,7 +660,26 @@ FUNC conn_process
     jmp 1b
 2:  test %r12, %r12
     jz 9f
+    /* blank lines before a request line are dropped right away, so a
+     * client sending only CR/LF bytes does not grow the buffer */
     mov CN_BUF+BUF_DATA(%rbx), %rdi
+    xor %ecx, %ecx
+22: cmp %r12, %rcx
+    jae 23f
+    movzbl (%rdi, %rcx), %eax
+    cmp $'\r', %eax
+    je 24f
+    cmp $'\n', %eax
+    jne 23f
+24: inc %rcx
+    jmp 22b
+23: test %rcx, %rcx
+    jz 25f
+    mov %rbx, %rdi
+    mov %rcx, %rsi
+    call conn_consume
+    jmp 1b
+25: mov CN_BUF+BUF_DATA(%rbx), %rdi
     mov %r12, %rsi
     mov g_srv_max_req(%rip), %rdx
     mov %r13, %rcx

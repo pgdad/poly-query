@@ -791,6 +791,14 @@ removed in favour of the stack checks.
   chunks in the shared counter `g_par_mem`, so the memory budget limits the
   whole query instead of each thread separately.
 
+Two robustness defects found by `tests/regression/robustness_probe.py`
+along the way were fixed as well: a query that failed (e.g. over its memory
+budget) left the budget set on the request arena, so the next `load` of the
+session failed too (`protocol.S` / `server.S` now clear it at request start:
+`limit_after_failed_query` passes), and `serve` kept CR/LF bytes sent before
+a request line in the connection buffer (`server.S` `conn_process` drops
+them: `http_crlf_flood` passes).
+
 ### Modules touched
 
 | Module | Change |
@@ -800,7 +808,7 @@ removed in favour of the stack checks.
 | `src/util.S` | `t_stack_lo`, `stack_set_bottom`, `thread_stack_init`, `stack_exhausted`; `deadline_tick`; `mmap`ed arena chunks; shared worker memory budget `g_par_mem` |
 | `src/main.S` | guard pages and stack limit of the request stack; `SA_SIGINFO` fault handler reporting stack exhaustion as `RESOURCE_LIMIT` |
 | `src/par.S` | 256 MiB worker stacks, `thread_stack_init` per worker; worker arenas marked `AR_PAR`, `g_par_mem` reset; scratch initialised before it is saved |
-| `src/server.S` | the catalog thread uses `thread_stack_init` |
+| `src/server.S` | the catalog thread uses `thread_stack_init`; budget cleared per catalog job; leading CR/LF bytes dropped |
 | `src/lexer.S` | literal buffers sized to the literal |
 | `src/parser.S` | `RESOURCE_LIMIT` for nesting depth (4,096) and operand count (1,000,000) |
 | `src/binder.S` | depth guard replaced by `STACK_CHECK`; `deadline_tick` |
@@ -808,7 +816,7 @@ removed in favour of the stack checks.
 | `src/rule_fold.S` | `NF_FOLDERR` |
 | `src/eval.S` | `concat_chain` / `concat_append` / `concat_reserve` for `||` trees |
 | `src/eval.S`, `src/functions.S`, `src/exec.S`, `src/pexec.S`, `src/lplan.S`, `src/planner.S`, `src/explain.S`, `src/json.S`, `src/rule_prune.S`, `src/rule_pushdown.S` | `STACK_CHECK` (and `deadline_tick` in planning walkers) at the entry of every recursive function |
-| `src/protocol.S` | capability `change.expression_limits` |
+| `src/protocol.S` | capability `change.expression_limits`; request arena budget cleared at request start |
 | `tests/session_test.sh` | CR-6 cases in four execution modes: depth-998 / 2,000 nesting, 10,000-term `OR` / sum / IN / 50,000-term `||`, a 200,000-term `OR`, both `RESOURCE_LIMIT`s, `TIMEOUT` while binding |
 
 ### Verification

@@ -30,6 +30,9 @@ What was done:
 Test scripts used (outside the repo, in /tmp/elx: stress.py, wide.py,
 wideb.py, deep.py, tmo.py, seq.py) generated hundreds of large statements
 in all four probe modes; all answers correct / RESOURCE_LIMIT / TIMEOUT.
+Also fixed (robustness_probe): budget left set after a failed query
+(`limit_after_failed_query`), CR/LF flood in `serve` (`http_crlf_flood`);
+`long_or_chain` now passes too.
 Ideas left: CTE lookup in the binder is linear per reference (100,000-CTE
 chains time out); a 100,000-branch UNION ALL exceeds the default budget in
 parallel modes (each branch's parallel scan allocates ~10 KiB per worker).
