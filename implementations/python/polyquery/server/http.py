@@ -358,7 +358,12 @@ class ApiRequestHandler(BaseHTTPRequestHandler):
         self._send_body(status, encode_response(obj), "application/json", headers)
 
     def _send_protocol(self, response: dict[str, Any], success: int = 200, headers=None) -> None:
-        self._send_json(status_of(response, success), response, headers)
+        """Sends a handler's response, then frees what a failed request left
+        behind (``RequestHandler.release_failed``)."""
+        try:
+            self._send_json(status_of(response, success), response, headers)
+        finally:
+            self.app.handler.release_failed()
 
     def _send_body(
         self, status: int, body: bytes, content_type: str, headers: list[tuple[str, str]] | None = None
@@ -542,7 +547,6 @@ class ApiRequestHandler(BaseHTTPRequestHandler):
         app.query_finished(active.query_id, outcome.error, started, outcome.rows)
         if outcome.response is not None:
             self._send_protocol(outcome.response, headers=headers)
-        app.handler.release_failed()
 
     def _execute(self, request: dict[str, Any], control: QueryControl) -> _Outcome:
         response = self.app.handler.handle(request, control)
