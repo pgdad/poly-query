@@ -16,3 +16,6 @@ code{font-size:9.5pt;background:#f3f2ee;padding:0 3px;border-radius:3px}
 ol+p,ul+p{break-before:auto}
 p:has(+ ul){break-after:avoid}
 img[src*="parallel-agents"]{width:100%}
+img[src*="polyquery-symbol"]{width:46%;display:block;margin:0 auto}
+blockquote{margin:6px 0 10px;padding:6px 14px;border-left:4px solid var(--accent);font-size:16pt;font-weight:700}
+blockquote p{margin:0}

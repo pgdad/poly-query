@@ -1,0 +1,35 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="-70 0 500 400" width="500" height="400">
+  <style>
+    .name{font:700 30px system-ui,sans-serif;fill:#0b0b0b}
+    .core{font:600 13px system-ui,sans-serif;fill:#52514e}
+    .tag{font:11px system-ui,sans-serif;fill:#52514e}
+  </style>
+  <rect x="-70" width="500" height="400" fill="#fcfcfb"/>
+  <!-- An octagon: eight corners, eight independent engines, one specification in the middle. -->
+  <polygon points="180,40 279,81 320,180 279,279 180,320 81,279 40,180 81,81"
+           fill="#f3f2ee" stroke="#2a78d6" stroke-width="4" stroke-linejoin="round"/>
+  <g stroke="#d9d8d4" stroke-width="1.5">
+    <line x1="180" y1="180" x2="180" y2="40"/><line x1="180" y1="180" x2="279" y2="81"/>
+    <line x1="180" y1="180" x2="320" y2="180"/><line x1="180" y1="180" x2="279" y2="279"/>
+    <line x1="180" y1="180" x2="180" y2="320"/><line x1="180" y1="180" x2="81" y2="279"/>
+    <line x1="180" y1="180" x2="40" y2="180"/><line x1="180" y1="180" x2="81" y2="81"/>
+  </g>
+  <g stroke="#fcfcfb" stroke-width="3">
+    <circle cx="180" cy="40" r="13" fill="#2a78d6"/><circle cx="279" cy="81" r="13" fill="#eb6834"/>
+    <circle cx="320" cy="180" r="13" fill="#1baf7a"/><circle cx="279" cy="279" r="13" fill="#eda100"/>
+    <circle cx="180" cy="320" r="13" fill="#e87ba4"/><circle cx="81" cy="279" r="13" fill="#008300"/>
+    <circle cx="40" cy="180" r="13" fill="#6250d6"/><circle cx="81" cy="81" r="13" fill="#e34948"/>
+  </g>
+  <circle cx="180" cy="180" r="56" fill="#fcfcfb" stroke="#2a78d6" stroke-width="2"/>
+  <text class="core" x="180" y="176" text-anchor="middle">one spec</text>
+  <text class="core" x="180" y="194" text-anchor="middle">one test suite</text>
+  <text class="tag" x="180" y="22" text-anchor="middle">Java</text>
+  <text class="tag" x="300" y="66">Clojure</text>
+  <text class="tag" x="337" y="184">Rust</text>
+  <text class="tag" x="296" y="302">Python</text>
+  <text class="tag" x="180" y="346" text-anchor="middle">Go</text>
+  <text class="tag" x="64" y="302" text-anchor="end">Common Lisp</text>
+  <text class="tag" x="22" y="184" text-anchor="end">x86 asm</text>
+  <text class="tag" x="60" y="66" text-anchor="end">ARM asm</text>
+  <text class="name" x="180" y="388" text-anchor="middle">PolyQuery</text>
+</svg>

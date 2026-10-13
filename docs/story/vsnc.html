@@ -1,0 +1,261 @@
+<!DOCTYPE html>
+<html xmlns="http://www.w3.org/1999/xhtml" lang="" xml:lang="">
+<head>
+  <meta charset="utf-8" />
+  <meta name="generator" content="pandoc" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=yes" />
+  <title>PolyQuery: One spec. Eight languages. One answer.</title>
+  <style>
+    code{white-space: pre-wrap;}
+    span.smallcaps{font-variant: small-caps;}
+    div.columns{display: flex; gap: min(4vw, 1.5em);}
+    div.column{flex: auto; overflow-x: auto;}
+    div.hanging-indent{margin-left: 1.5em; text-indent: -1.5em;}
+    /* The extra [class] is a hack that increases specificity enough to
+       override a similar rule in reveal.js */
+    ul.task-list[class]{list-style: none;}
+    ul.task-list li input[type="checkbox"] {
+      font-size: inherit;
+      width: 0.8em;
+      margin: 0 0.8em 0.2em -1.6em;
+      vertical-align: middle;
+    }
+    .display.math{display: block; text-align: center; margin: 0.5rem auto;}
+  </style>
+  <link rel="stylesheet" href="story.css" />
+</head>
+<body>
+<h1 id="polyquery">PolyQuery</h1>
+<p><img src="charts/polyquery-symbol.svg"
+alt="The PolyQuery symbol: an octagon, one corner per engine, one specification in the middle" /></p>
+<blockquote>
+<p><strong>One spec. Eight languages. One answer.</strong></p>
+</blockquote>
+<p><em>A VSNC story: <strong>V</strong>ision, <strong>S</strong>teps,
+<strong>N</strong>ews, <strong>C</strong>ontributions.</em></p>
+<table>
+<thead>
+<tr class="header">
+<th></th>
+<th>The five things to remember</th>
+</tr>
+</thead>
+<tbody>
+<tr class="odd">
+<td><strong>Symbol</strong></td>
+<td><strong>The polygon.</strong> Eight corners are eight independently
+built database engines. The middle is the one specification and test
+suite they all answer to. The name says the same thing:
+<em>Poly</em>-gon, <em>Poly</em>-glot, <em>PolyQuery</em>.</td>
+</tr>
+<tr class="even">
+<td><strong>Slogan</strong></td>
+<td><strong>One spec. Eight languages. One answer.</strong></td>
+</tr>
+<tr class="odd">
+<td><strong>Surprise</strong></td>
+<td><strong>An AI wrote a complete SQL database in raw assembly
+language, and it beat Java.</strong> On the same 1-million-row
+benchmark, on the same machine, the x86-64 assembly engine answers in
+2.85 ms against Java's 3.41 ms, using half the memory. Both assembly
+engines together cost $310.</td>
+</tr>
+<tr class="even">
+<td><strong>Salient point</strong></td>
+<td><strong>It started with a spec, not with code.</strong>
+Language-agnostic tests checked every implementation against the same
+expected answers, so eight engines could be verified against each
+other.</td>
+</tr>
+<tr class="odd">
+<td><strong>Story</strong></td>
+<td><strong>How it was made:</strong> one weekend, one conductor, up to
+twelve AI agents at a time, a subscription that never went into overage.
+Read on.</td>
+</tr>
+</tbody>
+</table>
+<hr />
+<h2 id="v--vision">V — Vision</h2>
+<p>Software is expensive because of two hard questions: <em>what exactly
+should it do?</em> and <em>how do we know it does that?</em> Typing the
+code was never the hard part. Now it is nearly free.</p>
+<p>PolyQuery tests a simple vision:</p>
+<ol type="1">
+<li><strong>People write the specification</strong>: inputs, outputs,
+errors and edge cases, in plain language.</li>
+<li><strong>People turn it into language-agnostic tests</strong>:
+questions with known answers that any implementation must give.</li>
+<li><strong>AI agents build the implementations</strong>, in parallel,
+in sandboxes, as many times and in as many languages as we like.</li>
+<li><strong>The tests, and the implementations themselves, check the
+result.</strong> If independent builds agree, trust goes up. If they
+disagree, we've found a bug, or a gap in the spec, before a customer
+did.</li>
+</ol>
+<p>The test bed was deliberately hard: a complete analytical SQL
+database. It includes SQL with joins, grouping and subqueries, a binary
+storage format, an HTTP server with concurrency, timeouts and
+cancellation, and parallel, vectorized execution. It was built
+<strong>eight times</strong>: in Java, Clojure, Rust, Python, Go and
+Common Lisp, then in x86-64 and ARM assembly.</p>
+<h2 id="s--steps-the-story-of-how-it-was-made">S — Steps (the story of
+how it was made)</h2>
+<p><strong>Step 1: write the spec (Saturday 13:46).</strong> A Claude
+Code session, "the conductor", wrote the specification first. It
+covered:</p>
+<ul>
+<li>the data types and SQL dialect;</li>
+<li>the wire protocol and the storage file format;</li>
+<li>the concurrency rules and the error codes.</li>
+</ul>
+<p>It also defined five build phases, from an in-memory engine (Phase 1)
+to parallel execution (Phase 5).</p>
+<p><strong>Step 2: write the tests, in no particular language.</strong>
+746 test cases in a plain-text format. Each one is a request and its
+expected answer, so any engine can be checked without anyone reading its
+code. Part of the suite was <strong>kept hidden</strong> from the
+builders, so passing meant implementing the spec, not memorising the
+tests. Expected answers came from the spec and were cross-checked
+against SQLite, never taken from another engine.</p>
+<p><strong>Step 3: build in parallel.</strong></p>
+<ul>
+<li>The conductor started fresh agent sessions, one per language and
+phase.</li>
+<li>Each agent worked alone in a <strong>sandbox</strong>:
+<ul>
+<li>the spec and the public tests, and nothing else;</li>
+<li>no internet, and no peeking at the other languages.</li>
+</ul></li>
+<li>The ARM assembly agents ran natively on a separate ARM machine.</li>
+</ul>
+<p><img src="charts/parallel-agents.svg"
+alt="Agent sessions over the project" /></p>
+<p><strong>Step 4: referee every result.</strong> Nothing merged on an
+agent's say-so. Every submission was rebuilt from a clean copy and run
+against the public <strong>and hidden</strong> tests.</p>
+<ul>
+<li><strong>Saturday 16:15:</strong> all six engines pass Phase 1.</li>
+<li><strong>Saturday 23:21:</strong> all six pass Phase 5, under ten
+hours after the first commit.</li>
+</ul>
+<p><strong>Step 5: stay inside the subscription.</strong></p>
+<ul>
+<li>No new agent starts while the 5-hour usage window is above 80 %.
+Instead the run waits for the window to roll forward. On Saturday six
+runs waited 35–95 minutes this way.</li>
+<li>A watchdog stops a running agent at 95 %, or instantly on any paid
+overage.</li>
+<li>Usage peaked at 89 % of the 5-hour window and 62 % of the weekly
+window. All 108 sessions saw "allowed": no rejections, no overage.</li>
+</ul>
+<p><strong>Step 6: change it, like real software.</strong> On Sunday the
+agents got the jobs that come after version 1:</p>
+<ul>
+<li>add a feature (<code>UNION ALL</code>);</li>
+<li>widen a data type, which also needed a new file format version;</li>
+<li>restructure the planner;</li>
+<li>hunt a planted bug from a vague report;</li>
+<li>make it faster;</li>
+<li>plug in hand-written assembly kernels.</li>
+</ul>
+<p><strong>Step 7: go to extremes, then audit.</strong></p>
+<ul>
+<li>Two more engines were built in assembly language and finished every
+task the others did.</li>
+<li>Each engine got two independent AI code reviews.</li>
+<li>Black-box probes then tested what the reviewers suspected.</li>
+</ul>
+<p><strong>The bill.</strong> 108 agent sessions and 75 agent-hours.
+That is <strong>$1,256 at API list prices</strong>, run on a Claude
+subscription. A complete, tested engine with all its later changes came
+to about <strong>$120–180 per language</strong>.</p>
+<p><img src="charts/cost.svg" alt="Cost per engine" /></p>
+<h2 id="n--news">N — News</h2>
+<p><em>What's the headline? Here are candidates, each backed by the
+data. Pick the lead for the audience.</em></p>
+<ol type="1">
+<li><strong>"AI writes a SQL database in assembly language, and it
+outruns Java."</strong> The surprise. Best for a broad or technical
+audience.</li>
+<li><strong>"Eight database engines in one weekend, for the price of a
+laptop."</strong> Speed and cost: under 10 hours for six engines through
+five phases, and $1,256 at list price for everything.</li>
+<li><strong>"Six strangers, one answer."</strong> Six independently
+written engines give identical results on every one of 20 benchmark
+queries, and each reads every other engine's storage files. This is the
+salient point, made concrete.</li>
+<li><strong>"When the robots disagreed, the spec got better."</strong>
+Divergence between engines exposed two gaps in the specification. One
+(huge integers compared with decimals) was flagged independently by two
+agents. The other (what to do with gigantic SQL expressions) became
+change request CR-6, which is being implemented by the agents right
+now.</li>
+<li><strong>"75 hours of AI work, zero overage."</strong> Guard rails,
+not luck: a usage gate that pauses work instead of raising the
+bill.</li>
+<li><strong>"The AI auditors caught real bugs."</strong> Independent AI
+code reviews flagged suspected defects. Black-box probes confirmed some,
+such as a crash on extremely long conditions in both assembly engines,
+and cleared others. Every result is published, including the
+failures.</li>
+<li><strong>"Next: twin implementations for the numbers that
+matter."</strong> The same recipe applied to pricing, billing or
+interest calculations, with two independent implementations checking
+each other on every input.</li>
+</ol>
+<p><img src="charts/conformance.svg"
+alt="All eight engines pass their full conformance suite" /></p>
+<p><img src="charts/latency.svg"
+alt="Query latency on a 1-million-row workload" /></p>
+<h2 id="c--contributions">C — Contributions</h2>
+<p><strong>What this project gives us:</strong></p>
+<ul>
+<li><strong>A method</strong> that works beyond databases: spec first,
+language-agnostic tests (some hidden), parallel sandboxed agents, an
+automatic referee, and guard rails on spend.</li>
+<li><strong>Twin-implementation verification.</strong> For logic where a
+wrong number is expensive, build it twice in different languages and
+compare every answer.
+<ul>
+<li>When both agree, confidence goes up a lot.</li>
+<li>When they disagree, there's a bug or a spec gap, found early.</li>
+<li>One caveat: keep an independent reference (the spec, or a trusted
+system), because two builds that share a misreading of the spec will
+agree wrongly.</li>
+</ul></li>
+<li><strong>Reusable tooling:</strong>
+<ul>
+<li>the orchestrator (waves, sandboxes, usage gate, watchdog,
+validation);</li>
+<li>the test harness;</li>
+<li>the reporting dashboard.</li>
+</ul></li>
+<li><strong>Open evidence:</strong> every one of the 108 agent sessions
+is recorded, with its transcript, cost, time and outcome, failures
+included. Live dashboard: <a
+href="https://pgdad.github.io/poly-query/">https://pgdad.github.io/poly-query/</a>.
+Code and data: <a
+href="https://github.com/pgdad/poly-query">https://github.com/pgdad/poly-query</a>.</li>
+</ul>
+<p><strong>Who contributed:</strong></p>
+<ul>
+<li><strong>The owner</strong> set the direction and the budget, and
+made the calls: raising the usage gate to 80 %, approving the assembly
+stretch goal and its $600 cap, choosing the ARM machine.</li>
+<li><strong>The conductor</strong> (one Claude Code session) wrote the
+spec, the tests and the tooling. It ran the waves, refereed, and wrote
+the reports, and it never touched engine code.</li>
+<li><strong>The agents</strong> (108 Claude sessions) wrote about
+193,000 lines across eight engines and the assembly kernels.</li>
+<li><strong>Two hands-on interventions</strong> in the whole project,
+both logged.</li>
+</ul>
+<hr />
+<p><em>One spec. Eight languages. One answer.</em></p>
+<p><em>Companion version: <a href="README.md">the full story</a>. Charts
+are generated from the experiment data by
+<code>tools/reporting/story_assets.py</code>; <code>build.sh</code>
+rebuilds both PDFs.</em></p>
+</body>
+</html>
