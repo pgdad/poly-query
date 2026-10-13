@@ -124,6 +124,17 @@ func (a *analyzer) selectBlock(q *ast.Query, outer *scope, env *cteEnv) (plan.No
 
 	// ORDER BY expressions equal to a select item sort by that item; others
 	// become hidden output columns (not allowed with DISTINCT).
+	// Items are rendered once: the first equal visible item, else the last
+	// equal hidden item is used.
+	visibleIdx, hiddenIdx := map[string]int{}, map[string]int{}
+	for j := range items {
+		key := items[j].expr.String()
+		if _, dup := visibleIdx[key]; j < visible && !dup {
+			visibleIdx[key] = j
+		} else if j >= visible {
+			hiddenIdx[key] = j
+		}
+	}
 	for i := range orders {
 		o := &orders[i]
 		if o.expr == nil {
@@ -131,24 +142,20 @@ func (a *analyzer) selectBlock(q *ast.Query, outer *scope, env *cteEnv) (plan.No
 		}
 		key := o.expr.String()
 		o.index = -1
-		for j := 0; j < visible; j++ {
-			if items[j].expr.String() == key {
-				o.index = j
-				break
-			}
+		if j, ok := visibleIdx[key]; ok {
+			o.index = j
 		}
 		if o.index < 0 {
 			if q.Distinct {
 				return nil, semanticAt(q.OrderBy[i].Pos, "ORDER BY expressions must appear in the select list of a SELECT DISTINCT")
 			}
-			for j := visible; j < len(items); j++ {
-				if items[j].expr.String() == key {
-					o.index = j
-				}
+			if j, ok := hiddenIdx[key]; ok {
+				o.index = j
 			}
 			if o.index < 0 {
 				items = append(items, selItem{expr: o.expr, name: "_order" + strconv.Itoa(len(items)+1)})
 				o.index = len(items) - 1
+				hiddenIdx[key] = o.index
 			}
 		}
 	}

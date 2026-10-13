@@ -85,7 +85,7 @@ func (p *parser) operand() error {
 	return nil
 }
 
-// joinNesting guards the recursion of parenthesized FROM items, which the
+// enterJoin guards the recursion of parenthesized FROM items, which the
 // nesting depth does not count.
 func (p *parser) enterJoin() error {
 	p.joinOpen++

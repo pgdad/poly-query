@@ -440,6 +440,8 @@ passes. They are now linear (or n log n):
   subexpression. Now only subexpressions with the size of some key are
   rendered; equal-size subtrees are disjoint, so this is linear per
   distinct key size.
+* ORDER BY keys were matched against the select items by rendering every
+  item for every key. Each item is now rendered once.
 * the physical planner deduplicated IN-list points pairwise. It now sorts
   them.
 * `a || b || …` copied the growing prefix at every operator. A chain is now
@@ -469,7 +471,7 @@ passes. They are now linear (or n log n):
 | `internal/interrupt` | new: deadline checker shared by all stages |
 | `internal/engine` | timeout context created before parsing (from `Received`) and passed to every stage; `Explain` takes a context; `Config.Limits`; claims `change.expression_limits` |
 | `internal/protocol` | requests record their receipt time; the `explain` op gets the request context |
-| `internal/analyzer` | deadline ticks in binding and per query block; linear GROUP BY key matching; linear CTE validation |
+| `internal/analyzer` | deadline ticks in binding and per query block; linear GROUP BY key and ORDER BY item matching; linear CTE validation |
 | `internal/optimizer` | `Optimize` checks the deadline before each rule and returns an error; constant folding uses `plan.Props` |
 | `internal/physical` | deadline check per planned node; O(n log n) IN-list points |
 | `internal/plan` | `Props` (memoized constant/volatile/movable/size), `ChainOperands` |
