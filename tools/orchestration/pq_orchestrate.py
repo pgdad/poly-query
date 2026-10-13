@@ -83,9 +83,13 @@ NATIVE_EXTRA_PATHS = ["native-kernels/Makefile", "native-kernels/include", "nati
 PHASE_TASKS = {"phase1", "phase2", "phase3", "phase4", "phase5"}
 # Inputs a task's prompt names explicitly (HI-007: optimize-latency named a workload that was never exported).
 TASK_EXTRA_PATHS = {"optimize-latency": ["benchmarks/workloads"], "jvm-tuning": ["benchmarks/workloads"],
-                    "change-expression-limits": ["tests/regression/robustness_probe.py"]}
+                    "change-expression-limits": ["tests/regression/robustness_probe.py"],
+                    "fix-large-data": ["tests/regression/large_data_probe.py", "tests/regression/robustness_probe.py",
+                                       "benchmarks/workloads"]}
 
 TRUSTED_PATHS = ["tests", "spec"]
+# Inputs a task's validation reads beyond tests/ and spec/: taken from the repository, never the workspace.
+TASK_TRUSTED_EXTRA = {"fix-large-data": ["benchmarks/workloads", "datasets/generators", "datasets/manifests"]}
 TRUSTED_KERNEL_PATHS = ["spec", "native-kernels/Makefile", "native-kernels/include", "native-kernels/reference-c",
                         "native-kernels/tests", "tests/kernels-hidden"]
 
@@ -734,7 +738,8 @@ def validate(run_id: str, phases: list[int] | None = None) -> dict:
     # test scaffolding come from the trusted repository (incl. hidden tests), so edits an agent made
     # to them cannot influence its verdict.
     for rel in TRUSTED_KERNEL_PATHS if m["task"] in KERNEL_TASKS else \
-            TRUSTED_PATHS + (NATIVE_EXTRA_PATHS if m["task"] not in PHASE_TASKS else []):
+            TRUSTED_PATHS + (NATIVE_EXTRA_PATHS if m["task"] not in PHASE_TASKS else []) + \
+            TASK_TRUSTED_EXTRA.get(m["task"], []):
         dst = vd / rel
         if dst.is_dir():
             shutil.rmtree(dst)
@@ -814,6 +819,12 @@ python3 tests/regression/robustness_probe.py --engine implementations/{lang}/bin
    --report expression-limits.json > validate-limits.log 2>&1; echo "limits_exit=$?" >> validate-status
 fi
 """
+    if m["task"] == "fix-large-data":
+        # The 10m data (~1.9 GB) is generated inside the sandbox and removed afterwards.
+        script += f"""python3 tests/regression/large_data_probe.py --engine implementations/{lang}/bin/polyquery --require-pass \
+   --logs large-data-logs --report large-data.json > validate-large-data.log 2>&1; echo "large_data_exit=$?" >> validate-status
+rm -rf datasets/generated/10m
+"""
     cfg = rd / "config"
     t0 = time.time()
     host = agent_host(lang)
@@ -846,7 +857,8 @@ fi
         if p.exists():
             d = json.loads(p.read_text())
             out["extra"][x] = d.get("summary") or d
-    for f in ["conformance.json", *extra, "validate-build.log", "validate-conformance.log", "expression-limits.json"]:
+    for f in ["conformance.json", *extra, "validate-build.log", "validate-conformance.log", "expression-limits.json",
+              "large-data.json"]:
         if (vd / f).exists():
             shutil.copy(vd / f, rd / f)
     out["outcome"] = classify(m, out)
@@ -1050,7 +1062,7 @@ def classify(m: dict, v: dict) -> str:
         elif isinstance(s, dict) and "failed" in s and s["failed"]:
             ok = False
     # Fail closed: a native check that ran without a library would otherwise pass on the fallback path (HI-008).
-    if any(v["status"].get(k, "0") != "0" for k in ("native_lib_exit", "native_exit", "limits_exit")):
+    if any(v["status"].get(k, "0") != "0" for k in ("native_lib_exit", "native_exit", "limits_exit", "large_data_exit")):
         ok = False
     rc = m.get("agent_exit_code")
     # A killed agent did not finish its task, even if what it had committed passes.
