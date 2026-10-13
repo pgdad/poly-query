@@ -322,7 +322,14 @@ LFUNC pool_grow
     ADR_L x2, pool_main
     mov  x3, #0
     bl   pthread_create
+    cbz  w0, 3f
+    mov  x0, sp                         // big stack refused: default stack
+    mov  x1, #0                         // (the guard adapts to its size)
+    ADR_L x2, pool_main
+    mov  x3, #0
+    bl   pthread_create
     cbnz w0, 8f
+3:
     ldr  x0, [sp]
     bl   pthread_detach
     ADR_L x9, g_pool_threads

@@ -94,6 +94,7 @@ g_listen_fd:    .skip 8
 g_sig_pipe:     .skip 8         // int[2] self-pipe (read end, write end)
 g_inflight:     .skip 8         // HTTP requests being processed (atomic)
 g_thread_attr:  .skip 64        // pthread_attr_t for connection threads
+g_thread_attr2: .skip 64        // fallback: 16 MiB stacks (big ones refused)
 
     TBSS
     .p2align 3
@@ -2387,6 +2388,14 @@ FUNC serve_main
     ADR_L x0, g_thread_attr
     mov  w1, #1                         // PTHREAD_CREATE_DETACHED
     bl   pthread_attr_setdetachstate
+    ADR_L x0, g_thread_attr2
+    bl   pthread_attr_init
+    ADR_L x0, g_thread_attr2
+    mov  w1, #1
+    bl   pthread_attr_setdetachstate
+    ADR_L x0, g_thread_attr2
+    mov  x1, #(16*1024*1024)
+    bl   pthread_attr_setstacksize
     // signals -> self-pipe
     ADR_L x0, g_sig_pipe
     ldr  w1, =(O_NONBLOCK | O_CLOEXEC)
@@ -2466,6 +2475,13 @@ FUNC serve_main
     bl   setsockopt
     add  x0, sp, #56                    // pthread_t (unused)
     ADR_L x1, g_thread_attr
+    ADR_L x2, conn_main
+    mov  x3, x21
+    bl   pthread_create
+    cbz  w0, .Lsm_accept
+    add  x0, sp, #56                    // big stack refused (address-space
+                                        // limit?): retry with 16 MiB
+    ADR_L x1, g_thread_attr2
     ADR_L x2, conn_main
     mov  x3, x21
     bl   pthread_create

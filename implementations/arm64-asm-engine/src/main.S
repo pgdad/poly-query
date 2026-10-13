@@ -324,7 +324,8 @@ LFUNC run_request_thread
     mov  x3, x19
     bl   pthread_create
     cbz  w0, 1f
-    blr  x19                        // fallback: this thread (8 MiB stack)
+    bl   stack_guard_init           // fallback: this thread (RLIMIT_STACK)
+    blr  x19
     b    2f
 1:  ldr  x0, [sp, #64]
     mov  x1, #0
