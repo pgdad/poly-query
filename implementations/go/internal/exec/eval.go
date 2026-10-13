@@ -3,6 +3,7 @@ package exec
 import (
 	"context"
 	"math"
+	"strings"
 
 	"polyquery/internal/errs"
 	"polyquery/internal/plan"
@@ -146,6 +147,11 @@ func compileUnary(ec *Context, lay layout, x *plan.Unary) (evalFn, error) {
 }
 
 func compileBinary(ec *Context, lay layout, x *plan.Binary) (evalFn, error) {
+	if x.Op == plan.OpConcat {
+		if ops := plan.ChainOperands(x, plan.OpConcat); len(ops) > 2 {
+			return compileConcat(ec, lay, ops)
+		}
+	}
 	lf, err := compile(ec, lay, x.L)
 	if err != nil {
 		return nil, err
@@ -204,6 +210,37 @@ func compileBinary(ec *Context, lay layout, x *plan.Binary) (evalFn, error) {
 		return compileComparison(x, lf, rf), nil
 	}
 	return compileArithmetic(x, lf, rf)
+}
+
+// compileConcat compiles a chain of || operators as one concatenation of
+// its operands, linear in the length of the result (nested binary
+// concatenations would copy the growing prefix at every operator).
+// Operands are evaluated left to right like the nested form: the first
+// error wins, and any NULL operand makes the result NULL.
+func compileConcat(ec *Context, lay layout, ops []plan.Expr) (evalFn, error) {
+	fns, err := compileAll(ec, lay, ops)
+	if err != nil {
+		return nil, err
+	}
+	return func(row types.Row) (types.Value, error) {
+		var sb strings.Builder
+		isNull := false
+		for _, f := range fns {
+			v, err := f(row)
+			if err != nil {
+				return null, err
+			}
+			if v.Null {
+				isNull = true
+			} else if !isNull {
+				sb.WriteString(v.S)
+			}
+		}
+		if isNull {
+			return null, nil
+		}
+		return types.StringValue(sb.String()), nil
+	}, nil
 }
 
 // and3 is three-valued AND of two BOOLEAN values.

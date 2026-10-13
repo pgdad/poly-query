@@ -12,23 +12,30 @@ import (
 // and any remaining reference to an input column is a grouping violation
 // (semantics.md §5).
 type grouping struct {
-	a       *analyzer
-	input   map[plan.ColumnID]bool
-	keyIdx  map[string]int
-	keyByID map[plan.ColumnID]int // keys that are plain column references
-	keyCols []plan.Column
-	aggIdx  map[string]int
-	aggs    []*plan.AggCall
-	aggCols []plan.Column
+	a      *analyzer
+	input  map[plan.ColumnID]bool
+	keyIdx map[string]int
+	// keySizes holds the tree sizes of the keys: only subexpressions of
+	// one of these sizes can equal a key, so only they are rendered to be
+	// looked up (rendering every node would be quadratic in long chains).
+	keySizes map[int]bool
+	props    *plan.Props
+	keyByID  map[plan.ColumnID]int // keys that are plain column references
+	keyCols  []plan.Column
+	aggIdx   map[string]int
+	aggs     []*plan.AggCall
+	aggCols  []plan.Column
 }
 
 func (a *analyzer) newGrouping(sc *scope, keys []plan.Expr) *grouping {
 	g := &grouping{
-		a:       a,
-		input:   sc.inputIDs(),
-		keyIdx:  map[string]int{},
-		keyByID: map[plan.ColumnID]int{},
-		aggIdx:  map[string]int{},
+		a:        a,
+		input:    sc.inputIDs(),
+		keyIdx:   map[string]int{},
+		keyByID:  map[plan.ColumnID]int{},
+		aggIdx:   map[string]int{},
+		keySizes: map[int]bool{},
+		props:    plan.NewProps(),
 	}
 	for i, k := range keys {
 		name := plan.Display(k)
@@ -41,6 +48,7 @@ func (a *analyzer) newGrouping(sc *scope, keys []plan.Expr) *grouping {
 		if _, dup := g.keyIdx[k.String()]; !dup {
 			g.keyIdx[k.String()] = i
 		}
+		g.keySizes[g.props.Size(k)] = true
 		g.keyCols = append(g.keyCols, a.newColumn(name, k.Type()))
 	}
 	return g
@@ -71,8 +79,10 @@ func (g *grouping) rewrite(e plan.Expr) (plan.Expr, error) {
 		if err != nil {
 			return x
 		}
-		if i, ok := g.keyIdx[x.String()]; ok {
-			return g.keyCols[i].Ref()
+		if g.keySizes[g.props.Size(x)] {
+			if i, ok := g.keyIdx[x.String()]; ok {
+				return g.keyCols[i].Ref()
+			}
 		}
 		switch y := x.(type) {
 		case *plan.AggCall:

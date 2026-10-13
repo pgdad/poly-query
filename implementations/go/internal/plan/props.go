@@ -9,30 +9,36 @@ package plan
 // Nodes are identified by pointer, so a Props must only be used on trees
 // that are not mutated in place while it is in use.
 type Props struct {
-	m map[Expr]propBits
+	m map[Expr]nodeProps
+}
+
+type nodeProps struct {
+	bits propBits
+	size int // number of nodes in the subtree
 }
 
 type propBits uint8
 
 const (
-	propKnown propBits = 1 << iota
-	propColumn
+	propColumn propBits = 1 << iota
 	propAgg
 	propSubquery
 	propSleep
 )
 
 // NewProps returns an empty property cache.
-func NewProps() *Props { return &Props{m: map[Expr]propBits{}} }
+func NewProps() *Props { return &Props{m: map[Expr]nodeProps{}} }
 
-func (p *Props) bits(e Expr) propBits {
+func (p *Props) bits(e Expr) propBits { return p.of(e).bits }
+
+func (p *Props) of(e Expr) nodeProps {
 	if e == nil {
-		return 0
+		return nodeProps{}
 	}
-	if b, ok := p.m[e]; ok {
-		return b
+	if np, ok := p.m[e]; ok {
+		return np
 	}
-	b := propKnown
+	b, size := propBits(0), 1
 	switch x := e.(type) {
 	case *ColumnRef:
 		b |= propColumn
@@ -46,11 +52,18 @@ func (p *Props) bits(e Expr) propBits {
 		}
 	}
 	for _, c := range Children(e) {
-		b |= p.bits(c)
+		cp := p.of(c)
+		b |= cp.bits
+		size += cp.size
 	}
-	p.m[e] = b
-	return b
+	np := nodeProps{bits: b, size: size}
+	p.m[e] = np
+	return np
 }
+
+// Size returns the number of nodes of e's tree (subquery plans excluded).
+// Structurally equal expressions (equal String forms) have equal sizes.
+func (p *Props) Size(e Expr) int { return p.of(e).size }
 
 // IsConstant is IsConstant(e), memoized.
 func (p *Props) IsConstant(e Expr) bool {

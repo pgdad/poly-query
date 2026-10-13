@@ -90,7 +90,7 @@ func (c *vcompiler) compile(e plan.Expr) (vexpr, error) {
 		case x.Op.IsComparison():
 			return c.comparison(x)
 		case x.Op == plan.OpConcat:
-			return c.elementwise(e)
+			return c.concat(x)
 		}
 		return c.arithmetic(x)
 	case *plan.Unary:
@@ -1018,12 +1018,51 @@ func (c *vcompiler) elementwise(e plan.Expr) (vexpr, error) {
 	if compileErr != nil {
 		return nil, compileErr
 	}
+	return c.newElementwise(mapped, lay, args, argCls)
+}
+
+// newElementwise evaluates the row expression mapped per element, over the
+// vectors of args bound to the column IDs of lay.
+func (c *vcompiler) newElementwise(mapped plan.Expr, lay layout, args []vexpr, argCls []vclass) (vexpr, error) {
 	fn, err := compile(c.ec, lay, mapped)
 	if err != nil {
 		return nil, err
 	}
-	return &velementwise{fn: fn, args: args, argCls: argCls, cls: classOf(e.Type()),
+	return &velementwise{fn: fn, args: args, argCls: argCls, cls: classOf(mapped.Type()),
 		row: make(types.Row, len(args)), vals: make([]*Vec, len(args))}, nil
+}
+
+// concat compiles a chain of || operators elementwise over its operands
+// (compiled separately), so that the row function concatenates them in one
+// step instead of materializing every prefix of the chain.
+func (c *vcompiler) concat(x *plan.Binary) (vexpr, error) {
+	ops := plan.ChainOperands(x, plan.OpConcat)
+	if len(ops) <= 2 {
+		return c.elementwise(x)
+	}
+	var args []vexpr
+	var argCls []vclass
+	lay := layout{}
+	var chain plan.Expr
+	for _, op := range ops {
+		if !c.constant(op) {
+			v, err := c.compile(op)
+			if err != nil {
+				return nil, err
+			}
+			id := plan.ColumnID(-1 - len(args))
+			lay[id] = len(args)
+			args = append(args, v)
+			argCls = append(argCls, classOf(op.Type()))
+			op = &plan.ColumnRef{ID: id, T: op.Type()}
+		}
+		if chain == nil {
+			chain = op
+		} else {
+			chain = &plan.Binary{Op: plan.OpConcat, L: chain, R: op, T: x.T}
+		}
+	}
+	return c.newElementwise(chain, lay, args, argCls)
 }
 
 func (v *velementwise) eval(b *Batch, sel []int32) (*Vec, error) {

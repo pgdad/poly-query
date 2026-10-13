@@ -42,6 +42,9 @@ type analyzer struct {
 	cfg    Config
 	nextID plan.ColumnID
 	subSeq int
+	// validating > 0 while a CTE definition is analyzed only to validate
+	// it (the plan is discarded).
+	validating int
 }
 
 func (a *analyzer) newColumn(name string, t types.Type) plan.Column {
@@ -99,6 +102,9 @@ type cteDef struct {
 	def   *ast.CTE
 	env   *cteEnv // CTEs visible inside the definition
 	outer *scope  // enclosing query scope at the definition
+	// cols is the validated output (names and types); nil until the
+	// definition has been validated.
+	cols []plan.Column
 }
 
 // cteEnv is an immutable linked list of visible CTEs, innermost first.

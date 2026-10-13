@@ -101,7 +101,24 @@ func columnIDs(cols []plan.Column) map[plan.ColumnID]bool {
 // expressions are parallel safe. (The build sides of the joins are
 // computed once and shared; they must not evaluate subqueries either,
 // since they are consumed by a worker.)
-func pipelineScan(n physical.Node) (*physical.TableScan, bool) {
+func pipelineScan(ec *Context, n physical.Node) (*physical.TableScan, bool) {
+	ec.pipeMu.Lock()
+	scan, known := ec.pipes[n]
+	ec.pipeMu.Unlock()
+	if !known {
+		// Memoized per node: operators deep in a long pipeline ask again.
+		scan, _ = findPipelineScan(ec, n)
+		ec.pipeMu.Lock()
+		if ec.pipes == nil {
+			ec.pipes = map[physical.Node]*physical.TableScan{}
+		}
+		ec.pipes[n] = scan
+		ec.pipeMu.Unlock()
+	}
+	return scan, scan != nil
+}
+
+func findPipelineScan(ec *Context, n physical.Node) (*physical.TableScan, bool) {
 	switch x := n.(type) {
 	case *physical.TableScan:
 		return x, true
@@ -109,7 +126,7 @@ func pipelineScan(n physical.Node) (*physical.TableScan, bool) {
 		if !parallelSafe(x.Pred, columnIDs(x.Input.Schema())) {
 			return nil, false
 		}
-		return pipelineScan(x.Input)
+		return pipelineScan(ec, x.Input)
 	case *physical.Project:
 		ids := columnIDs(x.Input.Schema())
 		for _, e := range x.Exprs {
@@ -117,7 +134,7 @@ func pipelineScan(n physical.Node) (*physical.TableScan, bool) {
 				return nil, false
 			}
 		}
-		return pipelineScan(x.Input)
+		return pipelineScan(ec, x.Input)
 	case *physical.HashJoin:
 		ids := columnIDs(x.Schema())
 		for _, e := range physical.Exprs(x) {
@@ -129,7 +146,7 @@ func pipelineScan(n physical.Node) (*physical.TableScan, bool) {
 		if !subtreeParallelSafe(build) {
 			return nil, false
 		}
-		return pipelineScan(probe)
+		return pipelineScan(ec, probe)
 	}
 	return nil, false
 }
@@ -167,7 +184,7 @@ func parallelMorsels(ec *Context, n physical.Node) ([]scanRange, bool) {
 	if ec.Threads <= 1 || ec.serial > 0 {
 		return nil, false
 	}
-	scan, ok := pipelineScan(n)
+	scan, ok := pipelineScan(ec, n)
 	if !ok {
 		return nil, false
 	}

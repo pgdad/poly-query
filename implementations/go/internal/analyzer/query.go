@@ -40,7 +40,7 @@ func (a *analyzer) query(q *ast.Query, outer *scope, env *cteEnv) (plan.Node, er
 		}
 		seen[key] = true
 		def := &cteDef{def: c, env: env, outer: outer}
-		if _, _, err := a.cteRelation(def); err != nil { // validate even if unused
+		if err := a.validateCTE(def); err != nil { // validate even if unused
 			return nil, err
 		}
 		env = &cteEnv{def: def, parent: env}
@@ -422,9 +422,35 @@ func (a *analyzer) from(item ast.FromItem, sc *scope, env *cteEnv) (plan.Node, e
 	return nil, errs.New(errs.InternalError, "unknown FROM item %T", item)
 }
 
+// validateCTE analyzes a CTE definition once, whether it is referenced or
+// not, and records its output columns.
+//
+// While validating, references to CTEs validated before resolve to an
+// empty relation of their recorded columns instead of being analyzed
+// again: analysis is deterministic, so they would succeed again, and the
+// plan is discarded. Without this, validating a chain of n CTEs each
+// referencing the previous one would analyze 1 + 2 + … + n definitions.
+func (a *analyzer) validateCTE(def *cteDef) error {
+	a.validating++
+	_, cols, err := a.cteRelation(def)
+	a.validating--
+	if err != nil {
+		return err
+	}
+	def.cols = cols
+	return nil
+}
+
 // cteRelation analyzes a CTE reference afresh (each reference gets its own
 // column IDs) and applies the CTE's column list.
 func (a *analyzer) cteRelation(def *cteDef) (plan.Node, []plan.Column, error) {
+	if a.validating > 0 && def.cols != nil {
+		stub := &plan.Values{Cols: make([]plan.Column, len(def.cols))}
+		for i, c := range def.cols {
+			stub.Cols[i] = a.newColumn(c.Name, c.Type)
+		}
+		return stub, stub.Cols, nil
+	}
 	node, err := a.query(def.def.Query, def.outer, def.env)
 	if err != nil {
 		return nil, nil, err

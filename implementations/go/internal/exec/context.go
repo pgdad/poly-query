@@ -50,6 +50,10 @@ type Context struct {
 	// shared holds the rows of shared aggregations by key.
 	sharedMu sync.Mutex
 	shared   map[string]*sharedResult
+	// pipes memoizes the table scan at the bottom of the scan pipeline
+	// rooted at a node (nil: not a pipeline).
+	pipeMu sync.Mutex
+	pipes  map[physical.Node]*physical.TableScan
 }
 
 // checkEvery is how many rows operators process between cancellation checks.
