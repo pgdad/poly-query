@@ -112,6 +112,16 @@
   (when (seq es)
     (reduce (fn [l r] {:node :and :type :boolean :left l :right r}) es)))
 
+(defn left-chain
+  "Operands, left to right, of the left-deep chain of binary nodes of kind
+  (:node) `node` rooted at e: `a || b || c` → [a b c] (a right operand of the
+  same kind, i.e. a parenthesized chain, stays one operand)."
+  [node e]
+  (loop [x e rights ()]
+    (if (= node (:node x))
+      (recur (:left x) (cons (:right x) rights))
+      (vec (cons x rights)))))
+
 (defn column-ref
   [index type name]
   {:node :column :type type :index index :name name})
@@ -136,39 +146,55 @@
       :timestamp (str "TIMESTAMP '" (v/format-timestamp value) "'")
       (v/value->string type value))))
 
+(defn- write-sql
+  "Appends the SQL-like text of e to sb (one buffer for the whole
+  expression: linear in its size however deep it is)."
+  [^StringBuilder sb e]
+  (let [w (fn [& parts]
+            (doseq [p parts]
+              (if (string? p) (.append sb ^String p) (write-sql sb p))))
+        sep (fn [es ^String separator]
+              (loop [es (seq es) first? true]
+                (when es
+                  (when-not first? (.append sb separator))
+                  (write-sql sb (first es))
+                  (recur (next es) false))))]
+    (case (:node e)
+      :literal (w (literal-sql e))
+      :column (w (str (:name e)))
+      :outer-column (w "outer." (str (:name e)))
+      :neg (w "-" (:arg e))
+      (:arith :compare) (w "(" (:left e) (str " " (:op e) " ") (:right e) ")")
+      :concat (w "(" (:left e) " || " (:right e) ")")
+      :and (w "(" (:left e) " AND " (:right e) ")")
+      :or (w "(" (:left e) " OR " (:right e) ")")
+      :not (w "NOT " (:arg e))
+      :is-null (w "(" (:arg e) (if (:not? e) " IS NOT NULL)" " IS NULL)"))
+      :cast (if (:implicit? e)
+              (write-sql sb (:arg e))
+              (w "CAST(" (:arg e) (str " AS " (t/type-name (:type e)) ")")))
+      :call (do (w (str (:fn e)) "(") (sep (:args e) ", ") (w ")"))
+      :case (do (w "CASE")
+                (doseq [[c x] (:whens e)] (w " WHEN " c " THEN " x))
+                (when (:else e) (w " ELSE " (:else e)))
+                (w " END"))
+      :like (w "(" (:arg e) (if (:not? e) " NOT LIKE " " LIKE ") (:pattern e) ")")
+      :between (w "(" (:arg e) (if (:not? e) " NOT BETWEEN " " BETWEEN ") (:low e) " AND " (:high e) ")")
+      :in-list (do (w "(" (:arg e) (if (:not? e) " NOT IN (" " IN ("))
+                   (sep (:items e) ", ")
+                   (w "))"))
+      :subquery (case (:kind e)
+                  :scalar (w "(<subquery>)")
+                  :exists (w "EXISTS (<subquery>)")
+                  :in (w "(" (:arg e) (if (:not? e) " NOT IN (<subquery>))" " IN (<subquery>))")))
+      (w (str (:node e))))))
+
 (defn ->sql
   "Renders a bound expression as SQL-like text."
   [e]
-  (let [r ->sql]
-    (case (:node e)
-      :literal (literal-sql e)
-      :column (str (:name e))
-      :outer-column (str "outer." (:name e))
-      :neg (str "-" (r (:arg e)))
-      (:arith :compare) (str "(" (r (:left e)) " " (:op e) " " (r (:right e)) ")")
-      :concat (str "(" (r (:left e)) " || " (r (:right e)) ")")
-      :and (str "(" (r (:left e)) " AND " (r (:right e)) ")")
-      :or (str "(" (r (:left e)) " OR " (r (:right e)) ")")
-      :not (str "NOT " (r (:arg e)))
-      :is-null (str "(" (r (:arg e)) (if (:not? e) " IS NOT NULL)" " IS NULL)"))
-      :cast (if (:implicit? e)
-              (r (:arg e))
-              (str "CAST(" (r (:arg e)) " AS " (t/type-name (:type e)) ")"))
-      :call (str (:fn e) "(" (str/join ", " (map r (:args e))) ")")
-      :case (str "CASE"
-                 (apply str (for [[c x] (:whens e)] (str " WHEN " (r c) " THEN " (r x))))
-                 (when (:else e) (str " ELSE " (r (:else e))))
-                 " END")
-      :like (str "(" (r (:arg e)) (when (:not? e) " NOT") " LIKE " (r (:pattern e)) ")")
-      :between (str "(" (r (:arg e)) (when (:not? e) " NOT") " BETWEEN " (r (:low e))
-                    " AND " (r (:high e)) ")")
-      :in-list (str "(" (r (:arg e)) (when (:not? e) " NOT") " IN ("
-                    (str/join ", " (map r (:items e))) "))")
-      :subquery (case (:kind e)
-                  :scalar "(<subquery>)"
-                  :exists "EXISTS (<subquery>)"
-                  :in (str "(" (r (:arg e)) (when (:not? e) " NOT") " IN (<subquery>))"))
-      (str (:node e)))))
+  (let [sb (StringBuilder.)]
+    (write-sql sb e)
+    (.toString sb)))
 
 (defn aggregate->sql [{f :fn distinct? :distinct? arg :arg}]
   (if (= f :count-star)

@@ -206,8 +206,10 @@
                  "MAX" {:fn :max :arg arg :type at})
           spec (assoc spec :distinct? (boolean (and (:distinct? e) (not (:star? e)))))
           aggs (:aggs cx)
-          idx (or (first (keep-indexed (fn [i a] (when (= a spec) i)) @aggs))
-                  (do (vswap! aggs conj spec) (dec (count @aggs))))]
+          index (:agg-index (:memo cx))
+          idx (or (get @index spec)
+                  (do (vswap! aggs conj spec)
+                      (let [i (dec (count @aggs))] (vswap! index assoc spec i) i)))]
       (b/column-ref (+ (count (:group-keys cx)) idx) (:type spec) (str "agg" idx)))))
 
 (defn post-agg-context
@@ -218,10 +220,11 @@
   Every node of such an expression is matched against the GROUP BY keys,
   which binds it as a plain expression. The memo tables (keyed by AST node
   identity) keep each node's plain binding and AST properties, so matching
-  costs time linear in the size of the expression, not quadratic."
+  costs time linear in the size of the expression, not quadratic. Equal
+  aggregate calls share one aggregate, found through a hash index."
   [base aggs group-keys]
   (assoc base :mode :post-agg :aggs aggs :group-keys group-keys
-         :memo {:plain (IdentityHashMap.) :flags (IdentityHashMap.)}))
+         :memo {:plain (IdentityHashMap.) :flags (IdentityHashMap.) :agg-index (volatile! {})}))
 
 (defn- ast-flags
   "{:aggregate? :subquery?} of AST expression e (ast/contains-aggregate?,
