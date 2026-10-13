@@ -67,16 +67,28 @@ class _Unregistered(Exception):
     pass
 
 
+# objects pickled between two timeout checks (plans with large expressions
+# take long to pickle)
+_PICKLE_CHECK_INTERVAL = 4096
+
+
 class _PlanPickler(pickle.Pickler):
     """Pickles plan fragments, sending registered tables and indexes by id
-    and recording the shared objects the workers do not have."""
+    and recording the shared objects the workers do not have. ``check``
+    (timeout / cancellation) runs every _PICKLE_CHECK_INTERVAL objects."""
 
-    def __init__(self, file: io.BytesIO, registry: dict[int, Any]):
+    def __init__(self, file: io.BytesIO, registry: dict[int, Any], check: Callable[[], None]):
         super().__init__(file, protocol=pickle.HIGHEST_PROTOCOL)
         self.registry = registry
         self.missing: list[Any] = []
+        self.check = check
+        self._countdown = _PICKLE_CHECK_INTERVAL
 
     def persistent_id(self, obj: Any) -> Any:
+        self._countdown -= 1
+        if not self._countdown:
+            self._countdown = _PICKLE_CHECK_INTERVAL
+            self.check()
         if isinstance(obj, _SHARED_TYPES):
             if self.registry.get(id(obj)) is not obj:
                 self.missing.append(obj)
@@ -302,7 +314,7 @@ class WorkerPool:
         message = (gather, task, prepare, _worker_state(ctx, ctx.subplans))
         for attempt in range(2):
             buffer = io.BytesIO()
-            pickler = _PlanPickler(buffer, self._registry)
+            pickler = _PlanPickler(buffer, self._registry, ctx.check)
             try:
                 pickler.dump(message)
             except (pickle.PicklingError, TypeError, AttributeError, RecursionError):

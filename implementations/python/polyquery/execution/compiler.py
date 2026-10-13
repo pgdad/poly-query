@@ -195,26 +195,99 @@ def _not3(v: Any) -> Any:
     return None if v is None else not v
 
 
-def like_regex(pattern: str) -> re.Pattern[str]:
-    """Translates a LIKE pattern (``%``, ``_``; no escape character) to a regex."""
-    parts = []
-    for c in pattern:
-        if c == "%":
-            parts.append(".*")
-        elif c == "_":
-            parts.append(".")
-        else:
-            parts.append(re.escape(c))
-    return re.compile("".join(parts), re.DOTALL)
+def like_matcher(pattern: str) -> Callable[[str], bool]:
+    """A matcher for a LIKE pattern (``%``, ``_``; no escape character).
+
+    The pattern is split at ``%`` into segments of fixed length: the first
+    must match at the start, the last at the end, and the others are found
+    leftmost-first in between (which is exact, as each has a fixed length).
+    A single regex ``.*a.*b.*`` would backtrack and take quadratic time on
+    long values and patterns (a 1 MiB pattern took minutes)."""
+    segments = pattern.split("%")
+    if len(segments) == 1:
+        exact = _segment(pattern)
+        size = len(pattern)
+        return lambda v: len(v) == size and exact.at(v, 0)
+    first, last = _segment(segments[0]), _segment(segments[-1])
+    middle = [_segment(s) for s in segments[1:-1] if s]
+    fixed = first.size + last.size
+
+    def match(v: str) -> bool:
+        end = len(v) - last.size
+        if end < first.size or not first.at(v, 0) or not last.at(v, end):
+            return False
+        pos = first.size
+        for seg in middle:
+            found = seg.find(v, pos, end)
+            if found < 0:
+                return False
+            pos = found + seg.size
+        return True
+
+    if not middle and fixed == 0:
+        return lambda v: True  # '%', '%%', …
+    return match
+
+
+class _segment:
+    """A ``%``-free piece of a LIKE pattern; ``_`` matches any character."""
+
+    __slots__ = ("text", "size", "regex")
+
+    def __init__(self, text: str):
+        self.text = text
+        self.size = len(text)
+        self.regex = None
+        if "_" in text:
+            self.regex = re.compile(".".join(re.escape(part) for part in text.split("_")), re.DOTALL)
+
+    def at(self, v: str, pos: int) -> bool:
+        if self.regex is None:
+            return v.startswith(self.text, pos)
+        return self.regex.match(v, pos) is not None
+
+    def find(self, v: str, start: int, end: int) -> int:
+        """Leftmost position ≥ start where the segment fits before ``end``."""
+        if self.regex is None:
+            return v.find(self.text, start, end)
+        m = self.regex.search(v, start, end)
+        return -1 if m is None else m.start()
+
+
+# A large expression takes long to compile and to evaluate for one row:
+# every CHECK_INTERVAL-th compiled node checks the timeout / cancellation
+# (while compiling, and whenever its closure runs), so that operators keep
+# observing them however large the expressions are (CR-6 §4).
+CHECK_INTERVAL = 1024
+
+
+def checked(fn: Callable[..., Any], check: Callable[[], None]) -> Callable[..., Any]:
+    """``fn`` calling ``check()`` first."""
+
+    def run(*args: Any) -> Any:
+        check()
+        return fn(*args)
+
+    return run
 
 
 class Compiler:
     def __init__(self, ctx: ExecutionContext, layout: Layout):
         self.ctx = ctx
         self.layout = layout
+        # countdown to the next checked node (None: nothing to check)
+        self._countdown = CHECK_INTERVAL if ctx.cancel_event is not None or ctx.deadline is not None else None
 
     def compile(self, expr: b.Expr) -> RowFn:
-        return getattr(self, "_c_" + type(expr).__name__)(expr)
+        if self._countdown is None:
+            return getattr(self, "_c_" + type(expr).__name__)(expr)
+        self._countdown -= 1
+        check = not self._countdown
+        if check:
+            self._countdown = CHECK_INTERVAL
+            self.ctx.check()
+        fn = getattr(self, "_c_" + type(expr).__name__)(expr)
+        return checked(fn, self.ctx.check) if check else fn
 
     def _c_Literal(self, e: b.Literal) -> RowFn:
         value = e.value
@@ -318,17 +391,17 @@ class Compiler:
         if isinstance(e.pattern, b.Literal):
             if e.pattern.value is None:
                 return lambda row: None
-            match = like_regex(e.pattern.value).fullmatch
+            match = like_matcher(e.pattern.value)
 
             def like_const(row: tuple) -> Any:
                 v = operand(row)
                 if v is None:
                     return None
-                return (match(v) is None) if negated else (match(v) is not None)
+                return not match(v) if negated else match(v)
 
             return like_const
         pattern = self.compile(e.pattern)
-        cache: dict[str, re.Pattern[str]] = {}
+        cache: dict[str, Callable[[str], bool]] = {}
 
         def like(row: tuple) -> Any:
             v = operand(row)
@@ -337,12 +410,12 @@ class Compiler:
             p = pattern(row)
             if p is None:
                 return None
-            regex = cache.get(p)
-            if regex is None:
+            match = cache.get(p)
+            if match is None:
                 if len(cache) > 1024:
                     cache.clear()
-                regex = cache[p] = like_regex(p)
-            return (regex.fullmatch(v) is None) if negated else (regex.fullmatch(v) is not None)
+                match = cache[p] = like_matcher(p)
+            return not match(v) if negated else match(v)
 
         return like
 

@@ -2,33 +2,60 @@
 
 from __future__ import annotations
 
-from .. import errors
+from collections import deque
+
+from .. import errors, values
+from ..limits import Check, StatementMeter, check_text_length, no_check
 from . import ast
-from .lexer import FUTURE_KEYWORDS, Token, TokenKind, tokenize
+from .lexer import FUTURE_KEYWORDS, Lexer, Token, TokenKind
 
 _COMPARISON_OPS = ("=", "<>", "!=", "<", "<=", ">", ">=")
+# tokens that are operands (CR-6 §1): literals and column references
+_OPERAND_KINDS = (TokenKind.NUMBER, TokenKind.STRING, TokenKind.IDENT)
+_LITERAL_KEYWORDS = ("TRUE", "FALSE", "NULL", "DATE", "TIMESTAMP")
+_PREDICATES = ("IS", "BETWEEN", "IN", "LIKE", "NOT")
 
 
 class Parser:
-    def __init__(self, text: str):
-        self.tokens = tokenize(text)
-        self.i = 0
+    """Parses one statement, measuring it against the size limits of CR-6
+    (``meter``): beyond them it fails with RESOURCE_LIMIT as soon as the
+    limit is reached. Tokens are lexed on demand; ``check`` is the deadline
+    check of the statement."""
+
+    def __init__(self, text: str, check: Check = no_check):
+        self.check = check
+        self.meter = StatementMeter()
+        self._stream = Lexer(text, check).tokens()
+        self._buffer: deque[Token] = deque()
+        self._fill(1)
 
     # ------------------------------------------------------------ helpers
 
+    def _fill(self, count: int) -> None:
+        buffer = self._buffer
+        while len(buffer) < count and not (buffer and buffer[-1].kind is TokenKind.EOF):
+            buffer.append(next(self._stream))
+
     @property
     def tok(self) -> Token:
-        return self.tokens[self.i]
+        return self._buffer[0]
 
     def peek(self, offset: int = 1) -> Token:
-        j = min(self.i + offset, len(self.tokens) - 1)
-        return self.tokens[j]
+        self._fill(offset + 1)
+        return self._buffer[min(offset, len(self._buffer) - 1)]
 
     def advance(self) -> Token:
-        t = self.tokens[self.i]
+        t = self._buffer[0]
         if t.kind is not TokenKind.EOF:
-            self.i += 1
+            self._buffer.popleft()
+            self._fill(1)
         return t
+
+    def _lex_rest(self) -> None:
+        """Lexes the remaining text (lexical errors are reported before
+        UNSUPPORTED, as when the whole statement was lexed up front)."""
+        for _ in self._stream:
+            pass
 
     def error(self, message: str, tok: Token | None = None) -> errors.PolyQueryError:
         tok = tok or self.tok
@@ -39,6 +66,7 @@ class Parser:
         )
 
     def unsupported(self, tok: Token) -> errors.PolyQueryError:
+        self._lex_rest()
         return errors.unsupported(f"{tok.value} is not supported", line=tok.line, column=tok.column)
 
     def accept_keyword(self, *words: str) -> Token | None:
@@ -165,7 +193,9 @@ class Parser:
             self.expect_op(")")
         self.expect_keyword("AS")
         self.expect_op("(")
+        self.meter.enter()
         query = self.parse_query()
+        self.meter.leave()
         self.expect_op(")")
         return ast.CommonTableExpr(self.pos(start), name, columns, query)
 
@@ -178,7 +208,8 @@ class Parser:
         while self.tok.is_keyword("UNION"):
             if not self.peek().is_keyword("ALL"):
                 raise self.unsupported(self.tok)
-            self.i += 2
+            self.advance()
+            self.advance()
             if not self.tok.is_keyword("SELECT"):
                 raise self.error("expected SELECT after UNION ALL")
             branches.append(self.parse_select_core())
@@ -211,13 +242,17 @@ class Parser:
     def parse_select_item(self) -> ast.SelectItem:
         start = self.tok
         if self.accept_op("*"):
+            self.meter.operand()
             return ast.SelectItem(self.pos(start), None, is_star=True)
         if (
             start.kind is TokenKind.IDENT
             and self.peek().is_op(".")
             and self.peek(2).is_op("*")
         ):
-            self.i += 3
+            self.meter.operand()
+            self.advance()
+            self.advance()
+            self.advance()
             return ast.SelectItem(self.pos(start), None, star_qualifier=start.value, is_star=True)
         expr = self.parse_expr()
         alias = None
@@ -258,16 +293,20 @@ class Parser:
     def parse_table_ref(self) -> ast.FromItem:
         start = self.tok
         if self.accept_op("("):
+            self.meter.enter()  # a derived table or a parenthesized join
             if self.tok.is_keyword("SELECT", "WITH"):
                 query = self.parse_query()
                 self.expect_op(")")
+                self.meter.leave()
                 self.accept_keyword("AS")
                 alias = self.expect_ident("derived table alias")
                 return ast.DerivedTable(self.pos(start), query, alias)
             item = self.parse_from_item()
             self.expect_op(")")
+            self.meter.leave()
             return item
         name = self.expect_ident("table name")
+        self.meter.operand()  # a leaf of the FROM tree (see parse_function_call)
         alias = None
         if self.accept_keyword("AS"):
             alias = self.expect_alias("table alias")
@@ -298,27 +337,46 @@ class Parser:
 
     def parse_or(self) -> ast.Expr:
         left = self.parse_and()
+        if not self.tok.is_keyword("OR"):
+            return left
+        self.meter.enter()  # a chain of one operator is one level
         while self.tok.is_keyword("OR"):
             tok = self.advance()
             left = ast.BinaryOp(self.pos(tok), "OR", left, self.parse_and())
+        self.meter.leave()
         return left
 
     def parse_and(self) -> ast.Expr:
         left = self.parse_not()
+        if not self.tok.is_keyword("AND"):
+            return left
+        self.meter.enter()  # a chain of one operator is one level
         while self.tok.is_keyword("AND"):
             tok = self.advance()
             left = ast.BinaryOp(self.pos(tok), "AND", left, self.parse_not())
+        self.meter.leave()
         return left
 
     def parse_not(self) -> ast.Expr:
         if self.tok.is_keyword("NOT"):
             tok = self.advance()
-            return ast.UnaryOp(self.pos(tok), "NOT", self.parse_not())
+            self.meter.enter()
+            operand = self.parse_not()
+            self.meter.leave()
+            return ast.UnaryOp(self.pos(tok), "NOT", operand)
         return self.parse_predicate()
 
     def parse_predicate(self) -> ast.Expr:
         left = self.parse_concat()
         tok = self.tok
+        if not ((tok.kind is TokenKind.OP and tok.value in _COMPARISON_OPS) or tok.is_keyword(*_PREDICATES)):
+            return left
+        self.meter.enter()  # a comparison, IS, BETWEEN, IN or LIKE
+        expr = self._parse_predicate_rest(left, tok)
+        self.meter.leave()
+        return expr
+
+    def _parse_predicate_rest(self, left: ast.Expr, tok: Token) -> ast.Expr:
         pos = self.pos(tok)
         if tok.kind is TokenKind.OP and tok.value in _COMPARISON_OPS:
             self.advance()
@@ -354,23 +412,35 @@ class Parser:
 
     def parse_concat(self) -> ast.Expr:
         left = self.parse_additive()
+        if not self.tok.is_op("||"):
+            return left
+        self.meter.enter()  # a chain of one operator is one level
         while self.tok.is_op("||"):
             tok = self.advance()
             left = ast.BinaryOp(self.pos(tok), "||", left, self.parse_additive())
+        self.meter.leave()
         return left
 
     def parse_additive(self) -> ast.Expr:
         left = self.parse_multiplicative()
+        if not self.tok.is_op("+", "-"):
+            return left
+        self.meter.enter()  # a chain of one operator is one level
         while self.tok.is_op("+", "-"):
             tok = self.advance()
             left = ast.BinaryOp(self.pos(tok), tok.value, left, self.parse_multiplicative())
+        self.meter.leave()
         return left
 
     def parse_multiplicative(self) -> ast.Expr:
         left = self.parse_unary()
+        if not self.tok.is_op("*", "/", "%"):
+            return left
+        self.meter.enter()  # a chain of one operator is one level
         while self.tok.is_op("*", "/", "%"):
             tok = self.advance()
             left = ast.BinaryOp(self.pos(tok), tok.value, left, self.parse_unary())
+        self.meter.leave()
         return left
 
     def parse_unary(self) -> ast.Expr:
@@ -380,12 +450,33 @@ class Parser:
             if tok.value == "-" and self.tok.kind is TokenKind.NUMBER:
                 # fold the sign into the literal so that INT64_MIN is accepted
                 num = self.advance()
+                self.meter.operand()
                 return ast.NumberLit(self.pos(tok), "-" + num.value)
-            return ast.UnaryOp(self.pos(tok), tok.value, self.parse_unary())
+            self.meter.enter()
+            operand = self.parse_unary()
+            self.meter.leave()
+            return ast.UnaryOp(self.pos(tok), tok.value, operand)
         return self.parse_primary()
 
     def parse_primary(self) -> ast.Expr:
         tok = self.tok
+        kind = tok.kind
+        if kind is TokenKind.IDENT and not tok.quoted and self.peek().is_op("("):
+            nested = True  # a function call
+        elif kind in _OPERAND_KINDS or tok.is_keyword(*_LITERAL_KEYWORDS):
+            self.meter.operand()
+            nested = False
+        else:
+            # a parenthesized expression or subquery, CAST, CASE, EXISTS
+            nested = kind is TokenKind.OP or tok.is_keyword("CAST", "CASE", "EXISTS")
+        if nested:
+            self.meter.enter()
+            expr = self._parse_primary(tok)
+            self.meter.leave()
+            return expr
+        return self._parse_primary(tok)
+
+    def _parse_primary(self, tok: Token) -> ast.Expr:
         pos = self.pos(tok)
         kind = tok.kind
         if kind is TokenKind.NUMBER:
@@ -442,10 +533,14 @@ class Parser:
         self.expect_op("(")
         call = ast.FunctionCall(pos, name_tok.value, [])
         if self.accept_op("*"):
+            self.meter.operand()
             call.star = True
             self.expect_op(")")
             return call
         if self.accept_op(")"):
+            # counted like an operand: every leaf counts, so that the size
+            # of a tree (e.g. a chain ``x + f() + f() …``) stays bounded
+            self.meter.operand()
             return call
         if self.accept_keyword("DISTINCT"):
             call.distinct = True
@@ -481,7 +576,7 @@ class Parser:
         if tok.kind is not TokenKind.NUMBER or not tok.value.isdigit():
             raise self.error("expected integer type parameter")
         self.advance()
-        return int(tok.value)
+        return values.int_from_digits(tok.value)  # (a huge value is out of range)
 
     def parse_case(self) -> ast.Case:
         start = self.expect_keyword("CASE")
@@ -502,9 +597,12 @@ class Parser:
         return ast.Case(self.pos(start), operand, whens, else_)
 
 
-def parse(text: str) -> ast.Statement:
-    """Parses one SQL statement (optionally followed by a single ';')."""
+def parse(text: str, check: Check = no_check) -> ast.Statement:
+    """Parses one SQL statement (optionally followed by a single ';').
+    Statements beyond the size limits (``polyquery.limits``) fail with
+    RESOURCE_LIMIT; ``check`` raises TIMEOUT / CANCELLED."""
+    check_text_length(text)
     try:
-        return Parser(text).parse_statement()
+        return Parser(text, check).parse_statement()
     except RecursionError:
-        raise errors.parse_error("statement is too deeply nested") from None
+        raise errors.resource_limit("statement is too deeply nested", measure="nesting_depth") from None

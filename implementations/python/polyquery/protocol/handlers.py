@@ -60,6 +60,7 @@ CAPABILITIES = [
     "native.kernels",
     "change.union_all",
     "change.decimal38",
+    "change.expression_limits",
 ]
 
 
@@ -253,6 +254,8 @@ class RequestHandler:
     def __init__(self, engine: Engine):
         self.engine = engine
         self.config = engine.config
+        # per thread: the exception of the last failed request (see handle)
+        self._failed = threading.local()
 
     def handle(self, request: Any, control: QueryControl | None = None) -> dict[str, Any]:
         """Handles one decoded request; never raises."""
@@ -275,7 +278,18 @@ class RequestHandler:
                 response["stats"]["elapsed_us"] = int((time.perf_counter() - started) * 1e6)
             return response
         except Exception as e:  # noqa: BLE001 - must never crash the session
+            # The traceback holds everything the failed statement built
+            # (parse tree, plans, compiled closures): for a large statement,
+            # freeing it takes long enough to delay the answer (a TIMEOUT is
+            # due within 1 s of expiry). It is kept until the transport has
+            # sent the response and calls release_failed().
+            self._failed.error = e
             return {"id": req_id, "ok": False, "error": error_of(e).to_json()}
+
+    def release_failed(self) -> None:
+        """Frees what the last failed request of this thread left behind;
+        transports call it after sending the response."""
+        self._failed.error = None
 
     # ---------------------------------------------------------------- ops
 
@@ -380,6 +394,10 @@ class RequestHandler:
         if control is not None:
             options.cancel_event = control.cancel_event
             options.deadline = control.deadline
+        elif options.timeout_ms:
+            # the timeout counts from receipt of the request and covers
+            # parsing, binding, planning and execution (CR-6 §4)
+            options.deadline = time.monotonic() + options.timeout_ms / 1000.0
         count_only = self._validate_query_options(raw)
         options.optimize = _optional_bool(raw, "optimize", True)
         options.use_indexes = _optional_bool(raw, "use_indexes", True)

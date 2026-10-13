@@ -23,6 +23,8 @@ import enum
 import re
 from dataclasses import dataclass
 
+from .values import int_from_digits
+
 
 class TypeKind(enum.Enum):
     NULL = "NULL"
@@ -155,7 +157,8 @@ def parse_type(text: str) -> DataType:
     m = _TYPE_TEXT_RE.fullmatch(text)
     if not m:
         raise InvalidTypeError(f"invalid type '{text}'")
-    params = [int(g) for g in m.group(2, 3) if g is not None]
+    # (huge digit strings map to an out-of-range value instead of failing)
+    params = [int_from_digits(g) for g in m.group(2, 3) if g is not None]
     return resolve_type(m.group(1), params)
 
 

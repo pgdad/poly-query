@@ -13,11 +13,15 @@ from typing import ClassVar
 
 from ...analysis import bound as b
 from ...datatypes import BOOLEAN
+from ...limits import Check, no_check
 from .. import logical as lp
 
 
 class Rule(ABC):
     name: ClassVar[str]
+    # the statement's deadline check (set by the optimizer); rules whose work
+    # grows faster than linearly with the plan call it at every node
+    check: Check = staticmethod(no_check)
 
     @abstractmethod
     def apply(self, node: lp.LogicalNode) -> lp.LogicalNode:
@@ -49,10 +53,12 @@ class RewriteExpressions(Rule):
 
     name = "rewrite_expressions"
 
-    def __init__(self, rules: list[ExpressionRule]):
+    def __init__(self, rules: list[ExpressionRule], check: Check = no_check):
         self.rules = rules
+        self.check = check  # at every expression node
 
     def rewrite(self, expr: b.Expr) -> b.Expr:
+        self.check()
         expr = b.map_children(expr, self.rewrite)
         for rule in self.rules:
             expr = rule.rewrite(expr)
@@ -61,10 +67,12 @@ class RewriteExpressions(Rule):
     def predicate(self, expr: b.Expr) -> b.Expr | None:
         """A rewritten filter / join predicate (None: always TRUE)."""
         parts: list[b.Expr] = []
+        seen: set[b.Expr] = set()  # (hashing: long AND chains have many conjuncts)
         for p in b.conjuncts(self.rewrite(expr)):
             if isinstance(p, b.Literal) and p.value is True:
                 continue
-            if p not in parts:
+            if p not in seen:
+                seen.add(p)
                 parts.append(p)
         return b.conjunction(parts)
 

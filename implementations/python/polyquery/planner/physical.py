@@ -15,6 +15,7 @@ from dataclasses import dataclass, field
 from typing import Any, Callable, Iterator
 
 from ..analysis import bound as b
+from ..limits import no_check
 from ..native import NativeKernels
 from ..storage.catalog import Column, Table
 from ..storage.indexes import Index
@@ -503,6 +504,8 @@ class PlanOptions:
     # (None where the kernels do not apply)
     kernels: NativeKernels | None = None
     kernel_plan: Callable[[PhysicalNode], object | None] | None = None
+    # the statement's deadline / cancellation check
+    check: Callable[[], None] = no_check
 
 
 @dataclass(eq=False)
@@ -568,6 +571,7 @@ class PhysicalPlanner:
         return PhysicalPlan(root, logical.columns, self.subplans, mode, kernels)
 
     def plan(self, node: lp.LogicalNode) -> PhysicalNode:
+        self.options.check()
         result = self._plan(node)
         for expr in result.expressions():
             for sq in b.subqueries(expr):
@@ -758,33 +762,70 @@ class PhysicalPlanner:
         the fewest rows, preferring inputs connected by a join condition
         (cross products come last). Each conjunct is evaluated by the first
         join that sees all the relations it references."""
+        check = self.options.check
         chain_rels = set().union(*(leaf.rels() for leaf in leaves))
         planned = [(self.plan(leaf), leaf.rels()) for leaf in leaves]
-        pending = list(conditions)
         first = min(range(len(planned)), key=lambda i: planned[i][0].estimated_rows)
         current, current_rels = planned[first]
+        # A conjunct is usable for joining input i once the relations it
+        # references and the current tree lacks (``missing``) all belong to
+        # input i: it is then listed in ``usable_with[i]`` (indexes into
+        # ``conditions``; inputs have disjoint relations). This keeps each
+        # step linear in the number of inputs (chains may be long).
+        refs = [_rels_within(p, chain_rels) for p in conditions]
+        missing = [r - current_rels for r in refs]
+        input_of = {rel: i for i, (_, rels) in enumerate(planned) for rel in rels}
+        by_rel: dict[int, list[int]] = {}
+        for k, r in enumerate(missing):
+            for rel in r:
+                by_rel.setdefault(rel, []).append(k)
+        usable_with: dict[int, list[int]] = {}
+        listed: set[int] = set()
+
+        def list_if_usable(k: int) -> None:
+            owners = {input_of[rel] for rel in missing[k]}
+            if len(owners) == 1 and k not in listed:
+                listed.add(k)
+                usable_with.setdefault(owners.pop(), []).append(k)
+
+        for k in range(len(conditions)):
+            if missing[k]:
+                list_if_usable(k)
+        # usable whatever is joined next: within the first input, or
+        # referencing no relation of the chain
+        always = [k for k in range(len(conditions)) if not missing[k]]
+        consumed: set[int] = set()
         remaining = [i for i in range(len(planned)) if i != first]
         while remaining:
+            check()
             best = None
             for i in remaining:
                 node, rels = planned[i]
-                usable = [p for p in pending if _rels_within(p, chain_rels) <= current_rels | rels]
-                connected = any(
-                    _rels_within(p, chain_rels) & rels and _rels_within(p, chain_rels) & current_rels
-                    for p in usable
-                )
+                own = [k for k in usable_with.get(i, ()) if k not in consumed]
+                usable_ks = sorted(always + own) if always else own
+                usable = [conditions[k] for k in usable_ks]
+                # connected: a conjunct also references the current tree
+                connected = any(len(missing[k]) < len(refs[k]) for k in own)
                 rows = self._join_rows("INNER", conjunction(usable), current, node)
                 rank = (not connected, rows)
                 if best is None or rank < best[0]:
-                    best = (rank, i, usable)
+                    best = (rank, i, usable_ks)
             assert best is not None
-            _, i, usable = best
+            _, i, usable_ks = best
             node, rels = planned[i]
-            pending = [p for p in pending if not any(p is u for u in usable)]
+            usable = [conditions[k] for k in usable_ks]
+            consumed.update(usable_ks)
+            always = []
             kind = "INNER" if usable else "CROSS"
             current = self._make_join(kind, conjunction(usable), current, node, current_rels, rels)
             current_rels = current_rels | rels
             remaining.remove(i)
+            for rel in rels:
+                for k in by_rel.get(rel, ()):
+                    if k not in consumed:
+                        missing[k].discard(rel)
+                        list_if_usable(k)
+        pending = [p for k, p in enumerate(conditions) if k not in consumed]
         if pending:  # conjuncts not referencing any relation of the chain
             current = self._filter(current, conjunction(pending))  # type: ignore[arg-type]
         return current
@@ -832,12 +873,20 @@ class PhysicalPlanner:
 
 
 def _inner_join_chain(node: lp.LogicalNode) -> tuple[list[lp.LogicalNode], list[b.Expr]]:
-    """The inputs and conjuncts of a maximal tree of inner/cross joins."""
-    if isinstance(node, lp.Join) and node.kind in ("INNER", "CROSS"):
-        left, lc = _inner_join_chain(node.left)
-        right, rc = _inner_join_chain(node.right)
-        return left + right, lc + rc + conjuncts(node.condition)
-    return [node], []
+    """The inputs (left to right) and conjuncts (inputs' before their join's)
+    of a maximal tree of inner/cross joins (iteratively: chains are deep)."""
+    leaves: list[lp.LogicalNode] = []
+    conditions: list[b.Expr] = []
+    stack: list[tuple[lp.LogicalNode, bool]] = [(node, False)]
+    while stack:
+        n, inputs_done = stack.pop()
+        if not (isinstance(n, lp.Join) and n.kind in ("INNER", "CROSS")):
+            leaves.append(n)
+        elif inputs_done:
+            conditions += conjuncts(n.condition)
+        else:
+            stack += [(n, True), (n.right, False), (n.left, False)]
+    return leaves, conditions
 
 
 def _rels_within(expr: b.Expr, rels: set[int]) -> set[int]:
@@ -963,15 +1012,32 @@ def _parallelize_inputs(node: PhysicalNode, partitions: int, min_rows: float) ->
 
 
 def _walk(node: PhysicalNode, subplans: dict[int, PhysicalNode]) -> Iterator[PhysicalNode]:
-    """A plan tree's nodes, including the plans of the subqueries its
-    expressions use."""
-    yield node
-    for expr in node.expressions():
-        for sq in b.subqueries(expr):
-            if sq.id in subplans:
-                yield from _walk(subplans[sq.id], subplans)
-    for child in node.inputs():
-        yield from _walk(child, subplans)
+    """A plan tree's nodes in pre-order, including the plans of the
+    subqueries its expressions use (iteratively: plans of nested subqueries
+    are deep)."""
+    stack = [node]
+    while stack:
+        n = stack.pop()
+        yield n
+        nested = [subplans[sq.id] for expr in n.expressions() for sq in b.subqueries(expr) if sq.id in subplans]
+        stack += reversed([*nested, *n.inputs()])
+
+
+def _subtree_sizes(trees: list[PhysicalNode]) -> dict[int, int]:
+    """The node count of every subtree (by id() of its root), computed in
+    one post-order pass."""
+    sizes: dict[int, int] = {}
+    for tree in trees:
+        stack = [tree]
+        while stack:
+            n = stack[-1]
+            pending = [c for c in n.inputs() if id(c) not in sizes]
+            if pending:
+                stack += pending
+                continue
+            stack.pop()
+            sizes[id(n)] = 1 + sum(sizes[id(c)] for c in n.inputs())
+    return sizes
 
 
 def _self_contained(node: PhysicalNode) -> bool:
@@ -1003,18 +1069,15 @@ def _signature(root: PhysicalNode) -> str:
         for key in n.layout:
             rels.setdefault(key[0], len(rels))
 
-    def canonical_expr(e: b.Expr) -> b.Expr:
-        if isinstance(e, b.ColumnRef):
-            return dataclasses.replace(e, rel=rels[e.rel])
-        return b.map_children(e, canonical_expr)
-
     def canonical(value: Any) -> Any:
         if isinstance(value, PhysicalNode):
             return None  # the subtree's structure: the walk order and input counts
         if isinstance(value, (Table, Index)):
             return ["object", id(value)]
         if isinstance(value, b.Expr):
-            return repr(canonical_expr(value))
+            out: list[str] = []
+            _expr_signature(value, rels, out)
+            return "".join(out)
         if isinstance(value, (list, tuple)):
             return [canonical(v) for v in value]
         return repr(value)
@@ -1031,14 +1094,57 @@ def _signature(root: PhysicalNode) -> str:
     return json.dumps(parts)
 
 
+def _expr_signature(e: b.Expr, rels: dict[int, int], out: list[str]) -> None:
+    """Appends the structure of ``e`` to ``out``: node types, operators,
+    literal values and types, with the relation ids of column keys
+    renumbered by ``rels``. Collected in one list (rendering each subtree
+    as a string would copy it again at every level of a deep tree)."""
+    out.append(type(e).__name__ + "(")
+    for f in dataclasses.fields(e):
+        value = getattr(e, f.name)
+        out.append(f.name + "=")
+        if isinstance(e, b.ColumnRef) and f.name == "rel":
+            out.append(repr(rels[value]))
+        elif isinstance(value, b.Expr):
+            _expr_signature(value, rels, out)
+        elif isinstance(value, tuple) and value and isinstance(value[0], (b.Expr, tuple)):
+            out.append("(")
+            for item in value:
+                if isinstance(item, tuple):  # CASE branches
+                    out.append("(")
+                    for part in item:
+                        _expr_signature(part, rels, out)
+                        out.append(",")
+                    out.append(")")
+                else:
+                    _expr_signature(item, rels, out)
+                out.append(",")
+            out.append(")")
+        else:
+            out.append(repr(value))
+        out.append(",")
+    out.append(")")
+
+
 def _share_common_subqueries(trees: list[PhysicalNode], subplans: dict[int, PhysicalNode]) -> None:
     """Marks the SubqueryScans of a statement that compute identical,
     self-contained inputs (e.g. the references to one CTE), so that their
     result is computed once."""
-    groups: dict[str, list[SubqueryScan]] = {}
+    # Only inputs of equal size can be identical: the (costly) signatures
+    # are computed for those alone. Nested scans never have equal sizes,
+    # so deeply nested derived tables cost linear time.
+    sizes = _subtree_sizes(trees)
+    by_size: dict[int, list[SubqueryScan]] = {}
     for tree in trees:
         for node in _walk(tree, {}):
-            if isinstance(node, SubqueryScan) and _self_contained(node.input):
+            if isinstance(node, SubqueryScan):
+                by_size.setdefault(sizes[id(node.input)], []).append(node)
+    groups: dict[str, list[SubqueryScan]] = {}
+    for candidates in by_size.values():
+        if len(candidates) < 2:
+            continue
+        for node in candidates:
+            if _self_contained(node.input):
                 groups.setdefault(_signature(node.input), []).append(node)
     for signature, scans in groups.items():
         if len(scans) > 1:

@@ -14,6 +14,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass, field
 
 from .. import errors
+from ..limits import configure_interpreter
 from ..protocol.handlers import RequestHandler
 from ..protocol.serialize import dumps
 from .http import PolyQueryHTTPServer
@@ -22,10 +23,6 @@ from .queries import QueryManager
 from .watcher import DisconnectWatcher
 
 log = logging.getLogger("polyquery")
-
-# request threads get the same generous stack as the main thread so that
-# deeply nested statements fail with RESOURCE_LIMIT instead of crashing
-_THREAD_STACK_BYTES = 64 * 1024 * 1024
 
 # after the grace period, how long cancelled queries get to deliver their
 # CANCELLED responses before the process exits
@@ -139,7 +136,8 @@ def run_server(handler: RequestHandler, config: ServerConfig) -> int:
 
     signal.signal(signal.SIGTERM, on_signal)
     signal.signal(signal.SIGINT, on_signal)
-    threading.stack_size(_THREAD_STACK_BYTES)
+    # request threads run deep statements (polyquery.limits)
+    configure_interpreter()
     try:
         server = Server(handler, config)
     except OSError as e:

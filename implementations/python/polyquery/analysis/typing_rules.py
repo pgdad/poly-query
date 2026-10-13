@@ -181,8 +181,10 @@ def union_type(types: list[DataType]) -> DataType | None:
 
 def _common_comparison_type(exprs: list[b.Expr], what: str) -> DataType:
     types = [e.type for e in exprs]
-    for i, t in enumerate(types):
-        for u in types[i + 1 :]:
+    # pairwise over the distinct types (an IN list may have many items)
+    distinct = list(dict.fromkeys(types))
+    for i, t in enumerate(distinct):
+        for u in distinct[i + 1 :]:
             if not comparable(t, u):
                 raise errors.type_error(f"cannot compare {t.name} with {u.name} in {what}")
     result = comparison_type(types)

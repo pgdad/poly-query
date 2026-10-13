@@ -11,6 +11,7 @@ import time
 from typing import Any
 
 from .execution.context import DEFAULT_PARALLEL_MIN_ROWS
+from .limits import configure_interpreter, run_with_large_stack
 from .protocol.handlers import RequestHandler, capabilities_info, version_info
 from .protocol.serialize import dumps
 from .protocol.session import run_exec, run_session
@@ -100,7 +101,7 @@ def _setup_logging(level: str) -> None:
 def main(argv: list[str]) -> int:
     args = build_parser().parse_args(argv)
     _setup_logging(args.log_level)
-    sys.setrecursionlimit(max(sys.getrecursionlimit(), 20000))
+    configure_interpreter()
 
     if args.mode == "version":
         print(dumps(version_info()), flush=True)
@@ -148,7 +149,8 @@ def main(argv: list[str]) -> int:
 
     if args.mode == "session":
         try:
-            run_session(handler, sys.stdin.buffer, sys.stdout.buffer)
+            # deep statements need a larger stack than the main thread's
+            run_with_large_stack(lambda: run_session(handler, sys.stdin.buffer, sys.stdout.buffer))
         except (BrokenPipeError, KeyboardInterrupt):
             return 0
         return 0
@@ -166,5 +168,5 @@ def main(argv: list[str]) -> int:
     except OSError as e:
         print(f"polyquery: cannot read request: {e}", file=sys.stderr)
         return 1
-    run_exec(handler, payload, sys.stdout.buffer)
+    run_with_large_stack(lambda: run_exec(handler, payload, sys.stdout.buffer))
     return 0

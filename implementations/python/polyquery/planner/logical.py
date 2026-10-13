@@ -260,10 +260,13 @@ class LogicalPlan:
 
 
 def walk(node: LogicalNode) -> Iterator[LogicalNode]:
-    """The nodes of a tree, parents before their inputs."""
-    yield node
-    for child in node.inputs():
-        yield from walk(child)
+    """The nodes of a tree, parents before their inputs (iteratively: the
+    plans of nested derived tables are deep)."""
+    stack = [node]
+    while stack:
+        n = stack.pop()
+        yield n
+        stack += reversed(n.inputs())
 
 
 def format_plan(node: LogicalNode, indent: int = 0) -> str:

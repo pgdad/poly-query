@@ -1,5 +1,6 @@
 import http.client
 import json
+import socket
 import threading
 import time
 import unittest
@@ -141,6 +142,20 @@ class ServerTests(unittest.TestCase):
         self.assertEqual(lines[-1], {"type": "end", "row_count": 5000})
         values = [r[0] for line in lines if line["type"] == "rows" for r in line["rows"]]
         self.assertEqual(values, list(range(5000)))
+
+    def test_malformed_chunk_size_is_rejected(self):
+        # chunk-size is 1*HEXDIG: a sign must not be accepted (a negative
+        # size made the server read until the client closed the connection)
+        for size in (b"-5", b"+5", b"0x5", b"1_0", b""):
+            with socket.create_connection(("127.0.0.1", self.server.port), timeout=5) as sock:
+                sock.sendall(
+                    b"PUT /v1/tables/neg?format=csv HTTP/1.1\r\nHost: x\r\n"
+                    b"Transfer-Encoding: chunked\r\n\r\n" + size + b"\r\na\n1\n"
+                )
+                head = sock.recv(64).decode("latin-1")
+            self.assertTrue(head.startswith("HTTP/1.1 400"), (size, head))
+        status, _, body = self.request("GET", "/v1/tables")
+        self.assertEqual((status, json.loads(body)["tables"]), (200, []))
 
     def test_timeout_and_metrics(self):
         status, _, body = self.request(

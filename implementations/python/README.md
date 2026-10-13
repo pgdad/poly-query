@@ -20,7 +20,16 @@ Capabilities reported: `phase1`, `ingest.csv`, `ingest.json`, `ingest.jsonl`,
 through `ctypes` when loaded, see *Native kernels* below), `change.union_all`
 (change request CR-1, `UNION ALL`, see *UNION ALL (CR-1)* below),
 `change.decimal38` (change request CR-2, DECIMAL precision 38 and PQCF v2,
-see *DECIMAL precision 38 (CR-2)* below).
+see *DECIMAL precision 38 (CR-2)* below), `change.expression_limits`
+(change request CR-6, statement size limits and a timeout covering every
+stage, see *Expression size limits (CR-6)* below).
+
+**Statement limits** (CR-6): SQL text 16 MiB (16,777,216 bytes of UTF-8),
+expression nesting depth 4,096, 200,000 operands (literals, column references
+and `*` arguments; also empty argument lists `f()` and table references, so
+that every leaf of the statement counts). Beyond them a statement fails with `RESOURCE_LIMIT`
+naming the measure (`details.measure`: `text_length`, `nesting_depth`,
+`operand_count`). There is no other size limit besides memory and time.
 
 ## Build prerequisites
 
@@ -73,6 +82,7 @@ logical plan → optimizer → physical plan → execution**.
 | Package | Responsibility |
 |---|---|
 | `polyquery/datatypes.py`, `values.py`, `names.py` | SQL types, runtime value representation, exact decimal / date / timestamp helpers, ASCII identifier folding |
+| `polyquery/limits.py` | Statement size limits (CR-6), their measurement, deadline checks of the stages before execution, large-stack threads |
 | `polyquery/native/` | `kernels.py`: `ctypes` binding of the `libpqkernels` C ABI (signatures, ABI check, zero-copy buffer addresses, loading with fallback) |
 | `polyquery/storage/` | `table.py` (immutable `RowTable` / `ColumnTable` with row groups, lazily computed column statistics), `vectors.py` (typed column vectors, null bitmaps, dictionary encoding), `indexes.py` (hash and ordered indexes), `catalog.py` (tables + globally named indexes), `pqcf.py` (PQCF v1 writer with atomic replace, validating reader, lazy memory-mapped decoding) |
 | `polyquery/ingest/` | CSV (stdlib `csv` reader in `QUOTE_NOTNULL` mode to distinguish `""` from empty) and JSON/JSONL ingestion, type inference, explicit-schema conversion, ingestion limits |
@@ -326,6 +336,121 @@ Ingestion needed no change: schemas are parsed by `parse_type` (now up to
 numbers keep their literal text. `spec_version` stays `1.0.0`, which the
 public catalog case expects (CR-2 names `1.2.0-cr2`). Unit tests:
 `tests/test_decimal38.py`.
+
+### Expression size limits (CR-6, `spec/changes/expression-limits.md`)
+
+**Limits.** `polyquery/limits.py` defines them: `MAX_SQL_BYTES` = 16 MiB,
+`MAX_NESTING_DEPTH` = 4,096, `MAX_OPERANDS` = 200,000 (the minimums are 1 MiB,
+1,000 and 25,000). Operands are literals, column references and `*`
+arguments as CR-6 §1 defines them, plus empty argument lists `f()` and table
+references, so that every leaf of a statement counts and no statement within
+the limits can build an unbounded tree (`x + f() + f() …` or
+`FROM t, t, …` would otherwise contain no operand). The parser measures a statement while it parses it
+(`StatementMeter`) and fails with `RESOURCE_LIMIT` as soon as a limit is
+passed, e.g. `expression nesting depth exceeds 4096` with
+`details: {"measure": "nesting_depth"}`, so a statement far beyond a limit
+costs no more than reading up to the limit (a 100,000-deep statement fails in
+~0.1 s). The text length is checked before lexing. Depth is counted as CR-6
+§1 defines it: one level for each parenthesized expression, unary sign,
+`NOT`, function call, `CAST`, `CASE`, `IN (…)`, `BETWEEN`, `LIKE`,
+comparison / `IS`, subquery, derived table / parenthesized join and CTE
+body, and **one** level for a whole chain of one binary operator. (The left
+operand of a chain or predicate is parsed before the operator is seen, so it
+is counted one level shallower than the spec does; only the limit itself can
+be affected by that.)
+
+**Deep trees.** The parser builds long chains iteratively, but the trees
+are left-deep: a 200,000-operand sum is a 200,000-level tree that the binder,
+optimizer and compilers process recursively. Instead of rewriting every
+recursive pass, the engine makes deep recursion safe:
+
+* in CPython 3.14 Python-to-Python calls do not use the C stack, so the
+  recursion limit is simply raised to 2,000,000 (it only bounds frame
+  memory). What recursed in C once per tree level — dataclass `==` and
+  `hash` of bound expressions — is iterative (`bound._expr_eq`,
+  `bound._expr_hash`, the hash cached per node), so the C stack a statement
+  needs grows with its nesting depth, not with its operand count: the
+  deepest statements within the limits run even on an 8 MiB stack;
+* still, every thread that runs statements gets a 256 MiB stack (virtual
+  address space; only what is used is committed) as headroom: `session` and
+  `exec` run their loop on such a thread (`limits.run_with_large_stack`) and
+  `serve` creates its connection threads with it (`limits.start_thread`
+  falls back to the default stack size where an address-space limit
+  refuses that much). Worker processes are forked from these threads and
+  keep their stack; pickling a plan for the worker pool falls back to
+  forking per query if it ever runs out of stack;
+* CPython 3.14 measures the real C stack of each thread and raises
+  `RecursionError` before it overflows; the protocol layer reports any
+  `RecursionError` as `RESOURCE_LIMIT` (`statement is too deeply nested`),
+  in the main process and in worker processes, so running out of stack can
+  never terminate the process.
+
+**Linear time.** Every pass is linear in the size of the statement (a
+10,000-term `OR`, a 10,000-item `IN` list or 998 nested `ABS` each take
+~0.1–0.4 s end to end, a 200,000-operand sum ~4 s vectorized). The passes
+that were quadratic (or worse) on deep or wide trees were fixed:
+`bound.walk`, `logical.walk` and the physical `_walk` are iterative (a
+recursive generator costs time proportional to the depth per node);
+`is_constant` / `has_side_effects` / `may_fail` / `contains_subquery` and
+`column_keys` are computed once per node, bottom-up, and cached on the
+(immutable) node; `map_children` detects changes by identity instead of
+comparing rebuilt subtrees; duplicate conjuncts are found by hashing; IN-list
+type checking compares the distinct types pairwise, not the items; subquery
+fingerprints are hash-consed ids (`ast.Fingerprints`) instead of nested
+tuples rebuilt for every nesting level; EXPLAIN text and shared-subquery
+signatures are built in one list instead of nested strings; and signatures
+are only computed for subquery scans whose inputs have equal sizes (nested
+derived tables never do); `LIKE` is matched segment by segment between `%`s
+(`compiler.like_matcher`; the backtracking regex took minutes for a 1 MiB
+pattern); bound expressions hash once per node (`bound._expr_hash`, cached
+bottom-up and consistent with `==`), so GROUP BY keys, aggregate calls,
+ORDER BY targets and select-list aliases are found by hashing
+(`binder._SortTargets`, `_Grouping`), as are range variables and their
+columns (`Scope`, `RangeVar.find`). Join ordering keeps, per conjunct, the
+relations the current tree lacks and indexes the conjuncts by the single
+input that would complete them (the greedy choice was cubic in the number of
+joined inputs; the plans it chooses are unchanged).
+
+Work that stays superlinear in something that is not a CR-6 measure checks
+the deadline inside: predicate pushdown and column pruning at every plan
+node (quadratic in the length of a join chain), join ordering at every step.
+A 3,000-table join chain plans and runs in ~12 s; with any timeout the
+answer is `TIMEOUT` within ~0.3 s of expiry.
+
+**Timeout in every stage.** The deadline is set when the request is
+received (session and exec as well as HTTP) and covers lexing, parsing,
+binding, planning and execution (`limits.deadline_check`, passed as
+`check` to the parser, `Binder`, `Optimizer` and `PlanOptions`): the lexer
+checks every 1,024 tokens, the binder and the optimizer's expression pass at
+every node, the physical planner at every operator, plan pickling for the
+worker pool every 4,096 objects, and the expression compilers make every
+1,024th row closure (64th vector function) check the deadline both while
+compiling and whenever it runs, so even a single row whose expression takes
+seconds to evaluate observes the timeout. Two costs that grow with the
+statement were moved out of the way of the answer: the cyclic garbage
+collector stays paused until the response has been written (re-enabling it
+after a large statement triggered a ~0.2 s collection), and the state a
+failed statement leaves behind (held by the exception's traceback) is freed
+after its response is sent (`RequestHandler.release_failed`). Measured on
+200,000-operand statements with timeouts expiring in each stage, `TIMEOUT`
+arrives 0.0–0.4 s after expiry in every mode.
+
+**Modules touched.**
+
+| Layer | Module | Change |
+|---|---|---|
+| Limits | `limits.py` (new) | limits, `StatementMeter`, text length check, deadline checks, large-stack threads and recursion limit |
+| Lexer / parser | `sql/lexer.py`, `sql/parser.py`, `sql/ast.py` | lazy lexing with regex runs and deadline checks; measuring depth and operands; `RecursionError` → `RESOURCE_LIMIT`; `ast.Fingerprints` |
+| Analysis | `analysis/binder.py`, `analysis/bound.py`, `analysis/scope.py`, `analysis/typing_rules.py` | deadline check per node; iterative `walk` / `conjuncts` / `==`, cached bottom-up summaries, column keys and hashes, identity-based `map_children`; hashed GROUP BY / ORDER BY / alias / name lookups; linear IN-list typing |
+| Planner | `planner/pipeline.py`, `optimizer.py`, `rules/base.py`, `rules/predicate_pushdown.py`, `rules/column_pruning.py`, `physical.py`, `logical.py`, `explain.py` | deadline checks (every rule gets the statement's `check`); hashed conjunct deduplication; iterative walks; size-filtered, linear shared-subquery signatures; indexed greedy join ordering; linear `render_expr` |
+| Execution | `execution/compiler.py`, `vcompiler.py`, `workers.py` | checked closures in large expressions; linear `like_matcher`; deadline checks while pickling plans |
+| Protocol / server | `protocol/handlers.py`, `protocol/session.py`, `server/http.py`, `server/app.py`, `cli.py` | deadline from receipt; GC paused until the response is written; `release_failed`; large-stack threads; capability `change.expression_limits`; (HTTP: a chunk size must be 1*HEXDIG — a negative size made the server read until EOF) |
+| Service | `service.py` | deadline check passed to every stage |
+
+`spec_version` stays `1.0.0`, which the public catalog case expects (CR-6
+names `1.3.0-cr6`). Unit tests: `tests/test_expression_limits.py` (measures
+and limits, the CR-6 minimums in every mode including worker processes,
+timeouts before execution, the linear-time helpers).
 
 ### Logical / physical plan separation (CR-3, `spec/changes/refactor-plan-separation.md`)
 
@@ -1094,6 +1219,11 @@ python3 tools/native_difftest.py --lib ../../native-kernels/build/x86_64/libpqke
 
 ## Design decisions (where the spec leaves room)
 
+* **Statement limits (CR-6).** 16 MiB of text, nesting depth 4,096 and
+  200,000 operands — 16, 4 and 8 times the minimums — chosen so that a
+  statement at the limits still runs in seconds; beyond them
+  `RESOURCE_LIMIT` with `details.measure` (see *Expression size limits*).
+
 * **CSV**: completely empty lines (also `\r\n`-only lines) are skipped.
   A field consisting only of spaces/tabs is treated like an empty field for
   non-STRING columns (NULL) and is not considered during inference. Header-only
@@ -1223,6 +1353,13 @@ python3 tools/native_difftest.py --lib ../../native-kernels/build/x86_64/libpqke
   `change.union_all`.
 
 ## Known limitations
+
+* Statement limits (CR-6): 16 MiB of SQL text, nesting depth 4,096,
+  200,000 operands (see *Expression size limits*). Statements near the
+  operand limit are slow in row mode (a 200,000-operand sum takes ~10 s
+  there, ~4 s vectorized), and freeing what a failed statement of that size
+  built takes ~0.5 s after its response, which delays reading the next
+  request on the same connection or session.
 
 * UNION ALL branches are not merged into partial aggregation / top-N: an
   aggregate or ORDER BY over a union consumes the concatenated branch rows
