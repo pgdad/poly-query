@@ -138,7 +138,7 @@ evidence.
     decimals overflowed under the spec's own rule. The spec was fixed.
   * The engines split on what to do with gigantic SQL expressions: some
     computed them, some refused, some hung. That became change request CR-6,
-    which the agents are implementing right now.
+    and the agents implemented it in every engine.
 * **The opening hook, in numbers.** The AI-written x86-64 assembly engine
   answers in 2.85 ms against Java's 3.41 ms, at 1,612 MiB peak memory against
   3,219 MiB. Both assembly engines together cost \$310.
