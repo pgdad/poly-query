@@ -36,7 +36,8 @@ written), :IDENT (VALUE the name), :QIDENT (quoted identifier), :INTEGER /
 
 (defun tokenize (sql)
   "Split SQL text into a vector of tokens terminated by an :EOF token."
-  (let ((tokens '()) (i 0) (n (length sql)) (line 1) (line-start 0))
+  (let ((tokens '()) (count 0) (i 0) (n (length sql)) (line 1) (line-start 0))
+    (declare (type fixnum count))
     (labels ((peek (&optional (k 0))
                (let ((j (+ i k))) (if (< j n) (char sql j) nil)))
              (col () (1+ (- i line-start)))
@@ -45,6 +46,9 @@ written), :IDENT (VALUE the name), :QIDENT (quoted identifier), :INTEGER /
                  (incf line) (setf line-start (1+ i)))
                (incf i))
              (emit (kind value tline tcol &optional text)
+               ;; Long statements: honour the query deadline while lexing.
+               (when (zerop (logand (incf count) 4095))
+                 (check-interrupts))
                (push (make-token kind value tline tcol text) tokens))
              (scan-quoted (quote-char what tline tcol)
                ;; I points at the opening quote.

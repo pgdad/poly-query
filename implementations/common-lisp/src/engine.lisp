@@ -13,7 +13,7 @@
     "phase5" "exec.row" "exec.vectorized" "exec.parallel"
     "join.hash" "join.merge" "join.nested_loop"
     "native.kernels"
-    "change.union_all" "change.decimal38"))
+    "change.union_all" "change.decimal38" "change.expression_limits"))
 
 (defparameter *max-default-threads* 16
   "Upper bound of the default worker threads per query (more rarely pays

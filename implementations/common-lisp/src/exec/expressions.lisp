@@ -18,7 +18,8 @@
                (lambda (row)
                  (declare (ignore row))
                  (svref (param-env-values env) i))))
-    (b-op (compile-op e))
+    (b-op (check-interrupts)            ; long statements: compiling takes time too
+          (compile-op e))
     (b-agg (error "internal: aggregate call outside an aggregation context"))))
 
 (defmacro with-non-null-args ((&rest bindings) &body body)
@@ -54,13 +55,20 @@
                    (lambda (row) (declare (ignore row)) +null+)
                    (lambda (row) (with-non-null-args ((a f)) (funcall cast a))))))
       (:concat (let ((f (first fns)) (g (second fns)))
-                 (lambda (row) (with-non-null-args ((a f) (b g)) (concatenate 'string a b)))))
+                 (lambda (row) (with-non-null-args ((a f) (b g)) (concatenate-strings a b)))))
       (:between (compile-between args fns))
       (:in-list (compile-in-list args fns))
       (:like (compile-like args fns))
       (:case (compile-case e fns))
       (:call (compile-call e fns))
       (:subquery (compile-subquery e fns)))))
+
+(defun concatenate-strings (a b)
+  "A || B. A long chain of concatenations takes time quadratic in its length
+for a single row, so long results check the query deadline (CR-6)."
+  (when (> (+ (length a) (length b)) 65536)
+    (check-interrupts))
+  (concatenate 'string a b))
 
 ;;; ------------------------------------------------------------------
 ;;; Arithmetic (types.md §4)
@@ -314,10 +322,14 @@ NULL, else FALSE. Constant lists sharing one comparison type use a hash set."
   "Whole-string LIKE match: % any sequence, _ exactly one code point."
   (declare (type string s p))
   (let ((n (length s)) (m (length p))
-        (si 0) (pi* 0) (star-p -1) (star-s 0))
-    (declare (type fixnum n m si pi* star-p star-s))
-    ;; Greedy matching with backtracking to the last %.
+        (si 0) (pi* 0) (star-p -1) (star-s 0)
+        (steps 0))
+    (declare (type fixnum n m si pi* star-p star-s steps))
+    ;; Greedy matching with backtracking to the last %. Matching takes up to
+    ;; n*m steps: long inputs check the query deadline now and then (CR-6).
     (loop
+      (when (zerop (logand (incf steps) #xFFFFF))
+        (check-interrupts))
       (cond ((< si n)
              (cond ((and (< pi* m) (char= (char p pi*) #\%))
                     (setf star-p pi* star-s si)
@@ -353,12 +365,12 @@ NULL, else FALSE. Constant lists sharing one comparison type use a hash set."
            (pair-args (if simple-p (rest args) args))
            (else-fn (when else-p (car (last fns))))
            (n (floor (- (length pairs) (if else-p 1 0)) 2))
-           (conds (coerce (loop for k below n collect (nth (* 2 k) pairs)) 'simple-vector))
-           (results (coerce (loop for k below n collect (nth (1+ (* 2 k)) pairs)) 'simple-vector))
+           (conds (coerce (loop for (c) on pairs by #'cddr repeat n collect c) 'simple-vector))
+           (results (coerce (loop for (nil r) on pairs by #'cddr repeat n collect r) 'simple-vector))
            (tests (when simple-p
-                    (coerce (loop for k below n
-                                  collect (make-equality-test (bexpr-type operand)
-                                                              (bexpr-type (nth (* 2 k) pair-args))))
+                    (coerce (loop for (c) on pair-args by #'cddr
+                                  repeat n
+                                  collect (make-equality-test (bexpr-type operand) (bexpr-type c)))
                             'simple-vector))))
       (if simple-p
           (lambda (row)

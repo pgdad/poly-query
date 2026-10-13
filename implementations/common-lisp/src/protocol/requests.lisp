@@ -86,6 +86,8 @@ alternating keys and JSON values appended after ts, level and msg."
   (handler-case (funcall thunk)
     (pq-error (e)
       (error-response id (pq-error-code e) (pq-error-message e) (pq-error-details e)))
+    (sb-kernel::control-stack-exhausted ()
+      (error-response id "RESOURCE_LIMIT" "statement too complex: stack exhausted"))
     (storage-condition ()
       (error-response id "RESOURCE_LIMIT" "out of memory while processing the request"))
     (error (e)

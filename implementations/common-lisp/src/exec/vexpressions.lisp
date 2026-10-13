@@ -112,7 +112,8 @@ are non-NULL (the other rows get NULL), as in the row evaluator."
                    (kind (type-vec-kind (bexpr-type e))))
                (lambda (batch)
                  (constant-vec kind (svref (param-env-values env) i) (batch-count batch)))))
-    (b-op (compile-vop e))
+    (b-op (check-interrupts)            ; long statements: compiling takes time too
+          (compile-vop e))
     (b-agg (error "internal: aggregate call outside an aggregation context"))))
 
 (defun compile-vop (e)
@@ -693,14 +694,14 @@ only where the left one is not FALSE, OR only where it is not TRUE."
            (operand (when simple-p (first args)))
            (pairs (if simple-p (rest args) args))
            (n-when (floor (- (length pairs) (if else-p 1 0)) 2))
-           (whens (loop for k below n-when collect (compile-operand (nth (* 2 k) pairs))))
-           (thens (loop for k below n-when collect (compile-operand (nth (1+ (* 2 k)) pairs))))
+           (whens (loop for (c) on pairs by #'cddr repeat n-when collect (compile-operand c)))
+           (thens (loop for (nil r) on pairs by #'cddr repeat n-when collect (compile-operand r)))
            (else (when else-p (compile-operand (car (last pairs)))))
            (operand-kernel (when simple-p (compile-vexpr operand)))
            (tests (when simple-p
-                    (loop for k below n-when
-                          collect (make-equality-test (bexpr-type operand)
-                                                      (bexpr-type (nth (* 2 k) pairs))))))
+                    (loop for (c) on pairs by #'cddr
+                          repeat n-when
+                          collect (make-equality-test (bexpr-type operand) (bexpr-type c)))))
            (kind (type-vec-kind (bexpr-type e))))
       (flet ((eval-op (op batch idx m)
                (eval-subset (operand-kernel op) (operand-refs op) batch idx m)))
@@ -723,7 +724,7 @@ only where the left one is not FALSE, OR only where it is not TRUE."
                 (setf remaining idx rcount m)))
             (loop for w in whens
                   for th in thens
-                  for k from 0
+                  for tail = tests then (rest tail)
                   while (plusp rcount)
                   do (let ((cond-vec (eval-op w batch remaining rcount))
                            (hits (make-index-vector rcount)) (h 0)
@@ -734,7 +735,7 @@ only where the left one is not FALSE, OR only where it is not TRUE."
                                 (c (vec-ref cond-vec j))
                                 (hit (if operand-vec
                                          (and (not (eq c +null+))
-                                              (funcall (the function (nth k tests))
+                                              (funcall (the function (first tail))
                                                        (vec-ref operand-vec row) c))
                                          (eq c t))))
                            (if hit

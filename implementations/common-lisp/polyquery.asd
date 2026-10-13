@@ -36,7 +36,8 @@
                  (:file "csv")
                  (:file "json")))
    (:module "sql" :serial t
-    :components ((:file "lexer")
+    :components ((:file "limits")
+                 (:file "lexer")
                  (:file "ast")
                  (:file "parser")))
    (:module "analyzer" :serial t

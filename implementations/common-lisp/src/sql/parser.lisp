@@ -3,19 +3,25 @@
 ;;;; spec/changes/union-all.md). Produces the AST defined in ast.lisp. Syntax
 ;;;; that is reserved for future use (UNION [DISTINCT], FULL/RIGHT joins)
 ;;;; raises UNSUPPORTED.
+;;;;
+;;;; The parser also enforces the statement size limits of limits.lisp
+;;;; (CR-6): WITH-DEPTH counts the nesting depth, COUNT-OPERAND the operands.
+;;;; Chains of binary operators are parsed by loops, so only the counted
+;;;; nesting levels deepen the recursion.
 
 (in-package #:polyquery)
-
-(defconstant +max-nesting-depth+ 400)
 
 (defstruct (parser (:constructor make-parser (tokens)))
   (tokens #() :type simple-vector)
   (pos 0 :type fixnum)
-  (depth 0 :type fixnum))
+  (depth 0 :type fixnum)
+  (operands 0 :type fixnum))
 
 (defun parse-sql (sql)
   "Parse one SQL statement. Returns an AST-QUERY, AST-EXPLAIN,
-AST-CREATE-INDEX or AST-DROP-INDEX."
+AST-CREATE-INDEX or AST-DROP-INDEX. Statements beyond the size limits
+signal RESOURCE_LIMIT."
+  (check-statement-length sql)
   (let* ((p (make-parser (tokenize sql)))
          (stmt (parse-statement p)))
     (accept-op p ";")
@@ -32,10 +38,14 @@ AST-CREATE-INDEX or AST-DROP-INDEX."
   (let ((tokens (parser-tokens p)))
     (svref tokens (min (+ (parser-pos p) k) (1- (length tokens))))))
 
+(defconstant +parser-check-interval+ 4096
+  "Tokens consumed between two checks of the query deadline.")
+
 (defun next-token (p)
   (prog1 (current p)
     (unless (eq (token-kind (current p)) :eof)
-      (incf (parser-pos p)))))
+      (when (zerop (mod (incf (parser-pos p)) +parser-check-interval+))
+        (check-interrupts)))))
 
 (defun token-description (tok)
   (case (token-kind tok)
@@ -95,12 +105,17 @@ e.g. `AS full` names a column (decimal38.pqt relies on it)."
   (list :line (token-line tok) :column (token-column tok)))
 
 (defmacro with-depth ((p) &body body)
+  "Parse BODY one nesting level deeper (RESOURCE_LIMIT beyond the limit)."
   `(progn
-     (when (> (incf (parser-depth ,p)) +max-nesting-depth+)
-       (let ((tok (current ,p)))
-         (parse-error-at (token-line tok) (token-column tok) "expression nested too deeply")))
-     (unwind-protect (progn ,@body)
+     (when (> (incf (parser-depth ,p)) *max-nesting-depth*)
+       (nesting-depth-error))
+     (multiple-value-prog1 (progn ,@body)
        (decf (parser-depth ,p)))))
+
+(defun count-operand (p)
+  "Count one operand (literal, column reference or `*`) of the statement."
+  (when (> (incf (parser-operands p)) *max-operands*)
+    (operand-count-error)))
 
 ;;; ------------------------------------------------------------------
 ;;; Statements
@@ -151,28 +166,31 @@ e.g. `AS full` names a column (decimal38.pqt relies on it)."
 ;;; ------------------------------------------------------------------
 ;;; Queries
 
+(defun parse-subquery (p)
+  "A query nested in another statement: one nesting level deeper."
+  (with-depth (p) (parse-query p)))
+
 (defun parse-query (p)
-  (with-depth (p)
-    (with-node-position (tok p)
-      (let ((ctes (when (accept-keyword p :with) (parse-cte-list p)))
-            (body (parse-compound p))
-            (order-by nil) (limit nil) (offset nil))
-        (when (accept-keyword p :order)
-          (expect-keyword p :by)
-          (setf order-by (parse-comma-list p #'parse-order-item)))
-        (cond ((accept-keyword p :limit)
-               (setf limit (parse-expr p))
-               (when (accept-keyword p :offset)
-                 (setf offset (parse-expr p))))
-              ((accept-keyword p :offset)
-               (setf offset (parse-expr p))
-               (when (accept-keyword p :limit)
-                 (setf limit (parse-expr p)))))
-        ;; A branch cannot carry its own ORDER BY / LIMIT.
-        (when (at-keyword p :union)
-          (unexpected p))
-        (apply #'make-ast-query :ctes ctes :body body :order-by order-by
-                                :limit limit :offset offset (pos-args tok))))))
+  (with-node-position (tok p)
+    (let ((ctes (when (accept-keyword p :with) (parse-cte-list p)))
+          (body (parse-compound p))
+          (order-by nil) (limit nil) (offset nil))
+      (when (accept-keyword p :order)
+        (expect-keyword p :by)
+        (setf order-by (parse-comma-list p #'parse-order-item)))
+      (cond ((accept-keyword p :limit)
+             (setf limit (parse-expr p))
+             (when (accept-keyword p :offset)
+               (setf offset (parse-expr p))))
+            ((accept-keyword p :offset)
+             (setf offset (parse-expr p))
+             (when (accept-keyword p :limit)
+               (setf limit (parse-expr p)))))
+      ;; A branch cannot carry its own ORDER BY / LIMIT.
+      (when (at-keyword p :union)
+        (unexpected p))
+      (apply #'make-ast-query :ctes ctes :body body :order-by order-by
+                              :limit limit :offset offset (pos-args tok)))))
 
 (defun parse-compound (p)
   "compound = select_core { UNION ALL select_core }. Returns the AST-SELECT
@@ -203,7 +221,7 @@ itself when there is a single branch, else an AST-UNION-ALL."
              (expect-op p ")"))
            (expect-keyword p :as)
            (expect-op p "(")
-           (let ((query (parse-query p)))
+           (let ((query (parse-subquery p)))
              (expect-op p ")")
              (apply #'make-ast-cte :name name :columns columns :query query (pos-args tok))))))))
 
@@ -230,8 +248,10 @@ itself when there is a single branch, else an AST-UNION-ALL."
 (defun parse-select-item (p)
   (with-node-position (tok p)
     (cond ((accept-op p "*")
+           (count-operand p)
            (apply #'make-ast-select-item :expr (apply #'make-ast-star (pos-args tok)) (pos-args tok)))
           ((and (at-identifier p) (op-p (peek-token p 1) ".") (op-p (peek-token p 2) "*"))
+           (count-operand p)
            (let ((qualifier (token-value (next-token p))))
              (next-token p) (next-token p)
              (apply #'make-ast-select-item
@@ -289,42 +309,41 @@ itself when there is a single branch, else an AST-UNION-ALL."
                 (t (return left))))))))
 
 (defun parse-table-ref (p)
-  (with-depth (p)
-    (with-node-position (tok p)
-      (cond
-        ((at-op p "(")
-         (let ((next (peek-token p 1)))
-           (next-token p)
-           (if (or (keyword-p next :select) (keyword-p next :with))
-               (let ((query (parse-query p)))
-                 (expect-op p ")")
-                 (accept-keyword p :as)
-                 (apply #'make-ast-derived-table :query query
-                                                 :alias (expect-identifier p "derived table alias")
-                                                 (pos-args tok)))
-               (let ((item (parse-from-item p)))
-                 (expect-op p ")")
-                 item))))
-        (t
-         (let ((name (expect-identifier p "table name"))
-               (alias nil))
-           (cond ((accept-keyword p :as) (setf alias (expect-identifier p "alias")))
-                 ((at-identifier p) (setf alias (token-value (next-token p)))))
-           (apply #'make-ast-table-ref :name name :alias alias (pos-args tok))))))))
+  (with-node-position (tok p)
+    (cond
+      ((at-op p "(")
+       (let ((next (peek-token p 1)))
+         (next-token p)
+         (if (or (keyword-p next :select) (keyword-p next :with))
+             (let ((query (parse-subquery p)))
+               (expect-op p ")")
+               (accept-keyword p :as)
+               (apply #'make-ast-derived-table :query query
+                                               :alias (expect-identifier p "derived table alias")
+                                               (pos-args tok)))
+             (let ((item (with-depth (p) (parse-from-item p))))
+               (expect-op p ")")
+               item))))
+      (t
+       (let ((name (expect-identifier p "table name"))
+             (alias nil))
+         (cond ((accept-keyword p :as) (setf alias (expect-identifier p "alias")))
+               ((at-identifier p) (setf alias (token-value (next-token p)))))
+         (apply #'make-ast-table-ref :name name :alias alias (pos-args tok)))))))
 
 ;;; ------------------------------------------------------------------
 ;;; Expressions (lowest to highest precedence)
 
 (defun parse-expr (p)
-  (with-depth (p)
-    (parse-or p)))
+  (parse-or p))
 
 (defun parse-or (p)
   (let ((left (parse-and p)))
     (loop
       (with-node-position (tok p)
         (if (accept-keyword p :or)
-            (setf left (apply #'make-ast-binary :op :or :left left :right (parse-and p) (pos-args tok)))
+            (setf left (apply #'make-ast-binary :op :or :left left
+                                                :right (with-depth (p) (parse-and p)) (pos-args tok)))
             (return left))))))
 
 (defun parse-and (p)
@@ -332,7 +351,8 @@ itself when there is a single branch, else an AST-UNION-ALL."
     (loop
       (with-node-position (tok p)
         (if (accept-keyword p :and)
-            (setf left (apply #'make-ast-binary :op :and :left left :right (parse-not p) (pos-args tok)))
+            (setf left (apply #'make-ast-binary :op :and :left left
+                                                :right (with-depth (p) (parse-not p)) (pos-args tok)))
             (return left))))))
 
 (defun parse-not (p)
@@ -353,7 +373,7 @@ itself when there is a single branch, else an AST-UNION-ALL."
           ((and (eq (token-kind tok) :op) (assoc (token-value tok) *comparison-ops* :test #'string=))
            (next-token p)
            (apply #'make-ast-binary :op (cdr (assoc (token-value tok) *comparison-ops* :test #'string=))
-                                    :left left :right (parse-concat p) pos))
+                                    :left left :right (with-depth (p) (parse-concat p)) pos))
           ((accept-keyword p :is)
            (let ((negated (and (accept-keyword p :not) t)))
              (expect-keyword p :null)
@@ -367,21 +387,23 @@ itself when there is a single branch, else an AST-UNION-ALL."
                (setf negated t))
              (cond
                ((accept-keyword p :between)
-                (let ((low (parse-concat p)))
-                  (expect-keyword p :and)
-                  (apply #'make-ast-between :operand left :low low :high (parse-concat p)
-                                            :negated negated pos)))
+                (with-depth (p)
+                  (let ((low (parse-concat p)))
+                    (expect-keyword p :and)
+                    (apply #'make-ast-between :operand left :low low :high (parse-concat p)
+                                              :negated negated pos))))
                ((accept-keyword p :in)
                 (expect-op p "(")
                 (if (or (at-keyword p :select) (at-keyword p :with))
-                    (let ((query (parse-query p)))
+                    (let ((query (parse-subquery p)))
                       (expect-op p ")")
                       (apply #'make-ast-in-subquery :operand left :query query :negated negated pos))
-                    (let ((items (parse-comma-list p #'parse-expr)))
+                    (let ((items (with-depth (p) (parse-comma-list p #'parse-expr))))
                       (expect-op p ")")
                       (apply #'make-ast-in-list :operand left :items items :negated negated pos))))
                ((accept-keyword p :like)
-                (apply #'make-ast-like :operand left :pattern (parse-concat p) :negated negated pos))
+                (apply #'make-ast-like :operand left :pattern (with-depth (p) (parse-concat p))
+                                       :negated negated pos))
                (t left)))))))))
 
 (defun parse-binary-level (p next-fn ops)
@@ -395,7 +417,8 @@ itself when there is a single branch, else an AST-UNION-ALL."
               (progn
                 (next-token p)
                 (setf left (apply #'make-ast-binary :op (cdr entry) :left left
-                                                    :right (funcall next-fn p) (pos-args tok))))
+                                                    :right (with-depth (p) (funcall next-fn p))
+                                                    (pos-args tok))))
               (return left)))))))
 
 (defun parse-concat (p)
@@ -432,10 +455,15 @@ itself when there is a single branch, else an AST-UNION-ALL."
   (with-node-position (tok p)
     (let ((pos (pos-args tok)))
       (case (token-kind tok)
-        (:integer (next-token p) (apply #'make-ast-literal :kind :integer :value (token-value tok) pos))
-        (:number (next-token p) (apply #'make-ast-literal :kind :number :value (token-value tok) pos))
-        (:string (next-token p) (apply #'make-ast-literal :kind :string :value (token-value tok) pos))
+        (:integer (next-token p) (count-operand p)
+         (apply #'make-ast-literal :kind :integer :value (token-value tok) pos))
+        (:number (next-token p) (count-operand p)
+         (apply #'make-ast-literal :kind :number :value (token-value tok) pos))
+        (:string (next-token p) (count-operand p)
+         (apply #'make-ast-literal :kind :string :value (token-value tok) pos))
         (:keyword
+         (when (member (token-value tok) '(:true :false :null :date :timestamp))
+           (count-operand p))
          (case (token-value tok)
            (:true (next-token p) (apply #'make-ast-literal :kind :boolean :value t pos))
            (:false (next-token p) (apply #'make-ast-literal :kind :boolean :value nil pos))
@@ -446,12 +474,12 @@ itself when there is a single branch, else an AST-UNION-ALL."
               (unexpected p "string literal"))
             (apply #'make-ast-literal :kind (token-value tok)
                                       :value (token-value (next-token p)) pos))
-           (:cast (parse-cast p))
-           (:case (parse-case p))
+           (:cast (with-depth (p) (parse-cast p)))
+           (:case (with-depth (p) (parse-case p)))
            (:exists
             (next-token p)
             (expect-op p "(")
-            (let ((query (parse-query p)))
+            (let ((query (parse-subquery p)))
               (expect-op p ")")
               (apply #'make-ast-exists :query query pos)))
            (t (unexpected p "expression"))))
@@ -459,20 +487,22 @@ itself when there is a single branch, else an AST-UNION-ALL."
          (next-token p)
          (cond
            ((and (eq (token-kind tok) :ident) (at-op p "("))
-            (parse-function-call p tok))
+            (with-depth (p) (parse-function-call p tok)))
            ((accept-op p ".")
+            (count-operand p)
             (apply #'make-ast-column-ref :qualifier (token-value tok)
                                          :name (expect-identifier p "column name") pos))
-           (t (apply #'make-ast-column-ref :name (token-value tok) pos))))
+           (t (count-operand p)
+              (apply #'make-ast-column-ref :name (token-value tok) pos))))
         (:op
          (if (at-op p "(")
              (progn
                (next-token p)
                (if (or (at-keyword p :select) (at-keyword p :with))
-                   (let ((query (parse-query p)))
+                   (let ((query (parse-subquery p)))
                      (expect-op p ")")
                      (apply #'make-ast-subquery :query query pos))
-                   (let ((e (parse-expr p)))
+                   (let ((e (with-depth (p) (parse-expr p))))
                      (expect-op p ")")
                      e)))
              (unexpected p "expression")))
@@ -483,6 +513,7 @@ itself when there is a single branch, else an AST-UNION-ALL."
   (let ((pos (pos-args name-token))
         (name (token-value name-token)))
     (cond ((accept-op p "*")
+           (count-operand p)
            (expect-op p ")")
            (apply #'make-ast-function :name name :star t pos))
           ((accept-op p ")")

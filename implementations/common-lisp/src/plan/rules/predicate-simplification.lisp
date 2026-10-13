@@ -47,6 +47,7 @@
 (defun simplify-expr (e)
   "E with its boolean structure simplified bottom-up."
   (labels ((walk (x)
+             (check-interrupts)
              (if (b-op-p x)
                  (let* ((args (mapcar #'walk (b-op-args x)))
                         (node (if (every #'eq args (b-op-args x))
