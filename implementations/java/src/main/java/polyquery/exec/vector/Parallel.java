@@ -15,10 +15,13 @@ import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
+import java.util.function.Supplier;
+import polyquery.common.Checkpoint;
 import polyquery.common.ErrorCode;
 import polyquery.common.PolyQueryException;
 import polyquery.exec.ExecContext;
 import polyquery.exec.ExpressionCompiler;
+import polyquery.exec.QueryControl;
 import polyquery.physical.PhysicalPlan;
 import polyquery.plan.AggregateCall;
 import polyquery.plan.BoundExpr;
@@ -328,11 +331,24 @@ final class Parallel {
         return Morsel.of(c.scan(), morselRows).size() >= 2;
     }
 
+    /**
+     * Submits a task to the worker pool with the query's timeout and cancellation check
+     * installed for the {@link Checkpoint} polls of the code it runs (e.g. deep kernels).
+     */
+    private static <T> Future<T> submit(ExecContext ctx, Supplier<T> task) {
+        QueryControl control = ctx.control();
+        return POOL.submit(() -> Checkpoint.with(control::check, task));
+    }
+
     /** Runs independent tasks on the worker pool (the first on the calling thread) and waits for all. */
     static void runAll(List<Runnable> tasks, ExecContext ctx) {
         List<Future<?>> futures = new ArrayList<>();
         for (int i = 1; i < tasks.size(); i++) {
-            futures.add(POOL.submit(tasks.get(i)));
+            Runnable task = tasks.get(i);
+            futures.add(submit(ctx, () -> {
+                task.run();
+                return null;
+            }));
         }
         RuntimeException failure = null;
         try {
@@ -578,7 +594,7 @@ final class Parallel {
             int workers = Math.max(1, Math.min(threads, morsels.size()));
             List<Future<Partial>> futures = new ArrayList<>();
             for (int w = 1; w < workers; w++) {
-                futures.add(POOL.submit(() -> work(morsels, next, errors)));
+                futures.add(submit(shared.builder.context(), () -> work(morsels, next, errors)));
             }
             List<Partial> results = new ArrayList<>();
             try {
@@ -689,7 +705,7 @@ final class Parallel {
             List<Future<Merged>> futures = new ArrayList<>();
             for (int part = 1; part < parts; part++) {
                 int pp = part;
-                futures.add(POOL.submit(() -> mergePartition(results, pp, parts)));
+                futures.add(submit(shared.builder.context(), () -> mergePartition(results, pp, parts)));
             }
             List<Merged> merged = new ArrayList<>();
             merged.add(mergePartition(results, 0, parts));
@@ -953,7 +969,7 @@ final class Parallel {
         private void submit() {
             Morsel m = morsels.get(submitted++);
             AtomicBoolean stop = cancelled;
-            inFlight.add(POOL.submit(() -> run(m, stop)));
+            inFlight.add(Parallel.submit(ctx, () -> run(m, stop)));
         }
 
         private MorselOutput run(Morsel m, AtomicBoolean stop) {

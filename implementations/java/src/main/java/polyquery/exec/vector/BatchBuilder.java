@@ -1,10 +1,13 @@
 package polyquery.exec.vector;
 
+import java.util.ArrayDeque;
 import java.util.List;
 import polyquery.exec.ExecContext;
 import polyquery.exec.Operator;
 import polyquery.exec.OperatorBuilder;
 import polyquery.physical.PhysicalPlan;
+import polyquery.plan.BoundExpr;
+import polyquery.plan.BoundExprs;
 import polyquery.plan.LogicalPlan;
 import polyquery.storage.ColumnSchema;
 import polyquery.types.DataType;
@@ -22,20 +25,58 @@ public final class BatchBuilder {
     /** Default rows per morsel (unit of work of parallel scans); property {@code polyquery.morselRows}. */
     static final int DEFAULT_MORSEL_ROWS = 65536;
 
-    private final int batchSize = Math.max(1, Integer.getInteger("polyquery.batchSize", DEFAULT_BATCH_SIZE));
+    /**
+     * Vector positions (batch size × expression nodes) the kernels of one plan instance may hold:
+     * every kernel owns a result vector, so a plan with huge expressions (CR-6: up to 200,000
+     * operands) runs with smaller batches instead of holding gigabytes of intermediate vectors.
+     */
+    static final long KERNEL_POSITIONS = 4L << 20;
+    /** The smallest batch size chosen for a plan with huge expressions. */
+    static final int MIN_BATCH_SIZE = 16;
+
+    private final int batchSize;
     private final int morselRows = Math.max(1, Integer.getInteger("polyquery.morselRows", DEFAULT_MORSEL_ROWS));
     private final ExecContext ctx;
     private final OperatorBuilder rows;
     private final VecCompiler compiler;
     private final int threads;
 
-    /** @param threads maximum worker threads of parallel pipelines (1 = sequential) */
-    public BatchBuilder(OperatorBuilder rows, int threads) {
+    /**
+     * @param threads maximum worker threads of parallel pipelines (1 = sequential)
+     * @param plan    the plan to be built (its expression sizes determine the batch size)
+     */
+    public BatchBuilder(OperatorBuilder rows, int threads, PhysicalPlan plan) {
         this.rows = rows;
         this.ctx = rows.context();
         this.compiler = new VecCompiler(ctx, rows.compiler());
         this.threads = threads;
+        this.batchSize = batchSize(plan);
         rows.setDelegate(this::rowOperator);
+    }
+
+    /** The configured batch size, reduced for plans with huge expressions (see {@link #KERNEL_POSITIONS}). */
+    private static int batchSize(PhysicalPlan plan) {
+        int configured = Math.max(1, Integer.getInteger("polyquery.batchSize", DEFAULT_BATCH_SIZE));
+        long nodes = Math.max(1, expressionNodes(plan));
+        return (int) Math.min(configured, Math.max(MIN_BATCH_SIZE, KERNEL_POSITIONS / nodes));
+    }
+
+    /** Number of expression nodes evaluated by the operators of {@code plan} (iterative: chains are deep). */
+    private static long expressionNodes(PhysicalPlan plan) {
+        long count = 0;
+        ArrayDeque<PhysicalPlan> plans = new ArrayDeque<>();
+        ArrayDeque<BoundExpr> exprs = new ArrayDeque<>();
+        plans.push(plan);
+        while (!plans.isEmpty()) {
+            PhysicalPlan p = plans.pop();
+            p.children().forEach(plans::push);
+            PhysicalPlan.expressions(p).forEach(exprs::push);
+            while (!exprs.isEmpty()) {
+                count++;
+                BoundExprs.children(exprs.pop()).forEach(exprs::push);
+            }
+        }
+        return count;
     }
 
     /** Whether the root node of {@code plan} has a batch implementation. */

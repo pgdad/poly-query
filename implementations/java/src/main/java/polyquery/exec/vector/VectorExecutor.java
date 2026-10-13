@@ -17,7 +17,8 @@ public final class VectorExecutor {
     /** Streams the result rows of a plan into {@code sink}; returns the row count. */
     public static long stream(PhysicalPlan plan, ExecContext ctx, Function<LogicalPlan, PhysicalPlan> subqueryPlanner,
                               ResultSink sink, int threads) {
-        BatchOperator root = new BatchBuilder(new OperatorBuilder(ctx, subqueryPlanner), threads).build(plan);
+        BatchOperator root = new BatchBuilder(new OperatorBuilder(ctx, subqueryPlanner), threads, plan)
+                .build(plan);
         sink.columns(plan.schema());
         int width = plan.schema().size();
         boolean rows = sink.wantsRows();

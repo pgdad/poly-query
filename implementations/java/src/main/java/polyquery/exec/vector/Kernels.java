@@ -4,6 +4,7 @@ import java.math.BigInteger;
 import java.util.Arrays;
 import java.util.HashSet;
 import java.util.Set;
+import polyquery.common.Checkpoint;
 import polyquery.common.ErrorCode;
 import polyquery.common.PolyQueryException;
 import polyquery.exec.Evaluator;
@@ -65,6 +66,18 @@ final class Kernels {
     }
 
     // ---------------------------------------------------------------- leaves
+
+    /**
+     * Polls the query's timeout and cancellation ({@link Checkpoint}) before evaluating its
+     * input; inserted at intervals into deep kernel trees by {@link VecCompiler}.
+     */
+    record Polling(VecExpr input) implements VecExpr {
+        @Override
+        public Vec eval(Batch b, int[] sel, int n) {
+            Checkpoint.poll();
+            return input.eval(b, sel, n);
+        }
+    }
 
     /** A slot of the input batch (no copy). */
     record ColumnRef(int slot) implements VecExpr {

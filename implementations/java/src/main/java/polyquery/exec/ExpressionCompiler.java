@@ -21,12 +21,19 @@ import polyquery.types.Values;
 
 /** Compiles {@link BoundExpr} trees into closures (types.md §4–§6 runtime semantics). */
 public final class ExpressionCompiler {
+    /**
+     * Every subexpression at a multiple of this nesting level polls the query's timeout when
+     * evaluated, so a row through a deep expression (a long operator chain) cannot delay it (CR-6 §4).
+     */
+    private static final int POLL_DEPTH = 32;
     private final ExecContext ctx;
     private final Function<LogicalPlan, Operator> subqueryBuilder;
     /** Holder of the current shared operand while compiling the comparisons that use it. */
     private Object[] placeholderCell;
     /** Subexpressions (by identity) compiled to raise a known error instead of being evaluated. */
     private Map<BoundExpr, PolyQueryException> knownFailures = Map.of();
+    /** Nesting level of the expression being compiled (see {@link #POLL_DEPTH}). */
+    private int depth;
 
     /**
      * @param subqueryBuilder builds an executable operator tree for a subquery's logical plan
@@ -51,6 +58,23 @@ public final class ExpressionCompiler {
 
     public Evaluator compile(BoundExpr e) {
         Checkpoint.poll();
+        depth++;
+        try {
+            Evaluator code = compileNode(e);
+            if (depth % POLL_DEPTH == 0 && !BoundExprs.children(e).isEmpty()) {
+                Evaluator inner = code;
+                return row -> {
+                    Checkpoint.poll();
+                    return inner.eval(row);
+                };
+            }
+            return code;
+        } finally {
+            depth--;
+        }
+    }
+
+    private Evaluator compileNode(BoundExpr e) {
         if (!knownFailures.isEmpty()) {
             PolyQueryException failure = knownFailures.get(e);
             if (failure != null) {

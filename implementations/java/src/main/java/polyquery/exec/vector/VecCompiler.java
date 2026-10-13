@@ -24,6 +24,11 @@ import polyquery.types.DataType;
  */
 final class VecCompiler {
     private static final Object[] NO_ROW = new Object[0];
+    /**
+     * Every kernel at a multiple of this nesting level polls the query's timeout when evaluated:
+     * a batch through a deep expression (a long operator chain) may take seconds (CR-6 §4).
+     */
+    private static final int POLL_DEPTH = 32;
 
     private final ExecContext ctx;
     private final ExpressionCompiler rows;
@@ -31,6 +36,8 @@ final class VecCompiler {
     private Kernels.Operand operand;
     /** Memo of {@link #foldable} (a compiler is confined to one thread). */
     private final Map<BoundExpr, Boolean> foldable = new IdentityHashMap<>();
+    /** Nesting level of the kernel being compiled (see {@link #POLL_DEPTH}). */
+    private int depth;
 
     VecCompiler(ExecContext ctx, ExpressionCompiler rows) {
         this.ctx = ctx;
@@ -48,6 +55,18 @@ final class VecCompiler {
 
     VecExpr compile(BoundExpr e) {
         Checkpoint.poll();
+        depth++;
+        try {
+            VecExpr kernel = compileNode(e);
+            boolean leaf = kernel instanceof Kernels.Constant || kernel instanceof Kernels.ColumnRef
+                    || kernel instanceof Kernels.Operand;
+            return depth % POLL_DEPTH == 0 && !leaf ? new Kernels.Polling(kernel) : kernel;
+        } finally {
+            depth--;
+        }
+    }
+
+    private VecExpr compileNode(BoundExpr e) {
         if (!(e instanceof BoundExpr.Literal) && foldable(e)) {
             try {
                 return new Kernels.Constant(e.type(), rows.compile(e).eval(NO_ROW));
