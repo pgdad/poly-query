@@ -3,12 +3,15 @@ package polyquery.exec;
 import java.math.BigInteger;
 import java.util.HashSet;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
 import java.util.function.BinaryOperator;
 import java.util.function.Function;
+import polyquery.common.Checkpoint;
 import polyquery.common.ErrorCode;
 import polyquery.common.PolyQueryException;
 import polyquery.plan.BoundExpr;
+import polyquery.plan.BoundExprs;
 import polyquery.plan.LogicalPlan;
 import polyquery.types.Casts;
 import polyquery.types.DataType;
@@ -22,6 +25,8 @@ public final class ExpressionCompiler {
     private final Function<LogicalPlan, Operator> subqueryBuilder;
     /** Holder of the current shared operand while compiling the comparisons that use it. */
     private Object[] placeholderCell;
+    /** Subexpressions (by identity) compiled to raise a known error instead of being evaluated. */
+    private Map<BoundExpr, PolyQueryException> knownFailures = Map.of();
 
     /**
      * @param subqueryBuilder builds an executable operator tree for a subquery's logical plan
@@ -39,7 +44,21 @@ public final class ExpressionCompiler {
         return new PolyQueryException(ErrorCode.DIVISION_BY_ZERO, "division by zero");
     }
 
+    /** Compiles the given subexpressions (by identity) to raise their recorded error. */
+    void knownFailures(Map<BoundExpr, PolyQueryException> failures) {
+        this.knownFailures = failures;
+    }
+
     public Evaluator compile(BoundExpr e) {
+        Checkpoint.poll();
+        if (!knownFailures.isEmpty()) {
+            PolyQueryException failure = knownFailures.get(e);
+            if (failure != null) {
+                return row -> {
+                    throw failure;
+                };
+            }
+        }
         return switch (e) {
             case BoundExpr.ColumnRef c -> {
                 int i = c.index();
@@ -78,18 +97,7 @@ public final class ExpressionCompiler {
             }
             case BoundExpr.And a -> and(compile(a.left()), compile(a.right()));
             case BoundExpr.Or o -> or(compile(o.left()), compile(o.right()));
-            case BoundExpr.Concat c -> {
-                Evaluator l = compile(c.left());
-                Evaluator r = compile(c.right());
-                yield row -> {
-                    Object a = l.eval(row);
-                    if (a == null) {
-                        return null;
-                    }
-                    Object b = r.eval(row);
-                    return b == null ? null : (String) a + (String) b;
-                };
-            }
+            case BoundExpr.Concat c -> concat(c);
             case BoundExpr.Arithmetic a -> arithmetic(a);
             case BoundExpr.Comparison c -> comparison(c);
             case BoundExpr.Function f -> function(f);
@@ -131,6 +139,42 @@ public final class ExpressionCompiler {
         } finally {
             placeholderCell = saved;
         }
+    }
+
+    /**
+     * A chain {@code a || b || …} in one loop, left to right, stopping at the first NULL operand
+     * (as the nested binary operators would); building the result once avoids copying the
+     * growing prefix at every link.
+     */
+    private Evaluator concat(BoundExpr.Concat c) {
+        List<BoundExpr> operands = BoundExprs.concatOperands(c);
+        Evaluator[] parts = new Evaluator[operands.size()];
+        for (int i = 0; i < parts.length; i++) {
+            parts[i] = compile(operands.get(i));
+        }
+        if (parts.length == 2) {
+            Evaluator l = parts[0];
+            Evaluator r = parts[1];
+            return row -> {
+                Object a = l.eval(row);
+                if (a == null) {
+                    return null;
+                }
+                Object b = r.eval(row);
+                return b == null ? null : (String) a + (String) b;
+            };
+        }
+        return row -> {
+            StringBuilder sb = new StringBuilder();
+            for (Evaluator part : parts) {
+                Object v = part.eval(row);
+                if (v == null) {
+                    return null;
+                }
+                sb.append((String) v);
+            }
+            return sb.toString();
+        };
     }
 
     private static Object not(Object v) {

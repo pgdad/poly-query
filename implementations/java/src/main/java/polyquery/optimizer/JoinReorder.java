@@ -56,7 +56,7 @@ public final class JoinReorder implements OptimizerRule {
         if (innerOrCross(node)) {
             LogicalPlan.Join j = (LogicalPlan.Join) node;
             flatten(j.left(), offset, inputs, offsets, conds);
-            flatten(j.right(), offset + j.left().schema().size(), inputs, offsets, conds);
+            flatten(j.right(), offset + j.left().width(), inputs, offsets, conds);
             if (j.condition() != null) {
                 for (BoundExpr c : BoundExprs.conjuncts(j.condition())) {
                     conds.add(BoundExprs.shiftColumns(c, offset));
@@ -102,7 +102,7 @@ public final class JoinReorder implements OptimizerRule {
         List<Leaf> leaves = new ArrayList<>();
         for (int i = 0; i < inputs.size(); i++) {
             LogicalPlan in = optimizedInputs.get(i);
-            leaves.add(new Leaf(in, offsets.get(i), in.schema().size(), Math.max(1, Cardinality.rows(in))));
+            leaves.add(new Leaf(in, offsets.get(i), in.width(), Math.max(1, Cardinality.rows(in))));
         }
         List<Pred> preds = new ArrayList<>();
         for (BoundExpr c : conds) {
@@ -267,7 +267,7 @@ public final class JoinReorder implements OptimizerRule {
     }
 
     private static LogicalPlan rebuild(LogicalPlan.Join root, List<Leaf> leaves, List<Pred> preds, int[] order) {
-        int width = root.schema().size();
+        int width = root.width();
         int[] newIndex = new int[width];
         int offset = 0;
         for (int i : order) {

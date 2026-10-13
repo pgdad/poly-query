@@ -30,7 +30,7 @@ public final class ProjectionPruning implements OptimizerRule {
     @Override
     public LogicalPlan apply(LogicalPlan plan) {
         BitSet all = new BitSet();
-        all.set(0, plan.schema().size());
+        all.set(0, plan.width());
         return prune(plan, all);
     }
 
@@ -66,7 +66,7 @@ public final class ProjectionPruning implements OptimizerRule {
             }
             case LogicalPlan.Distinct d -> {
                 BitSet all = new BitSet();
-                all.set(0, d.input().schema().size());
+                all.set(0, d.input().width());
                 yield new LogicalPlan.Distinct(prune(d.input(), all));
             }
             case LogicalPlan.Sort s -> {
@@ -80,7 +80,7 @@ public final class ProjectionPruning implements OptimizerRule {
             // Every branch fills the same output columns.
             case LogicalPlan.UnionAll u -> u.withChildren(u.inputs().stream().map(in -> prune(in, required)).toList());
             case LogicalPlan.Join j -> {
-                int leftWidth = j.left().schema().size();
+                int leftWidth = j.left().width();
                 BitSet need = j.condition() == null ? required : with(required, j.condition());
                 BitSet right = new BitSet();
                 for (int i = need.nextSetBit(leftWidth); i >= 0; i = need.nextSetBit(i + 1)) {

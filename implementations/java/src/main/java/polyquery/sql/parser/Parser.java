@@ -3,6 +3,9 @@ package polyquery.sql.parser;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Locale;
+import java.util.function.Function;
+import java.util.function.Supplier;
+import polyquery.common.Checkpoint;
 import polyquery.common.ErrorCode;
 import polyquery.common.PolyQueryException;
 import polyquery.sql.ast.Expr;
@@ -15,21 +18,49 @@ import polyquery.sql.lexer.Lexer;
 import polyquery.sql.lexer.Token;
 import polyquery.sql.lexer.TokenType;
 
-/** Recursive-descent parser for the full PolyQuery SQL v1 grammar (grammar.md §2). */
+/**
+ * Recursive-descent parser for the full PolyQuery SQL v1 grammar (grammar.md §2).
+ *
+ * <p>It enforces the statement size limits of {@link StatementLimits} (CR-6) while parsing:
+ * <ul>
+ * <li>Tokens are lexed on demand and only a small lookahead window is kept, so a long statement
+ * never exists as a token list.</li>
+ * <li>Nesting depth is measured as CR-6 §1 defines it: every parse method that produces an
+ * expression (or query) leaves its <em>height</em> in {@link #height} — the most constructs
+ * enclosing any expression inside it, counting itself, with a chain of binary operators of one
+ * precedence level as one construct. Since a construct's left operand is parsed before the
+ * construct is recognized, the height is computed bottom-up. To stop the recursion early,
+ * {@link #depth} counts the constructs entered on the way down; it never exceeds the true depth.</li>
+ * <li>Operands (literals, column references, {@code *} arguments) are counted as they are parsed.</li>
+ * </ul>
+ * The parser also polls the query's timeout ({@link Checkpoint}).
+ */
 public final class Parser {
-    private static final int MAX_DEPTH = 1000;
+    /** Tokens the parser may look ahead (it never looks behind). */
+    private static final int LOOKAHEAD = 4;
 
-    private final List<Token> tokens;
-    private int pos;
+    private final Lexer lexer;
+    /** Ring buffer of the next {@link #buffered} tokens, starting at {@link #head}. */
+    private final Token[] window = new Token[LOOKAHEAD];
+    private int head;
+    private int buffered;
+    /** Constructs entered on the current parse path: a lower bound of the nesting depth below. */
     private int depth;
+    /** Height of the expression, query or FROM item parsed last (see the class comment). */
+    private int height;
+    private int operands;
 
-    private Parser(List<Token> tokens) {
-        this.tokens = tokens;
+    private Parser(Lexer lexer) {
+        this.lexer = lexer;
     }
 
-    /** Parses exactly one statement (optionally followed by a single ';'). */
+    /**
+     * Parses exactly one statement (optionally followed by a single ';'). Fails with
+     * RESOURCE_LIMIT if the statement exceeds a limit of {@link StatementLimits}.
+     */
     public static Statement parse(String sql) {
-        Parser p = new Parser(Lexer.tokenize(sql));
+        StatementLimits.checkTextLength(sql);
+        Parser p = new Parser(new Lexer(sql));
         Statement s = p.statement();
         p.accept(TokenType.SEMICOLON);
         if (!p.peek().is(TokenType.EOF)) {
@@ -44,18 +75,31 @@ public final class Parser {
 
     // ---------------------------------------------------------------- token helpers
 
-    private Token peek() {
-        return tokens.get(pos);
+    /** The token {@code ahead} positions after the current one (EOF past the end). */
+    private Token peek(int ahead) {
+        while (buffered <= ahead) {
+            if (buffered > 0) {
+                Token last = window[(head + buffered - 1) % LOOKAHEAD];
+                if (last.is(TokenType.EOF)) {
+                    return last;
+                }
+            }
+            Checkpoint.poll();
+            window[(head + buffered) % LOOKAHEAD] = lexer.next();
+            buffered++;
+        }
+        return window[(head + ahead) % LOOKAHEAD];
     }
 
-    private Token peek(int ahead) {
-        return tokens.get(Math.min(pos + ahead, tokens.size() - 1));
+    private Token peek() {
+        return peek(0);
     }
 
     private Token next() {
-        Token t = tokens.get(pos);
+        Token t = peek(0);
         if (t.type() != TokenType.EOF) {
-            pos++;
+            head = (head + 1) % LOOKAHEAD;
+            buffered--;
         }
         return t;
     }
@@ -129,9 +173,32 @@ public final class Parser {
         return e;
     }
 
+    // ---------------------------------------------------------------- size limits
+
+    /** Enters a construct: everything parsed until {@link #leave} is nested one level deeper. */
     private void enter() {
-        if (++depth > MAX_DEPTH) {
-            throw error(peek(), "statement is nested too deeply");
+        if (++depth > StatementLimits.MAX_NESTING_DEPTH) {
+            throw StatementLimits.nestingDepthExceeded();
+        }
+        Checkpoint.poll();
+    }
+
+    private void leave() {
+        depth--;
+    }
+
+    /** The height of a construct whose parts have at most {@code inner} height. */
+    private static int level(int inner) {
+        if (inner + 1 > StatementLimits.MAX_NESTING_DEPTH) {
+            throw StatementLimits.nestingDepthExceeded();
+        }
+        return inner + 1;
+    }
+
+    /** Counts one operand (literal, column reference or {@code *} argument). */
+    private void operand() {
+        if (++operands > StatementLimits.MAX_OPERANDS) {
+            throw StatementLimits.operandCountExceeded();
         }
     }
 
@@ -189,9 +256,10 @@ public final class Parser {
 
     // ---------------------------------------------------------------- queries
 
+    /** The query of a statement (not a construct: its expressions are at nesting depth 0). */
     private Query query() {
-        enter();
         Token start = peek();
+        int h = 0;
         List<Query.Cte> with = List.of();
         if (acceptKeyword("WITH")) {
             with = new ArrayList<>();
@@ -208,19 +276,22 @@ public final class Parser {
                 }
                 expectKeyword("AS");
                 expect(TokenType.LPAREN);
-                Query q = query();
+                Query q = subquery();
+                h = Math.max(h, height);
                 expect(TokenType.RPAREN);
                 with.add(new Query.Cte(SourcePos.of(ct), name, cols, q));
             } while (accept(TokenType.COMMA));
         }
         List<Query.Select> branches = new ArrayList<>();
         branches.add(selectCore());
+        h = Math.max(h, height);
         while (peek().isKeyword("UNION")) {
             Token union = next();
             if (!acceptKeyword("ALL")) {
                 throw unsupported(union, "UNION without ALL");
             }
             branches.add(selectCore());
+            h = Math.max(h, height);
         }
         List<Query.OrderItem> orderBy = List.of();
         if (peek().isKeyword("ORDER")) {
@@ -230,6 +301,7 @@ public final class Parser {
             do {
                 Token it = peek();
                 Expr e = expr();
+                h = Math.max(h, height);
                 boolean desc = false;
                 if (acceptKeyword("DESC")) {
                     desc = true;
@@ -252,25 +324,39 @@ public final class Parser {
         Expr offset = null;
         if (acceptKeyword("LIMIT")) {
             limit = expr();
+            h = Math.max(h, height);
             if (acceptKeyword("OFFSET")) {
                 offset = expr();
+                h = Math.max(h, height);
             }
         } else if (acceptKeyword("OFFSET")) {
             offset = expr();
+            h = Math.max(h, height);
             if (acceptKeyword("LIMIT")) {
                 limit = expr();
+                h = Math.max(h, height);
             }
         }
         if (peek().isKeyword("UNION") && peek(1).isKeyword("ALL")) {
             // ORDER BY / LIMIT can only follow the last branch of a compound query.
             throw error(peek(), "ORDER BY and LIMIT are only allowed after the last branch of UNION ALL");
         }
-        depth--;
+        height = h;
         return new Query(SourcePos.of(start), with, List.copyOf(branches), orderBy, limit, offset);
+    }
+
+    /** A subquery (scalar, EXISTS, IN, derived table or CTE): one construct around its query. */
+    private Query subquery() {
+        enter();
+        Query q = query();
+        leave();
+        height = level(height);
+        return q;
     }
 
     private Query.Select selectCore() {
         Token start = expectKeyword("SELECT");
+        int h = 0;
         boolean distinct = false;
         if (acceptKeyword("DISTINCT")) {
             distinct = true;
@@ -280,14 +366,17 @@ public final class Parser {
         List<Query.SelectItem> items = new ArrayList<>();
         do {
             items.add(selectItem());
+            h = Math.max(h, height);
         } while (accept(TokenType.COMMA));
         Query.FromItem from = null;
         if (acceptKeyword("FROM")) {
             from = fromItem();
+            h = Math.max(h, height);
         }
         Expr where = null;
         if (acceptKeyword("WHERE")) {
             where = expr();
+            h = Math.max(h, height);
         }
         List<Expr> groupBy = List.of();
         if (acceptKeyword("GROUP")) {
@@ -295,12 +384,15 @@ public final class Parser {
             groupBy = new ArrayList<>();
             do {
                 groupBy.add(expr());
+                h = Math.max(h, height);
             } while (accept(TokenType.COMMA));
         }
         Expr having = null;
         if (acceptKeyword("HAVING")) {
             having = expr();
+            h = Math.max(h, height);
         }
+        height = h;
         return new Query.Select(SourcePos.of(start), distinct, items, from, where, groupBy, having);
     }
 
@@ -309,12 +401,14 @@ public final class Parser {
         SourcePos pos = SourcePos.of(t);
         if (t.is(TokenType.STAR)) {
             next();
+            height = 0;
             return new Query.Star(pos, null);
         }
         if (isIdent(t) && peek(1).is(TokenType.DOT) && peek(2).is(TokenType.STAR)) {
             next();
             next();
             next();
+            height = 0;
             return new Query.Star(pos, t.text());
         }
         Expr e = expr();
@@ -329,16 +423,20 @@ public final class Parser {
 
     private Query.FromItem fromItem() {
         Query.FromItem left = tableRef();
+        int h = height;
         while (true) {
+            Checkpoint.poll();
             Token t = peek();
             SourcePos pos = SourcePos.of(t);
             if (t.is(TokenType.COMMA)) {
                 next();
                 left = new Query.Join(pos, left, tableRef(), Query.JoinKind.CROSS, null);
+                h = Math.max(h, height);
             } else if (t.isKeyword("CROSS")) {
                 next();
                 expectKeyword("JOIN");
                 left = new Query.Join(pos, left, tableRef(), Query.JoinKind.CROSS, null);
+                h = Math.max(h, height);
             } else if (t.isKeyword("JOIN") || t.isKeyword("INNER")) {
                 if (acceptKeyword("INNER")) {
                     expectKeyword("JOIN");
@@ -346,18 +444,23 @@ public final class Parser {
                     next();
                 }
                 Query.FromItem right = tableRef();
+                h = Math.max(h, height);
                 expectKeyword("ON");
                 left = new Query.Join(pos, left, right, Query.JoinKind.INNER, expr());
+                h = Math.max(h, height);
             } else if (t.isKeyword("LEFT")) {
                 next();
                 acceptKeyword("OUTER");
                 expectKeyword("JOIN");
                 Query.FromItem right = tableRef();
+                h = Math.max(h, height);
                 expectKeyword("ON");
                 left = new Query.Join(pos, left, right, Query.JoinKind.LEFT, expr());
+                h = Math.max(h, height);
             } else if (t.isKeyword("RIGHT") || t.isKeyword("FULL")) {
                 throw unsupported(t, t.text() + " JOIN");
             } else {
+                height = h;
                 return left;
             }
         }
@@ -367,20 +470,21 @@ public final class Parser {
         Token t = peek();
         SourcePos pos = SourcePos.of(t);
         if (t.is(TokenType.LPAREN)) {
-            enter();
             next();
             Token n = peek();
             if (n.isKeyword("SELECT") || n.isKeyword("WITH")) {
-                Query q = query();
+                Query q = subquery();
                 expect(TokenType.RPAREN);
                 acceptKeyword("AS");
                 String alias = identifier("derived table alias");
-                depth--;
                 return new Query.DerivedTable(pos, q, alias);
             }
+            // a parenthesized join counts as a nesting level too
+            enter();
             Query.FromItem inner = fromItem();
+            leave();
+            height = level(height);
             expect(TokenType.RPAREN);
-            depth--;
             return inner;
         }
         String name = identifier("table name");
@@ -390,34 +494,50 @@ public final class Parser {
         } else if (isIdent(peek())) {
             alias = next().text();
         }
+        height = 0;
         return new Query.TableRef(pos, name, alias);
     }
 
     // ---------------------------------------------------------------- expressions
 
     public Expr expr() {
+        return orExpr();
+    }
+
+    /**
+     * Finishes a chain of binary operators of one precedence level whose first operand
+     * ({@code left}, of height {@code leftHeight}) is parsed: the chain is one construct.
+     */
+    private Expr chain(Expr left, int leftHeight, Function<Token, BinaryOp> operator,
+                       Supplier<Expr> operandParser) {
+        BinaryOp op = operator.apply(peek());
+        if (op == null) {
+            height = leftHeight;
+            return left;
+        }
+        int h = leftHeight;
         enter();
-        Expr e = orExpr();
-        depth--;
-        return e;
+        while (op != null) {
+            Token t = next();
+            Expr right = operandParser.get();
+            h = Math.max(h, height);
+            left = new Expr.Binary(SourcePos.of(t), op, left, right);
+            Checkpoint.poll();
+            op = operator.apply(peek());
+        }
+        leave();
+        height = level(h);
+        return left;
     }
 
     private Expr orExpr() {
         Expr left = andExpr();
-        while (peek().isKeyword("OR")) {
-            Token op = next();
-            left = new Expr.Binary(SourcePos.of(op), BinaryOp.OR, left, andExpr());
-        }
-        return left;
+        return chain(left, height, t -> t.isKeyword("OR") ? BinaryOp.OR : null, this::andExpr);
     }
 
     private Expr andExpr() {
         Expr left = notExpr();
-        while (peek().isKeyword("AND")) {
-            Token op = next();
-            left = new Expr.Binary(SourcePos.of(op), BinaryOp.AND, left, notExpr());
-        }
-        return left;
+        return chain(left, height, t -> t.isKeyword("AND") ? BinaryOp.AND : null, this::notExpr);
     }
 
     private Expr notExpr() {
@@ -425,7 +545,8 @@ public final class Parser {
             Token op = next();
             enter();
             Expr operand = notExpr();
-            depth--;
+            leave();
+            height = level(height);
             return new Expr.Unary(SourcePos.of(op), UnaryOp.NOT, operand);
         }
         return predicate();
@@ -433,6 +554,7 @@ public final class Parser {
 
     private Expr predicate() {
         Expr left = concatExpr();
+        int h = height;
         Token t = peek();
         SourcePos pos = SourcePos.of(t);
         BinaryOp cmp = switch (t.type()) {
@@ -446,12 +568,17 @@ public final class Parser {
         };
         if (cmp != null) {
             next();
-            return new Expr.Binary(pos, cmp, left, concatExpr());
+            enter();
+            Expr right = concatExpr();
+            leave();
+            height = level(Math.max(h, height));
+            return new Expr.Binary(pos, cmp, left, right);
         }
         if (t.isKeyword("IS")) {
             next();
             boolean negated = acceptKeyword("NOT");
             expectKeyword("NULL");
+            height = level(h);
             return new Expr.IsNull(pos, left, negated);
         }
         boolean negated = false;
@@ -467,69 +594,72 @@ public final class Parser {
         }
         if (t.isKeyword("BETWEEN")) {
             next();
+            enter();
             Expr low = concatExpr();
+            h = Math.max(h, height);
             expectKeyword("AND");
             Expr high = concatExpr();
+            leave();
+            height = level(Math.max(h, height));
             return new Expr.Between(pos, left, low, high, negated);
         }
         if (t.isKeyword("IN")) {
             next();
             expect(TokenType.LPAREN);
+            enter();
             Token n = peek();
             if (n.isKeyword("SELECT") || n.isKeyword("WITH")) {
-                Query q = query();
+                Query q = subquery();
+                leave();
+                height = level(Math.max(h, height));
                 expect(TokenType.RPAREN);
                 return new Expr.InSubquery(pos, left, q, negated);
             }
             List<Expr> items = new ArrayList<>();
             do {
                 items.add(expr());
+                h = Math.max(h, height);
+                Checkpoint.poll();
             } while (accept(TokenType.COMMA));
+            leave();
+            height = level(h);
             expect(TokenType.RPAREN);
             return new Expr.InList(pos, left, items, negated);
         }
         if (t.isKeyword("LIKE")) {
             next();
-            return new Expr.Like(pos, left, concatExpr(), negated);
+            enter();
+            Expr pattern = concatExpr();
+            leave();
+            height = level(Math.max(h, height));
+            return new Expr.Like(pos, left, pattern, negated);
         }
+        height = h;
         return left;
     }
 
     private Expr concatExpr() {
         Expr left = additive();
-        while (peek().is(TokenType.CONCAT)) {
-            Token op = next();
-            left = new Expr.Binary(SourcePos.of(op), BinaryOp.CONCAT, left, additive());
-        }
-        return left;
+        return chain(left, height, t -> t.is(TokenType.CONCAT) ? BinaryOp.CONCAT : null, this::additive);
     }
 
     private Expr additive() {
         Expr left = multiplicative();
-        while (peek().is(TokenType.PLUS) || peek().is(TokenType.MINUS)) {
-            Token op = next();
-            BinaryOp b = op.is(TokenType.PLUS) ? BinaryOp.ADD : BinaryOp.SUB;
-            left = new Expr.Binary(SourcePos.of(op), b, left, multiplicative());
-        }
-        return left;
+        return chain(left, height, t -> switch (t.type()) {
+            case PLUS -> BinaryOp.ADD;
+            case MINUS -> BinaryOp.SUB;
+            default -> null;
+        }, this::multiplicative);
     }
 
     private Expr multiplicative() {
         Expr left = unary();
-        while (true) {
-            Token op = peek();
-            BinaryOp b = switch (op.type()) {
-                case STAR -> BinaryOp.MUL;
-                case SLASH -> BinaryOp.DIV;
-                case PERCENT -> BinaryOp.MOD;
-                default -> null;
-            };
-            if (b == null) {
-                return left;
-            }
-            next();
-            left = new Expr.Binary(SourcePos.of(op), b, left, unary());
-        }
+        return chain(left, height, t -> switch (t.type()) {
+            case STAR -> BinaryOp.MUL;
+            case SLASH -> BinaryOp.DIV;
+            case PERCENT -> BinaryOp.MOD;
+            default -> null;
+        }, this::unary);
     }
 
     private Expr unary() {
@@ -537,17 +667,21 @@ public final class Parser {
         if (t.is(TokenType.MINUS) || t.is(TokenType.PLUS)) {
             next();
             enter();
-            try {
-                if (t.is(TokenType.MINUS) && peek().is(TokenType.NUMBER)) {
-                    // Fold the sign into the literal so that INT64_MIN is representable.
-                    Token num = next();
-                    return new Expr.NumberLiteral(SourcePos.of(t), "-" + num.text());
-                }
+            Expr result;
+            if (t.is(TokenType.MINUS) && peek().is(TokenType.NUMBER)) {
+                // Fold the sign into the literal so that INT64_MIN is representable.
+                Token num = next();
+                operand();
+                height = 0;
+                result = new Expr.NumberLiteral(SourcePos.of(t), "-" + num.text());
+            } else {
                 Expr operand = unary();
-                return new Expr.Unary(SourcePos.of(t), t.is(TokenType.MINUS) ? UnaryOp.NEG : UnaryOp.PLUS, operand);
-            } finally {
-                depth--;
+                result = new Expr.Unary(SourcePos.of(t), t.is(TokenType.MINUS) ? UnaryOp.NEG : UnaryOp.PLUS,
+                        operand);
             }
+            leave();
+            height = level(height);
+            return result;
         }
         return primary();
     }
@@ -558,21 +692,28 @@ public final class Parser {
         switch (t.type()) {
             case NUMBER -> {
                 next();
+                operand();
+                height = 0;
                 return new Expr.NumberLiteral(pos, t.text());
             }
             case STRING -> {
                 next();
+                operand();
+                height = 0;
                 return new Expr.StringLiteral(pos, t.text());
             }
             case LPAREN -> {
                 next();
                 Token n = peek();
                 if (n.isKeyword("SELECT") || n.isKeyword("WITH")) {
-                    Query q = query();
+                    Query q = subquery();
                     expect(TokenType.RPAREN);
                     return new Expr.ScalarSubquery(pos, q);
                 }
+                enter();
                 Expr e = expr();
+                leave();
+                height = level(height);
                 expect(TokenType.RPAREN);
                 return e;
             }
@@ -581,6 +722,8 @@ public final class Parser {
                 if (peek().is(TokenType.LPAREN)) {
                     return functionCall(t);
                 }
+                operand();
+                height = 0;
                 if (peek().is(TokenType.DOT)) {
                     next();
                     String col = identifier("column name");
@@ -599,14 +742,20 @@ public final class Parser {
         switch (t.text()) {
             case "TRUE" -> {
                 next();
+                operand();
+                height = 0;
                 return new Expr.BooleanLiteral(pos, true);
             }
             case "FALSE" -> {
                 next();
+                operand();
+                height = 0;
                 return new Expr.BooleanLiteral(pos, false);
             }
             case "NULL" -> {
                 next();
+                operand();
+                height = 0;
                 return new Expr.NullLiteral(pos);
             }
             case "DATE", "TIMESTAMP" -> {
@@ -616,12 +765,17 @@ public final class Parser {
                     throw error(s, "expected string literal after " + t.text());
                 }
                 next();
+                operand();
+                height = 0;
                 return new Expr.TypedLiteral(pos, t.text(), s.text());
             }
             case "CAST" -> {
                 next();
                 expect(TokenType.LPAREN);
+                enter();
                 Expr operand = expr();
+                leave();
+                height = level(height);
                 expectKeyword("AS");
                 Expr.TypeName type = typeName();
                 expect(TokenType.RPAREN);
@@ -629,28 +783,37 @@ public final class Parser {
             }
             case "CASE" -> {
                 next();
+                enter();
+                int h = 0;
                 Expr operand = null;
                 if (!peek().isKeyword("WHEN")) {
                     operand = expr();
+                    h = height;
                 }
                 List<Expr.When> whens = new ArrayList<>();
                 do {
                     expectKeyword("WHEN");
                     Expr cond = expr();
+                    h = Math.max(h, height);
                     expectKeyword("THEN");
                     whens.add(new Expr.When(cond, expr()));
+                    h = Math.max(h, height);
+                    Checkpoint.poll();
                 } while (peek().isKeyword("WHEN"));
                 Expr elseExpr = null;
                 if (acceptKeyword("ELSE")) {
                     elseExpr = expr();
+                    h = Math.max(h, height);
                 }
                 expectKeyword("END");
+                leave();
+                height = level(h);
                 return new Expr.Case(pos, operand, whens, elseExpr);
             }
             case "EXISTS" -> {
                 next();
                 expect(TokenType.LPAREN);
-                Query q = query();
+                Query q = subquery();
                 expect(TokenType.RPAREN);
                 return new Expr.Exists(pos, q);
             }
@@ -661,19 +824,28 @@ public final class Parser {
     private Expr functionCall(Token name) {
         SourcePos pos = SourcePos.of(name);
         expect(TokenType.LPAREN);
+        enter();
         if (accept(TokenType.STAR)) {
+            operand();
             expect(TokenType.RPAREN);
+            leave();
+            height = level(0);
             return new Expr.FunctionCall(pos, name.text(), List.of(), false, true);
         }
         List<Expr> args = new ArrayList<>();
+        int h = 0;
         boolean distinct = false;
         if (!peek().is(TokenType.RPAREN)) {
             distinct = acceptKeyword("DISTINCT");
             do {
                 args.add(expr());
+                h = Math.max(h, height);
+                Checkpoint.poll();
             } while (accept(TokenType.COMMA));
         }
         expect(TokenType.RPAREN);
+        leave();
+        height = level(h);
         return new Expr.FunctionCall(pos, name.text(), args, distinct, false);
     }
 

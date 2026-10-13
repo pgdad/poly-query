@@ -1129,25 +1129,54 @@ final class Kernels {
         }
     }
 
+    /**
+     * A chain {@code a || b || …}: NULL if any operand is NULL, else the operands joined once
+     * (no copy of the growing prefix per link).
+     */
     static final class Concat implements VecExpr {
-        private final VecExpr left;
-        private final VecExpr right;
+        private final VecExpr[] parts;
+        private final Vec[] values;
         private final Vec out = new Vec(DataType.STRING, 16);
 
-        Concat(VecExpr left, VecExpr right) {
-            this.left = left;
-            this.right = right;
+        Concat(VecExpr[] parts) {
+            this.parts = parts;
+            this.values = new Vec[parts.length];
         }
 
         @Override
         public Vec eval(Batch b, int[] sel, int n) {
-            Vec a = left.eval(b, sel, n);
-            Vec c = right.eval(b, sel, n);
+            boolean anyNulls = false;
+            for (int j = 0; j < parts.length; j++) {
+                values[j] = parts[j].eval(b, sel, n);
+                anyNulls |= values[j].hasNulls;
+            }
             out.ensure(b.size);
-            boolean nul = unionNulls(out, a, c, sel, n, b.size);
+            boolean[] m = anyNulls ? out.nullMask(b.size) : null;
+            out.hasNulls = anyNulls;
+            StringBuilder sb = new StringBuilder();
             for (int k = 0; k < n; k++) {
                 int i = sel == null ? k : sel[k];
-                out.objects[i] = nul && out.nulls[i] ? null : a.string(i) + c.string(i);
+                boolean nul = false;
+                if (anyNulls) {
+                    for (Vec v : values) {
+                        if (v.isNull(i)) {
+                            nul = true;
+                            break;
+                        }
+                    }
+                    m[i] = nul;
+                }
+                if (nul) {
+                    out.objects[i] = null;
+                } else if (values.length == 2) {
+                    out.objects[i] = values[0].string(i) + values[1].string(i);
+                } else {
+                    sb.setLength(0);
+                    for (Vec v : values) {
+                        sb.append(v.string(i));
+                    }
+                    out.objects[i] = sb.toString();
+                }
             }
             return out;
         }

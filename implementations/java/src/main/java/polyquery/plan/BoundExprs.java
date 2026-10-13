@@ -5,6 +5,7 @@ import java.util.BitSet;
 import java.util.List;
 import java.util.function.Function;
 import java.util.function.Predicate;
+import polyquery.common.Checkpoint;
 
 /** Generic traversal and rewriting helpers for {@link BoundExpr} trees. Subquery plans are opaque. */
 public final class BoundExprs {
@@ -13,6 +14,7 @@ public final class BoundExprs {
 
     /** Direct child expressions, in a fixed order understood by {@link #withChildren}. */
     public static List<BoundExpr> children(BoundExpr e) {
+        Checkpoint.poll(); // every generic traversal of a planning stage passes here (CR-6 §4)
         return switch (e) {
             case BoundExpr.ColumnRef c -> List.of();
             case BoundExpr.OuterRef o -> List.of();
@@ -187,10 +189,15 @@ public final class BoundExprs {
 
     /** True if the expression has no row inputs (columns, aggregates, subqueries, functions with effects). */
     public static boolean isConstant(BoundExpr e) {
-        return !any(e, x -> x instanceof BoundExpr.ColumnRef || x instanceof BoundExpr.OuterRef
+        return !any(e, BoundExprs::isRowInput);
+    }
+
+    /** True if the node itself (not its children) makes an expression non-constant (see {@link #isConstant}). */
+    public static boolean isRowInput(BoundExpr x) {
+        return x instanceof BoundExpr.ColumnRef || x instanceof BoundExpr.OuterRef
                 || x instanceof BoundExpr.AggregateRef || x instanceof BoundExpr.ScalarSubquery
                 || x instanceof BoundExpr.Exists || x instanceof BoundExpr.InSubquery
-                || (x instanceof BoundExpr.Function f && f.name().equals("PQ_SLEEP")));
+                || (x instanceof BoundExpr.Function f && f.name().equals("PQ_SLEEP"));
     }
 
     /** Smallest and largest input column index referenced ({@code [MAX, -1]} if none). */
@@ -259,6 +266,21 @@ public final class BoundExprs {
         }
         return rewrite(e, x -> x instanceof BoundExpr.ColumnRef c
                 ? new BoundExpr.ColumnRef(c.index() + delta, c.type(), c.name()) : null);
+    }
+
+    /**
+     * The operands of the left-deep chain {@code a || b || …} rooted at {@code c}, left to right
+     * (a parenthesized right operand stays one operand).
+     */
+    public static List<BoundExpr> concatOperands(BoundExpr.Concat c) {
+        List<BoundExpr> out = new ArrayList<>();
+        BoundExpr e = c;
+        while (e instanceof BoundExpr.Concat link) {
+            out.add(link.right());
+            e = link.left();
+        }
+        out.add(e);
+        return out.reversed();
     }
 
     /** Splits a predicate into its top-level AND conjuncts. */

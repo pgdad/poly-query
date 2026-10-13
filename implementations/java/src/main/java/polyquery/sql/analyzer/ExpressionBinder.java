@@ -6,6 +6,7 @@ import java.math.BigInteger;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Locale;
+import polyquery.common.Checkpoint;
 import polyquery.common.ErrorCode;
 import polyquery.common.PolyQueryException;
 import polyquery.plan.AggregateCall;
@@ -60,9 +61,11 @@ final class ExpressionBinder {
 
     private BoundExpr bind(Expr e, AggMode mode) {
         try {
+            Checkpoint.poll();
             return bindInner(e, mode);
         } catch (PolyQueryException ex) {
-            if (!ex.details().containsKey("line") && ex.code() != ErrorCode.UNSUPPORTED) {
+            if (!ex.details().containsKey("line") && ex.code() != ErrorCode.UNSUPPORTED
+                    && ex.code() != ErrorCode.TIMEOUT && ex.code() != ErrorCode.CANCELLED) {
                 ex.withDetail("line", (long) e.pos().line()).withDetail("column", (long) e.pos().column());
             }
             throw ex;

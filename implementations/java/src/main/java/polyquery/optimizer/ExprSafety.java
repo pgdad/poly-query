@@ -4,7 +4,10 @@ import java.math.BigDecimal;
 import java.math.BigInteger;
 import java.math.MathContext;
 import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.IdentityHashMap;
 import java.util.List;
+import java.util.Map;
 import polyquery.plan.BoundExpr;
 import polyquery.plan.BoundExprs;
 import polyquery.plan.LogicalPlan;
@@ -65,34 +68,52 @@ public final class ExprSafety {
 
     /** The stored column each output slot of {@code plan} passes through, if any. */
     static Origin[] origins(LogicalPlan plan) {
-        List<Origin> out = new ArrayList<>();
-        collect(plan, out);
-        return out.toArray(new Origin[0]);
+        return new OriginCache().of(plan);
     }
 
-    private static void collect(LogicalPlan plan, List<Origin> out) {
-        switch (plan) {
-            case LogicalPlan.Scan s -> {
-                for (int c = 0; c < s.table().columnCount(); c++) {
-                    out.add(new Origin(s.table(), c));
+    /**
+     * {@link #origins} memoized per plan node (by identity: plans are immutable), for a rule
+     * that asks about every level of a deep plan — without the memo, nested derived tables
+     * would cost a walk to the scan per level (CR-6).
+     */
+    static final class OriginCache {
+        private final Map<LogicalPlan, Origin[]> memo = new IdentityHashMap<>();
+
+        /** The stored column each output slot of {@code plan} passes through, if any (do not modify). */
+        Origin[] of(LogicalPlan plan) {
+            Origin[] known = memo.get(plan);
+            if (known != null) {
+                return known;
+            }
+            Origin[] out = switch (plan) {
+                case LogicalPlan.Scan s -> {
+                    Origin[] cols = new Origin[s.table().columnCount()];
+                    for (int c = 0; c < cols.length; c++) {
+                        cols[c] = new Origin(s.table(), c);
+                    }
+                    yield cols;
                 }
-            }
-            case LogicalPlan.Filter f -> collect(f.input(), out);
-            case LogicalPlan.Join j -> {
-                collect(j.left(), out);
-                collect(j.right(), out);
-            }
-            case LogicalPlan.Project p -> {
-                Origin[] in = origins(p.input());
-                for (BoundExpr e : p.expressions()) {
-                    out.add(e instanceof BoundExpr.ColumnRef c && c.index() < in.length ? in[c.index()] : null);
+                case LogicalPlan.Filter f -> of(f.input());
+                case LogicalPlan.Join j -> {
+                    Origin[] left = of(j.left());
+                    Origin[] right = of(j.right());
+                    Origin[] both = Arrays.copyOf(left, left.length + right.length);
+                    System.arraycopy(right, 0, both, left.length, right.length);
+                    yield both;
                 }
-            }
-            default -> {
-                for (int i = 0; i < plan.schema().size(); i++) {
-                    out.add(null);
+                case LogicalPlan.Project p -> {
+                    Origin[] in = of(p.input());
+                    Origin[] cols = new Origin[p.expressions().size()];
+                    for (int i = 0; i < cols.length; i++) {
+                        BoundExpr e = p.expressions().get(i);
+                        cols[i] = e instanceof BoundExpr.ColumnRef c && c.index() < in.length ? in[c.index()] : null;
+                    }
+                    yield cols;
                 }
-            }
+                default -> new Origin[plan.width()];
+            };
+            memo.put(plan, out);
+            return out;
         }
     }
 

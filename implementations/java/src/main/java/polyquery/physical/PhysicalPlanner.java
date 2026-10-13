@@ -220,7 +220,7 @@ public final class PhysicalPlanner {
         if (j.condition() == null || options.joinStrategy() == JoinStrategy.NESTED_LOOP) {
             return new PhysicalPlan.NestedLoopJoin(left, right, j.kind(), j.condition());
         }
-        int leftWidth = j.left().schema().size();
+        int leftWidth = j.left().width();
         List<BoundExpr> leftKeys = new ArrayList<>();
         List<BoundExpr> rightKeys = new ArrayList<>();
         List<BoundExpr> residual = new ArrayList<>();
