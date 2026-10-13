@@ -454,6 +454,7 @@
 #define NF_PAREN     16    // parser: expression was parenthesised
 #define NF_DSCAN     32    // vexec.S: dict_single analysed this tree (cache)
 #define NF_DSINGLE   64    // vexec.S: ... and it has exactly one local column
+#define NF_DSNODICT  128   // vexec.S: ... which is not a dictionary column
 
 // Function ids (N_OP of bound NK_FUNC / NK_AGG)
 #define F_COUNT       1
@@ -816,12 +817,13 @@
 #define VB_N        16             // u64 tuples in the batch
 #define VB_EC       24             // EvalCtx* (EC_TABLES; EC_TUPLE set for
                                    //   row-at-a-time fallbacks)
-#define VB_POOL     32             // Vec** scratch vectors [VPOOL_MAX]
+#define VB_POOL     32             // Vec** scratch vectors [VB_POOLCAP]
 #define VB_POOLN    40             // u64 vectors in use (stack discipline)
 #define VB_DCACHE   48             // dictionary truth tables (vexec.S)
 #define VB_MCACHE   56             // per-dictionary-code memos (vexec.S)
-#define VB_SIZE     64
-#define VPOOL_MAX   64
+#define VB_POOLCAP  64             // u64 slots of VB_POOL (grows by doubling)
+#define VB_SIZE     80
+#define VPOOL_MAX   64             // initial VB_POOLCAP
 #define VKEY_MAX    32             // most keys evaluated as vectors at once
 // Join key task (vexec.S vkey_cells)
 #define VK_TS       0              // TupleSet*
