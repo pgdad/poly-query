@@ -148,7 +148,8 @@ code paths (native kernels are optional)."
     (loop for line = (read-line in nil nil)
           while line
           unless (blank-line-p line)
-            do (write-response-line (handle-json-text session line) out))
+            do (let ((*request-received* (get-internal-real-time)))
+                 (write-response-line (handle-json-text session line) out)))
     0))
 
 (defun read-stream-text (stream)

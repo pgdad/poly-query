@@ -1,7 +1,10 @@
 # PolyQuery — Common Lisp implementation (SBCL + ASDF, standard library only).
 
 SBCL       ?= sbcl
-SBCL_FLAGS  = --dynamic-space-size 8192 --control-stack-size 64 \
+# The control stack size applies to every thread (saved in the executable):
+# expression trees are processed recursively, and a statement at the
+# operand limit (src/sql/limits.lisp) needs about 256 MB in the worst case.
+SBCL_FLAGS  = --dynamic-space-size 8192 --control-stack-size 1024 \
               --non-interactive --no-sysinit --no-userinit
 SOURCES    := polyquery.asd build.lisp $(shell find src -name '*.lisp')
 

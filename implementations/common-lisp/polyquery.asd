@@ -36,7 +36,8 @@
                  (:file "csv")
                  (:file "json")))
    (:module "sql" :serial t
-    :components ((:file "lexer")
+    :components ((:file "limits")
+                 (:file "lexer")
                  (:file "ast")
                  (:file "parser")))
    (:module "analyzer" :serial t
@@ -103,7 +104,8 @@
                (:file "test-decimal38")
                (:file "test-plan")
                (:file "test-sort")
-               (:file "test-latency"))
+               (:file "test-latency")
+               (:file "test-limits"))
   :perform (test-op (o c)
              (unless (uiop:symbol-call '#:polyquery-tests '#:run-all-tests)
                (error "unit tests failed"))))

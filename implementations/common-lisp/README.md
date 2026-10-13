@@ -33,8 +33,14 @@ see *Change request CR-3: logical/physical plan separation*), and change
 request CR-2 raises the maximum DECIMAL precision from 18 to 38 digits with
 exact INT64/DECIMAL comparisons and the PQCF v2 file format
 (`spec/changes/decimal38.md`, capability `change.decimal38`; see *Change
-request CR-2: DECIMAL precision 38*). The latest round of work optimized
-query latency on the benchmark workload
+request CR-2: DECIMAL precision 38*). Change request CR-6 sets minimum
+statement sizes (1 MiB of text, nesting depth 1,000, 25,000 operands),
+reports statements beyond the engine's limits as `RESOURCE_LIMIT` and makes
+the query timeout cover parsing, analysis, planning and execution
+(`spec/changes/expression-limits.md`, capability
+`change.expression_limits`; see *Change request CR-6: expression size
+limits*, which also lists the engine's limits). Before that, a round of
+work optimized query latency on the benchmark workload
 (`benchmarks/workloads/analytics.json`, scale 1m) without changing results;
 see *Latency optimization (analytics workload)* for the measurements and
 the design decisions.
@@ -57,7 +63,9 @@ bin/polyquery version
 `bin/polyquery` is a small shell launcher that execs `build/polyquery` and works
 from any directory. The executable is saved with `:save-runtime-options`, so
 SBCL's runtime does not interpret any command-line arguments; the heap
-(8 GiB dynamic space) and control stack (64 MiB) sizes are fixed at build time.
+(8 GiB dynamic space) and control stack (1 GiB per thread, reserved but only
+touched by deeply nested statements; see *Change request CR-6*) sizes are
+fixed at build time.
 
 ## Libraries
 
@@ -78,7 +86,7 @@ own optional kernel library `libpqkernels` (built separately with
 `storage.pqcf`, `storage.mmap`, `index.hash`, `index.btree`, `phase4`,
 `http.streaming`, `phase5`, `exec.row`, `exec.vectorized`, `exec.parallel`,
 `join.hash`, `join.merge`, `join.nested_loop`, `native.kernels`,
-`change.union_all`, `change.decimal38`.
+`change.union_all`, `change.decimal38`, `change.expression_limits`.
 
 ## Architecture
 
@@ -731,6 +739,138 @@ predicate pushdown (below): it changed the EXPLAIN of 4 conformance queries
 an additional set of 42 derived-table/CTE/subquery queries × 8 option sets
 results and errors were identical to the previous engine.
 
+### Change request CR-6: expression size limits
+
+`spec/changes/expression-limits.md` (resolves SPEC-Q-002). Before the
+change the parser refused nesting deeper than 400 with `PARSE_ERROR`, a
+10,000-term `OR` chain took a second to plan (quadratic rewrites), a
+100,000-term chain did not answer within its timeout, and the timeout was
+only checked by the operators.
+
+**The engine's limits** (per statement, `query` and `explain`, including
+`EXPLAIN`; `src/sql/limits.lisp`):
+
+| measure | limit | minimum required |
+|---|---|---|
+| text length | 16 MiB (16,777,216 bytes of UTF-8) | 1 MiB |
+| nesting depth | 4,096 | 1,000 |
+| operand count | 250,000 | 25,000 |
+
+A statement beyond a limit fails with `RESOURCE_LIMIT` and a message naming
+the measure (`statement text length of N bytes exceeds 16777216`,
+`expression nesting depth exceeds 4096`, `operand count exceeds 250000`);
+the check runs while parsing, so it takes precedence over a syntax error
+later in the statement. Requests larger than `--max-request-bytes` still
+get HTTP 413 before any parsing. Within the limits, statements are limited
+only by memory (the query memory budget) and time (the timeout).
+
+**Measuring.** The parser counts while it reads (`with-depth` and
+`count-operand` in `sql/parser.lisp`). Each of these adds one level:
+parentheses, unary `+`/`-`, `NOT`, a function call, `CAST`, `CASE`, an `IN`
+list, `BETWEEN`, `LIKE`, a comparison (around its right operand) and a
+subquery (scalar, `EXISTS`, `IN`, derived table, CTE; the parentheses of a
+subquery are part of it). A chain of binary operators of one precedence
+level adds one level for all of its right operands, so `a OR b OR …` is
+depth 1 whatever its length. The left operand of a comparison is not
+counted, so the engine's depth is never larger than the spec's measure.
+Operands are literals (including `TRUE`/`FALSE`/`NULL` and typed
+`DATE`/`TIMESTAMP` literals), column references and `*` (also in
+`COUNT(*)`).
+
+**Why these numbers.** Chains are parsed by loops, but every later stage
+(binder, optimizer rules, compilers, the compiled closures and kernels)
+walks expression trees recursively, and a chain of n operators is a tree of
+depth n. The control stack therefore bounds the operand count: a
+249,000-term sum needed less than 256 MB of stack in every mode (and
+exhausted the former 64 MB), so the executable now gives every thread 1 GiB
+(`--control-stack-size` in the Makefile; the memory is reserved, not
+committed). Nesting depth 4,096 is far from any stack limit (4,090 nested
+scalar subqueries or derived tables plan and run in a few hundredths of a
+second). The text limit keeps lexing and parsing a statement well below a
+second.
+
+**Linear processing of long expressions.** The work on a statement is now
+linear (or n log n) in its size in every stage:
+
+* bound expressions memoize per node their properties (constant? may fail?
+  contains aggregates/parameters/subqueries/test-only calls), column sets,
+  node counts and a structural hash (`analyzer/bound.lisp`), so the per-node
+  checks of constant folding, predicate simplification, pushdown, column
+  pruning and the vectorized compiler no longer rescan subtrees;
+* `split-conjuncts` accumulates instead of `mapcan`-ing (quadratic on a
+  left-deep `AND` chain), `bexpr-describe` writes into one stream instead of
+  nesting `format` calls (quadratic output for a chain), CASE compilation
+  walks its branch list instead of `nth`, column pruning uses hash sets and
+  vectors instead of `remove-duplicates`/`nth`;
+* GROUP BY and aggregate matching in the grouping rewrite use a hashed
+  index of expressions (`bexpr-index`) instead of `position … :test
+  #'bexpr-equal` over growing lists;
+* constant folding works bottom-up (each node folded once, with already
+  folded operands; the result is the same as folding the largest constant
+  subexpressions);
+* the share keys of CTE reference plans (identical subplans of a statement
+  are computed once) were the EXPLAIN text of every node's subtree, which is
+  quadratic in a chain of CTEs (4,000 chained CTEs took 7 s to plan); a
+  node's key is now an interned id of its own EXPLAIN properties and its
+  children's and subqueries' ids, computed once per node
+  (`plan-identity` in `plan/physical.lisp`): equal ids exactly when the
+  EXPLAIN texts are equal, so the same plans are shared.
+
+**The timeout covers every stage.** The deadline counts from the receipt of
+the request (session mode: when the request line has been read; HTTP: at
+admission) and is checked
+by the lexer and parser (every 4,096 tokens), the binder (every expression
+node), every optimizer rewrite and both expression compilers (every node),
+and by compiled expressions themselves: a compiled node whose subtree size
+crosses a multiple of 4,096 nodes (row executor, per row) or 64 nodes
+(vectorized executor, per batch) checks the deadline *after* evaluating its
+subtree, so at most a few thousand node evaluations separate two checks and
+small expressions get no checks at all. String concatenation counts the
+characters it produces (a chain of `||` is quadratic in data) and LIKE
+checks every 2^20 matching steps. Wide CASE expressions check every 64
+branches, very wide projections and aggregations every slice (below).
+TIMEOUT and CANCELLED are never absorbed by the error handling of constant
+folding. With 30 s timeouts the probe's beyond-the-minimum statements answer
+correctly in well under a second; at the engine's limits on a 200,000-row
+table every mode answered `TIMEOUT` 0.0–0.45 s after a 3 s timeout expired.
+
+**Memory of very large expressions.** Three vectorized paths kept memory
+proportional to the size of the expression times the batch size alive and
+could exhaust the heap (fatally, during a garbage collection):
+
+* operand vectors were stored into an array allocated before the operands
+  were evaluated; in a deep chain all those arrays were promoted to an old
+  generation during the descent and then kept every intermediate vector
+  alive (the arrays are now allocated after the operands are evaluated);
+* operators with more than 64 non-constant operands (e.g. `COALESCE` of
+  thousands of columns) and searched CASE expressions with more than 64
+  branches evaluated all operands as whole-batch vectors at once; they now
+  run row by row (`compile-row-fallback`) or branch by branch;
+* projections and aggregations with more than 64 expressions process their
+  input batches in slices of `64 × 2048 / width` rows, and wide groups are
+  charged to the memory budget more often than every 1,024 groups.
+
+**Stack exhaustion** in any thread (session main thread, HTTP connection
+and worker threads, parallel query workers) is caught at the request or
+worker boundary and reported as `RESOURCE_LIMIT` (`statement too complex:
+stack exhausted`); worker threads already transport any condition to the
+consuming thread. The limits make it unreachable for statements the engine
+accepts.
+
+**Modules touched:** `sql/limits.lisp` (new: limits and measures),
+`sql/lexer.lisp` and `sql/parser.lisp` (measuring, deadline checks),
+`analyzer/bound.lisp` (memoized properties, hashing, expression index,
+linear helpers), `analyzer/binder.lisp`, `analyzer/query.lisp` (deadline
+checks, hashed grouping rewrite), `plan/rules/constant-folding.lisp`,
+`plan/rules/predicate-simplification.lisp`, `plan/rules/column-pruning.lisp`,
+`plan/physical.lisp` (CTE share keys),
+`exec/context.lisp` (deadline from request receipt), `exec/expressions.lisp`,
+`exec/vexpressions.lisp`, `exec/vectors.lisp`, `exec/voperators.lisp`
+(checkpoints, memory of wide expressions), `protocol/requests.lisp`
+(stack exhaustion, `explain` honours `timeout_ms`), `protocol/cli.lisp`,
+`engine.lisp` (capability), `Makefile` (stack size), and the unit tests
+`tests/test-limits.lisp`.
+
 ### Extensibility notes
 
 * A logical rewrite is a function from logical plan to logical plan in
@@ -861,8 +1001,9 @@ results and errors were identical to the previous engine.
 * Default limits: query memory budget 2048 MB (approximate accounting of
   materialized rows, hash tables, sort buffers), ingestion 4 GiB,
   200,000,000 table rows, 100,000,000 rows produced by any single join
-  operator (`--max-join-rows`). Parser nesting depth is limited to 400
-  (deeper input is a `PARSE_ERROR`); heap or stack exhaustion is reported as
+  operator (`--max-join-rows`). Statement size limits: 16 MiB of SQL
+  text, nesting depth 4,096, 250,000 operands (see *Change request CR-6*);
+  beyond them, and on heap or stack exhaustion, the answer is
   `RESOURCE_LIMIT`.
 
 ### SQL semantics (Phase 2)
@@ -1342,6 +1483,23 @@ copy-free scans for grouped aggregation.
   error → HTTP status table, admission/overload, cancellation of queued and
   running jobs, queued timeouts, the bounded streaming channel and metrics
   rendering.
+* Statement limits (`tests/test-limits.lisp`): the minimum depths
+  (parentheses, ABS, unary minus, NOT, subqueries) and long chains (OR,
+  AND, sum, IN, `||`, CASE, aggregates, constant folding) in row,
+  vectorized and parallel mode, `RESOURCE_LIMIT` for each measure with the
+  measure in the message, UTF-8 byte counting, TIMEOUT while parsing and
+  from the receipt of the request, folding never swallowing TIMEOUT, the
+  expression index and caches, and stack exhaustion in the calling thread
+  and in a worker thread. `python3 tests/regression/robustness_probe.py
+  --engine implementations/common-lisp/bin/polyquery --only
+  expression_limits` is the public check; during development about 60
+  further statements at and beyond the limits (every construct of the
+  depth measure nested 4,090 deep, chains of 124,000–249,000 terms, CASE
+  with 80,000 branches, 20,000 aggregates or GROUP BY keys, 1 MiB comments,
+  4,000 chained or nested CTEs, 1,000 joins, 10,000 UNION ALL branches,
+  thousands of scalar, correlated and IN subqueries)
+  were run in all four modes over session and HTTP, also on a 200,000-row
+  table and with timeouts between 50 ms and 30 s.
 * UNION ALL unit tests (`tests/test-union.lisp`): see *Change request
   CR-1*. DECIMAL(38) unit tests (`tests/test-decimal38.lisp`): see *Change
   request CR-2*.
@@ -1476,6 +1634,17 @@ copy-free scans for grouped aggregation.
 * Each connection has its own thread; there is no limit on the number of
   connections. Request bodies are held in memory (up to
   `--max-request-bytes`).
+* Statements near the size limits are correct but not fast on large
+  tables: the vectorized executor allocates one vector per expression node
+  and batch (a 250,000-term sum allocates about 4 GB of short-lived vectors
+  per 2,048 rows), operators with more than 64 vector operands run row by
+  row, and very wide select lists and aggregations work on slices of a
+  batch. They keep the timeout and the memory budget; on 200,000 rows they
+  typically end with `TIMEOUT` (or `RESOURCE_LIMIT` for results and groups
+  beyond the memory budget).
+* `explain` requests over HTTP (`/v1/explain`) are planned on the
+  connection thread; they honour `options.timeout_ms` but not
+  `--query-timeout-ms`, and they do not count as queries for admission.
 * Operators that run for a long time between row boundaries (e.g. a large
   in-memory sort) notice cancellation only at their next check; the client
   still receives `CANCELLED`/`TIMEOUT` within ~50 ms, but the worker stays

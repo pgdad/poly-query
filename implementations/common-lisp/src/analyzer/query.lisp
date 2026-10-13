@@ -189,22 +189,20 @@ reference in GROUP BY / ORDER BY), else NIL."
                                                                     :test #'ascii-string-equal))))
         (t (bind-expr node (env-with env :aggregates :forbidden :clause "GROUP BY")))))))
 
-(defun rewrite-for-aggregation (e group-by aggregates-cell)
+(defun rewrite-for-aggregation (e group-index aggregate-index)
   "Rewrite output expression E onto the aggregation row. Subexpressions equal
-to a GROUP BY expression become key references, aggregate calls become
-references to (deduplicated) aggregate slots collected in AGGREGATES-CELL
-(a cons whose car is the list). Remaining input columns are an error."
-  (let ((ngroups (length group-by)))
+to a GROUP BY expression (in the BEXPR-INDEX GROUP-INDEX) become key
+references, aggregate calls become references to (deduplicated) aggregate
+slots collected in the BEXPR-INDEX AGGREGATE-INDEX. Remaining input columns
+are an error."
+  (let ((ngroups (bexpr-index-count group-index)))
     (bexpr-rewrite
      (lambda (x)
-       (let ((k (position x group-by :test #'bexpr-equal)))
+       (let ((k (bexpr-index-position group-index x)))
          (cond
            (k (make-b-column (bexpr-type x) k (bexpr-describe x)))
            ((b-agg-p x)
-            (let ((j (position x (car aggregates-cell) :test #'bexpr-equal)))
-              (unless j
-                (setf (car aggregates-cell) (append (car aggregates-cell) (list x))
-                      j (1- (length (car aggregates-cell)))))
+            (let ((j (bexpr-index-add aggregate-index x)))
               (make-b-column (bexpr-type x) (+ ngroups j) (bexpr-describe x))))
            ((b-column-p x)
             (semantic-error "column ~A must appear in GROUP BY or be used in an aggregate function"
@@ -315,21 +313,22 @@ expressions in ENV (which already sees the query's CTEs)."
           (let* ((aggregated (or group-by having
                                  (some (lambda (o) (bexpr-contains-aggregate-p (cdr o))) outputs)
                                  (some #'bexpr-contains-aggregate-p hidden)))
-                 (aggregates (list '()))
+                 (aggregates (make-bexpr-index))
                  (columns (loop for (name . e) in outputs
                                 collect (make-column-def name (bexpr-type e)))))
             (when aggregated
-              (flet ((rewrite (e) (rewrite-for-aggregation e group-by aggregates)))
-                (setf outputs (loop for (name . e) in outputs collect (cons name (rewrite e)))
-                      hidden (mapcar #'rewrite hidden)
-                      having (and having (rewrite having)))))
+              (let ((group-index (make-bexpr-index group-by)))
+                (flet ((rewrite (e) (rewrite-for-aggregation e group-index aggregates)))
+                  (setf outputs (loop for (name . e) in outputs collect (cons name (rewrite e)))
+                        hidden (mapcar #'rewrite hidden)
+                        having (and having (rewrite having))))))
             (make-bound-query
              :from from
              :from-width from-width
              :where where
              :aggregated-p (and aggregated t)
              :group-by group-by
-             :aggregates (car aggregates)
+             :aggregates (bexpr-index-list aggregates)
              :having having
              :outputs (mapcar #'cdr outputs)
              :hidden hidden

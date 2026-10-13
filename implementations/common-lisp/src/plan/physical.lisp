@@ -116,16 +116,30 @@ row operator in the vectorized executor (voperators.lisp)."
   root                                   ; PNODE
   settings)                              ; EXECUTION-SETTINGS
 
+(defstruct plan-identity
+  (id 0 :type fixnum)       ; equal ids <=> equal EXPLAIN texts
+  invariant                 ; see PLAN-INVARIANT-P
+  sleeps)                   ; the plan calls PQ_SLEEP
+
+(defvar *plan-identities* nil
+  "While a statement is planned: (node table . key table) memoizing
+PLAN-IDENTITY per plan node and interning identity keys.")
+
+(defmacro with-plan-identities (() &body body)
+  `(let ((*plan-identities* (cons (make-hash-table :test 'eq) (make-hash-table :test 'equal))))
+     ,@body))
+
 (defun plan-bound-query (bq &optional (options *exec-options*))
   "Full planning pipeline for an analysed query under the EXEC-OPTIONS
 OPTIONS: logical plan, logical optimization, physical plan (including the
 plans of nested subqueries) and execution settings."
-  (let ((*exec-options* options)
-        (*use-indexes* (exec-options-use-indexes options)))
-    (make-physical-query
-     :root (physical-plan (optimize-logical-plan (build-logical-plan bq)
-                                                 :enabled (exec-options-optimize options)))
-     :settings (choose-execution-settings options))))
+  (with-plan-identities ()
+    (let ((*exec-options* options)
+          (*use-indexes* (exec-options-use-indexes options)))
+      (make-physical-query
+       :root (physical-plan (optimize-logical-plan (build-logical-plan bq)
+                                                   :enabled (exec-options-optimize options)))
+       :settings (choose-execution-settings options)))))
 
 (defun choose-execution-settings (options)
   "The EXECUTION-SETTINGS for a statement run with the EXEC-OPTIONS OPTIONS."
@@ -222,21 +236,54 @@ residual-conjuncts); right keys index the right input."
 
 (defun mark-cte-plan (plan cte)
   "Set the share keys of the nodes of the PLAN of a reference to the CTE (its
-bound query), see CTE-SHARE-KEY."
+bound query), see CTE-SHARE-KEY. A node that already has a key was marked
+with its whole subtree (by a reference to an inner CTE)."
+  (check-interrupts)
   (unless (pnode-share-key plan)
-    (setf (pnode-share-key plan) (cte-share-key cte plan)))
-  (dolist (child (pnode-children plan))
-    (mark-cte-plan child cte)))
+    (setf (pnode-share-key plan) (cte-share-key cte plan))
+    (dolist (child (pnode-children plan))
+      (mark-cte-plan child cte))))
 
 (defun cte-share-key (cte node)
   "Share key of the plan NODE inside a reference to the CTE: the CTE and the
-plan's EXPLAIN text. References whose plans were rewritten differently (e.g.
-by predicate pushdown) still share their identical subplans. NIL when the
-rows may differ between evaluations (correlation, test functions)."
-  (when (plan-invariant-p node)
-    (let ((text (json-to-string (explain-plan-json node))))
-      (unless (search "PQ_SLEEP" text :test #'char-equal)
-        (cons cte text)))))
+identity of the plan's EXPLAIN text (see PLAN-IDENTITY). References whose
+plans were rewritten differently (e.g. by predicate pushdown) still share
+their identical subplans. NIL when the rows may differ between evaluations
+(correlation, test functions)."
+  (let ((identity (plan-identity node)))
+    (when (and (plan-identity-invariant identity)
+               (not (plan-identity-sleeps identity)))
+      (cons cte (plan-identity-id identity)))))
+
+(defun plan-identity (node)
+  "The PLAN-IDENTITY of the physical plan NODE, computed bottom-up (each node
+once, so long chains of CTEs cost linear time, CR-6): two plans get the
+same id exactly when their EXPLAIN JSON texts are equal, since a node's
+JSON is its own properties followed by its children's and its subqueries'."
+  (unless *plan-identities*
+    (return-from plan-identity (with-plan-identities () (plan-identity node))))
+  (destructuring-bind (nodes . keys) *plan-identities*
+    (or (gethash node nodes)
+        (setf (gethash node nodes)
+              (let* ((children (mapcar #'plan-identity (pnode-children node)))
+                     (subqueries (expression-subqueries (node-expressions node)))
+                     (subplans (mapcar (lambda (sq) (plan-identity (subquery-plan sq))) subqueries))
+                     (own (json-to-string (apply #'jobj (explain-properties node))))
+                     (key (list* own
+                                 (mapcar #'plan-identity-id children)
+                                 (mapcar (lambda (sq sub)
+                                           (list (subquery-kind sq) (plusp (subquery-param-count sq))
+                                                 (plan-identity-id sub)))
+                                         subqueries subplans))))
+                (check-interrupts)
+                (make-plan-identity
+                 :id (or (gethash key keys)
+                         (setf (gethash key keys) (hash-table-count keys)))
+                 :invariant (and (node-invariant-p node)
+                                 (every #'plan-identity-invariant children))
+                 :sleeps (or (search "PQ_SLEEP" own :test #'char-equal)
+                             (some #'plan-identity-sleeps children)
+                             (some #'plan-identity-sleeps subplans))))))))
 
 (defun parameter-only-p (e)
   "True if E reads no columns but depends on correlation parameters."
@@ -291,17 +338,22 @@ for a Filter directly over a Scan."
 (defun plan-invariant-p (node)
   "True if the rows NODE produces cannot change between executions of an
 enclosing correlated subquery (no correlation parameters anywhere)."
+  (and (node-invariant-p node)
+       (or (pp-batch-source-p node)
+           (every #'plan-invariant-p (pnode-children node)))))
+
+(defun node-invariant-p (node)
+  "PLAN-INVARIANT-P for NODE's own expressions (not its children)."
   (if (pp-batch-source-p node)
       (pp-batch-source-invariant node)
-      (and (every (lambda (e)
-                (or (null e)
-                    (not (bexpr-some (lambda (x)
-                                       (or (b-param-p x)
-                                           (and (subquery-op-p x)
-                                                (not (subquery-cacheable (b-op-info x))))))
-                                     e))))
-              (node-expressions node))
-       (every #'plan-invariant-p (pnode-children node)))))
+      (every (lambda (e)
+               (or (null e)
+                   (not (bexpr-some (lambda (x)
+                                      (or (b-param-p x)
+                                          (and (subquery-op-p x)
+                                               (not (subquery-cacheable (b-op-info x))))))
+                                    e))))
+             (node-expressions node))))
 
 (defun choose-join-algorithm ()
   "The algorithm for an equi-join: the forced `join` option, else a hash join

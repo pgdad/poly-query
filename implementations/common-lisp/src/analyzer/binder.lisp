@@ -418,6 +418,7 @@ parameters. Returns (values SUBQUERY parameter-expressions)."
 ;;; Expression dispatcher
 
 (defun bind-expr (node env)
+  (check-interrupts)                    ; the query timeout covers analysis (CR-6)
   (etypecase node
     (ast-literal (bind-literal node))
     (ast-column-ref (resolve-column env node))

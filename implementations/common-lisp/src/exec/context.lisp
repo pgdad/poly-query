@@ -23,9 +23,15 @@ re-acquiring the mutex). Returns true if woken up."
                (sb-thread:grab-mutex mutex))
              nil)))
 
+(defvar *request-received* nil
+  "Internal real time at which the request being handled was received, or
+NIL (then deadlines count from their creation).")
+
 (defun make-deadline (timeout-ms)
+  "The deadline of a query with TIMEOUT-MS, counted from the receipt of the
+request (CR-6: the timeout covers every stage of the query)."
   (when (and timeout-ms (plusp timeout-ms))
-    (+ (get-internal-real-time)
+    (+ (or *request-received* (get-internal-real-time))
        (ceiling (* timeout-ms internal-time-units-per-second) 1000))))
 
 (defun check-interrupts ()
@@ -37,6 +43,11 @@ re-acquiring the mutex). Returns true if woken up."
       (let ((deadline (query-context-deadline ctx)))
         (when (and deadline (> (get-internal-real-time) deadline))
           (signal-pq-error "TIMEOUT" "query exceeded its timeout"))))))
+
+(defun interrupt-error-p (condition)
+  "True if the PQ-ERROR CONDITION is a timeout or a cancellation (which must
+never be absorbed by code that handles other errors)."
+  (member (pq-error-code condition) '("TIMEOUT" "CANCELLED") :test #'string=))
 
 (defun charge-memory (bytes)
   "Account BYTES of materialized state against the query memory budget."

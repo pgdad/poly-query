@@ -86,6 +86,8 @@ alternating keys and JSON values appended after ts, level and msg."
   (handler-case (funcall thunk)
     (pq-error (e)
       (error-response id (pq-error-code e) (pq-error-message e) (pq-error-details e)))
+    (sb-kernel::control-stack-exhausted ()
+      (error-response id "RESOURCE_LIMIT" "statement too complex: stack exhausted"))
     (storage-condition ()
       (error-response id "RESOURCE_LIMIT" "out of memory while processing the request"))
     (error (e)
@@ -132,7 +134,10 @@ alternating keys and JSON values appended after ts, level and msg."
              (options (or (request-field request "options" :type :object) (jobj))))
          (validate-query-options options)
          (success-response id "plan" (explain-sql session sql
-                                                  :options (session-exec-options session options)))))
+                                                  :options (session-exec-options session options)
+                                                  :timeout-ms (request-field
+                                                               options "timeout_ms"
+                                                               :type :non-negative-integer)))))
       ((string= op "save") (op-save session id request))
       ((string= op "open") (op-open session id request))
       ((string= op "stats") (op-stats session id request))

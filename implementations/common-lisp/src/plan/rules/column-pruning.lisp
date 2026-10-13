@@ -18,7 +18,21 @@
 
 (defun union-columns (required exprs)
   "Sorted union of the positions REQUIRED and the columns used by EXPRS."
-  (sort (remove-duplicates (append required (mapcan #'bexpr-column-indexes exprs))) #'<))
+  (let ((seen (make-hash-table))
+        (acc '()))
+    (flet ((add (i)
+             (unless (gethash i seen)
+               (setf (gethash i seen) t)
+               (push i acc))))
+      (mapc #'add required)
+      (dolist (e exprs)
+        (mapc #'add (bexpr-column-indexes e))))
+    (sort acc #'<)))
+
+(defun elements-at (list positions)
+  "The elements of LIST at POSITIONS (in that order), in linear time."
+  (let ((v (coerce list 'simple-vector)))
+    (mapcar (lambda (i) (svref v i)) positions)))
 
 (defun prune-node (node required)
   "Prune NODE so that it produces (at least) the REQUIRED output positions.
@@ -35,11 +49,11 @@ new ones."
          (prune-node (lnode-child node) (union-columns required (list (lp-filter-predicate node))))
        (values (make-filter child (remap (lp-filter-predicate node) m)) m)))
     (lp-project
-     (let ((kept (mapcar (lambda (i) (nth i (lp-project-exprs node))) required)))
+     (let ((kept (elements-at (lp-project-exprs node) required)))
        (multiple-value-bind (child m) (prune-node (lnode-child node) (union-columns '() kept))
          (values (make-lp-project :children (list child)
                                   :exprs (mapcar (lambda (e) (remap e m)) kept)
-                                  :columns (mapcar (lambda (i) (nth i (lnode-columns node))) required))
+                                  :columns (elements-at (lnode-columns node) required))
                  (make-mapping (lnode-width node) required)))))
     (lp-join
      (destructuring-bind (left right) (lnode-children node)
@@ -75,8 +89,7 @@ new ones."
     (lp-sort
      (multiple-value-bind (child m)
          (prune-node (lnode-child node)
-                     (sort (remove-duplicates (append required (mapcar #'first (lp-sort-keys node))))
-                           #'<))
+                     (union-columns (append required (mapcar #'first (lp-sort-keys node))) '()))
        (values (make-sort child (loop for (pos . rest) in (lp-sort-keys node)
                                       collect (cons (svref m pos) rest)))
                m)))
@@ -97,15 +110,14 @@ new ones."
                                     for new from 0
                                     always (eql (svref m old) new))
                               new-child
-                              (make-project new-child
-                                            (loop for old in required
-                                                  for c = (nth old (lnode-columns child))
-                                                  collect (make-b-column (column-def-type c)
-                                                                         (svref m old)
-                                                                         (column-def-name c)))
-                                            (loop for old in required
-                                                  collect (column-def-name
-                                                           (nth old (lnode-columns child))))))))
+                              (let ((columns (elements-at (lnode-columns child) required)))
+                                (make-project new-child
+                                              (loop for old in required
+                                                    for c in columns
+                                                    collect (make-b-column (column-def-type c)
+                                                                           (svref m old)
+                                                                           (column-def-name c)))
+                                              (mapcar #'column-def-name columns))))))
                       (lnode-children node))
-              (mapcar (lambda (i) (nth i (lnode-columns node))) required))
+              (elements-at (lnode-columns node) required))
              (make-mapping (lnode-width node) required)))))

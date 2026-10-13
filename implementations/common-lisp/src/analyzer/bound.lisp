@@ -12,7 +12,15 @@
 (in-package #:polyquery)
 
 (defstruct (bexpr (:constructor nil))
-  type)
+  type
+  ;; Lazily computed summaries of the subtree (see BEXPR-PROPERTIES and
+  ;; BEXPR-COLUMN-INDEXES). Nodes are never mutated after construction, so
+  ;; the caches stay valid; they keep the per-node checks of the planner and
+  ;; the compilers linear in the size of an expression (CR-6).
+  (properties-cache nil)
+  (column-cache :unknown)
+  (hash-cache nil)
+  (size-cache nil))
 
 (defstruct (b-literal (:include bexpr) (:constructor make-b-literal (type value)))
   value)
@@ -77,14 +85,47 @@ parameter expressions, which are evaluated in the enclosing row."
   (funcall fn e)
   (dolist (c (bexpr-children e)) (bexpr-walk fn c)))
 
+(defconstant +prop-column+ 1)
+(defconstant +prop-aggregate+ 2)
+(defconstant +prop-param+ 4)
+(defconstant +prop-subquery+ 8)
+(defconstant +prop-may-fail+ 16)
+(defconstant +prop-test-only+ 32)
+
+(defun bexpr-properties (e)
+  "Bit mask of the +PROP-...+ flags that hold for some node of E (memoized
+per node)."
+  (or (bexpr-properties-cache e)
+      (setf (bexpr-properties-cache e)
+            (let ((own (typecase e
+                         (b-column +prop-column+)
+                         (b-param +prop-param+)
+                         (b-agg +prop-aggregate+)
+                         (b-op (logior (if (subquery-op-p e) +prop-subquery+ 0)
+                                       (if (node-may-fail-p e) +prop-may-fail+ 0)
+                                       (if (and (eq (b-op-op e) :call)
+                                                (scalar-function-test-only (b-op-info e)))
+                                           +prop-test-only+ 0)))
+                         (t 0))))
+              (dolist (c (bexpr-children e) own)
+                (setf own (logior own (bexpr-properties c))))))))
+
+(declaim (inline bexpr-has-p))
+(defun bexpr-has-p (e flags)
+  "True if some node of E has one of the property FLAGS."
+  (logtest (bexpr-properties e) flags))
+
 (defun bexpr-contains-aggregate-p (e)
-  (bexpr-some #'b-agg-p e))
+  (bexpr-has-p e +prop-aggregate+))
 
 (defun bexpr-constant-p (e)
   "True if E depends on nothing but literals (no columns, parameters,
 aggregates or subqueries)."
-  (not (bexpr-some (lambda (x) (or (b-column-p x) (b-agg-p x) (b-param-p x) (subquery-op-p x)))
-                   e)))
+  (not (bexpr-has-p e (logior +prop-column+ +prop-aggregate+ +prop-param+ +prop-subquery+))))
+
+(defun bexpr-list-equal (as bs)
+  (loop (cond ((and (null as) (null bs)) (return t))
+              ((or (null as) (null bs) (not (bexpr-equal (pop as) (pop bs)))) (return nil)))))
 
 (defun bexpr-equal (a b)
   "Structural equality: same operators, literal values, column bindings and types."
@@ -100,17 +141,89 @@ aggregates or subqueries)."
          (and (eq (b-op-op a) (b-op-op b))
               (equal (b-op-info a) (b-op-info b))
               (type-equal (bexpr-type a) (bexpr-type b))
-              (= (length (b-op-args a)) (length (b-op-args b)))
-              (every #'bexpr-equal (b-op-args a) (b-op-args b))))
+              (bexpr-list-equal (b-op-args a) (b-op-args b))))
         ((and (b-agg-p a) (b-agg-p b))
          (and (eq (b-agg-fn a) (b-agg-fn b))
               (eq (b-agg-distinct a) (b-agg-distinct b))
-              (= (length (b-agg-args a)) (length (b-agg-args b)))
-              (every #'bexpr-equal (b-agg-args a) (b-agg-args b))))
+              (bexpr-list-equal (b-agg-args a) (b-agg-args b))))
         (t nil)))
+
+(defun bexpr-node-count (e)
+  "Number of nodes of E (memoized per node)."
+  (or (bexpr-size-cache e)
+      (setf (bexpr-size-cache e)
+            (let ((n 1))
+              (dolist (c (bexpr-children e) n)
+                (incf n (bexpr-node-count c)))))))
+
+(defun interrupt-checkpoint-p (e granularity)
+  "True if compiled code evaluating E should check the query deadline before
+evaluating it: E's subtree size crosses a multiple of GRANULARITY that none
+of its children's does. Evaluating any subtree then performs at most about
+GRANULARITY nodes of work between two checks, and small expressions get no
+checks at all (CR-6: long expressions keep the timeout prompt)."
+  (let ((level (floor (bexpr-node-count e) granularity)))
+    (and (plusp level)
+         (every (lambda (c) (< (floor (bexpr-node-count c) granularity) level))
+                (bexpr-children e)))))
+
+(defun bexpr-hash (e)
+  "Structural hash of E, consistent with BEXPR-EQUAL (memoized per node)."
+  (or (bexpr-hash-cache e)
+      (setf (bexpr-hash-cache e)
+            (flet ((mix (h x) (logand (+ (* h 31) x) most-positive-fixnum)))
+              (typecase e
+                (b-literal (mix (sxhash (type-kind (bexpr-type e))) (sxhash (b-literal-value e))))
+                (b-column (mix 1 (b-column-index e)))
+                (b-param (mix 2 (b-param-index e)))
+                (b-op (let ((h (sxhash (b-op-op e))))
+                        (dolist (c (b-op-args e) h)
+                          (setf h (mix h (bexpr-hash c))))))
+                (b-agg (let ((h (mix (sxhash (b-agg-fn e)) (if (b-agg-distinct e) 1 0))))
+                         (dolist (c (b-agg-args e) h)
+                           (setf h (mix h (bexpr-hash c))))))
+                (t 0))))))
+
+(defstruct (bexpr-index (:constructor %make-bexpr-index))
+  "A list of distinct (by BEXPR-EQUAL) expressions with hashed lookup of
+their positions, for matching expressions against long lists in linear time."
+  (table (make-hash-table) :type hash-table) ; hash -> list of (expr . position)
+  (items '())                                ; expressions, most recent first
+  (count 0 :type fixnum))
+
+(defun bexpr-index-position (index e)
+  "Position of the expression equal to E in INDEX, or NIL."
+  (cdr (assoc e (gethash (bexpr-hash e) (bexpr-index-table index)) :test #'bexpr-equal)))
+
+(defun bexpr-index-add (index e)
+  "Position of E in INDEX, adding it at the end if no equal expression is
+present yet."
+  (or (bexpr-index-position index e)
+      (let ((k (bexpr-index-count index)))
+        (push (cons e k) (gethash (bexpr-hash e) (bexpr-index-table index)))
+        (push e (bexpr-index-items index))
+        (setf (bexpr-index-count index) (1+ k))
+        k)))
+
+(defun make-bexpr-index (&optional exprs)
+  "An index of the expressions EXPRS: duplicates map to their first position
+(positions still count every element of EXPRS)."
+  (let ((index (%make-bexpr-index)))
+    (loop for e in exprs
+          for k from 0
+          do (unless (bexpr-index-position index e)
+               (push (cons e k) (gethash (bexpr-hash e) (bexpr-index-table index))))
+             (push e (bexpr-index-items index))
+             (setf (bexpr-index-count index) (1+ k)))
+    index))
+
+(defun bexpr-index-list (index)
+  "The expressions of INDEX in order."
+  (reverse (bexpr-index-items index)))
 
 (defun bexpr-rewrite (fn e)
   "Rebuild E top-down: FN returns a replacement node or NIL to descend."
+  (check-interrupts)                    ; the query timeout covers planning (CR-6)
   (or (funcall fn e)
       (typecase e
         (b-op (make-b-op (bexpr-type e) (b-op-op e)
@@ -134,16 +247,31 @@ aggregates or subqueries)."
   (if (zerop delta) e (bexpr-remap-columns e (lambda (i) (+ i delta)))))
 
 (defun bexpr-column-indexes (e)
-  "List of distinct column indexes referenced by E."
-  (let ((acc '()))
-    (bexpr-walk (lambda (x) (when (b-column-p x) (pushnew (b-column-index x) acc))) e)
-    acc))
+  "List of distinct column indexes referenced by E (memoized per node; the
+list is shared and must not be modified)."
+  (let ((cached (bexpr-column-cache e)))
+    (if (listp cached)
+        cached
+        (setf (bexpr-column-cache e)
+              (if (b-column-p e)
+                  (list (b-column-index e))
+                  (let ((acc '()))
+                    (dolist (c (bexpr-children e) acc)
+                      (let ((cols (bexpr-column-indexes c)))
+                        (cond ((null acc) (setf acc cols))
+                              ((subsetp cols acc))
+                              ((subsetp acc cols) (setf acc cols))
+                              (t (setf acc (union cols acc))))))))))))
 
 (defun split-conjuncts (e)
-  "Flatten a tree of ANDs into the list of its conjuncts."
-  (if (and (b-op-p e) (eq (b-op-op e) :and))
-      (mapcan #'split-conjuncts (copy-list (b-op-args e)))
-      (list e)))
+  "Flatten a tree of ANDs into the list of its conjuncts (in order)."
+  (let ((acc '()))
+    (labels ((walk (x)
+               (if (and (b-op-p x) (eq (b-op-op x) :and))
+                   (dolist (a (b-op-args x)) (walk a))
+                   (push x acc))))
+      (walk e))
+    (nreverse acc)))
 
 (defun conjoin (conjuncts)
   "Inverse of SPLIT-CONJUNCTS: AND the CONJUNCTS together (NIL if none)."
@@ -168,7 +296,7 @@ aggregates or subqueries)."
 
 (defun may-fail-p (e)
   "True if evaluating E can signal an error for some row."
-  (bexpr-some #'node-may-fail-p e))
+  (bexpr-has-p e +prop-may-fail+))
 
 ;;; ------------------------------------------------------------------
 ;;; Analysed query representation
@@ -223,34 +351,64 @@ COLUMNS (COLUMN-DEFs carrying the common types)."
 
 (defun bexpr-describe (e)
   "Compact SQL-like rendering of a bound expression."
-  (typecase e
-    (b-literal (cond ((null-value-p (b-literal-value e)) "NULL")
-                     ((member (type-kind (bexpr-type e)) '(:string :date :timestamp))
-                      (format nil "'~A'" (value-to-text (b-literal-value e) (bexpr-type e))))
-                     (t (value-to-text (b-literal-value e) (bexpr-type e)))))
-    (b-column (or (b-column-name e) (format nil "#~D" (b-column-index e))))
-    (b-param (format nil "outer.~A" (or (b-param-name e) (b-param-index e))))
-    (b-op
-     (let ((op (b-op-op e))
-           (args (mapcar #'bexpr-describe (b-op-args e))))
-       (cond
-         ((assoc op *infix-operators*)
-          (format nil "(~A ~A ~A)" (first args) (cdr (assoc op *infix-operators*)) (second args)))
-         (t (case op
-              (:neg (format nil "-~A" (first args)))
-              (:not (format nil "NOT ~A" (first args)))
-              (:is-null (format nil "~A IS NULL" (first args)))
-              (:is-not-null (format nil "~A IS NOT NULL" (first args)))
-              (:cast (format nil "CAST(~A AS ~A)" (first args) (type-name-string (bexpr-type e))))
-              (:call (format nil "~A(~{~A~^, ~})" (scalar-function-name (b-op-info e)) args))
-              (:subquery (let ((sq (b-op-info e)))
-                           (ecase (subquery-kind sq)
-                             (:scalar "(subquery)")
-                             (:exists "EXISTS(subquery)")
-                             (:in (format nil "~A IN (subquery)" (first args))))))
-              (t (format nil "~(~A~)(~{~A~^, ~})" op args)))))))
-    (b-agg (format nil "~:@(~A~)(~:[~;DISTINCT ~]~:[~{~A~^, ~}~;*~])"
-                   (if (eq (b-agg-fn e) :count-star) :count (b-agg-fn e))
-                   (b-agg-distinct e) (eq (b-agg-fn e) :count-star)
-                   (mapcar #'bexpr-describe (b-agg-args e))))
-    (t "?")))
+  (with-output-to-string (out)
+    (write-bexpr-description e out)))
+
+(defun write-bexpr-description (e out)
+  "Write the BEXPR-DESCRIBE rendering of E to the stream OUT (linear in the
+size of E, also for long operator chains)."
+  (labels ((args (list)
+             (loop for (a . more) on list
+                   do (write-bexpr-description a out)
+                      (when more (write-string ", " out)))))
+    (typecase e
+      (b-literal (write-string
+                  (cond ((null-value-p (b-literal-value e)) "NULL")
+                        ((member (type-kind (bexpr-type e)) '(:string :date :timestamp))
+                         (format nil "'~A'" (value-to-text (b-literal-value e) (bexpr-type e))))
+                        (t (value-to-text (b-literal-value e) (bexpr-type e))))
+                  out))
+      (b-column (if (b-column-name e)
+                    (princ (b-column-name e) out)
+                    (format out "#~D" (b-column-index e))))
+      (b-param (format out "outer.~A" (or (b-param-name e) (b-param-index e))))
+      (b-op
+       (let* ((op (b-op-op e))
+              (args (b-op-args e))
+              (infix (cdr (assoc op *infix-operators*))))
+         (cond
+           (infix
+            (write-char #\( out)
+            (write-bexpr-description (first args) out)
+            (format out " ~A " infix)
+            (write-bexpr-description (second args) out)
+            (write-char #\) out))
+           (t (case op
+                (:neg (write-char #\- out) (write-bexpr-description (first args) out))
+                (:not (write-string "NOT " out) (write-bexpr-description (first args) out))
+                ((:is-null :is-not-null)
+                 (write-bexpr-description (first args) out)
+                 (write-string (if (eq op :is-null) " IS NULL" " IS NOT NULL") out))
+                (:cast (write-string "CAST(" out)
+                 (write-bexpr-description (first args) out)
+                 (format out " AS ~A)" (type-name-string (bexpr-type e))))
+                (:call (format out "~A(" (scalar-function-name (b-op-info e)))
+                 (args args)
+                 (write-char #\) out))
+                (:subquery (let ((sq (b-op-info e)))
+                             (ecase (subquery-kind sq)
+                               (:scalar (write-string "(subquery)" out))
+                               (:exists (write-string "EXISTS(subquery)" out))
+                               (:in (write-bexpr-description (first args) out)
+                                (write-string " IN (subquery)" out)))))
+                (t (format out "~(~A~)(" op)
+                 (args args)
+                 (write-char #\) out)))))))
+      (b-agg (format out "~:@(~A~)(~:[~;DISTINCT ~]"
+                     (if (eq (b-agg-fn e) :count-star) :count (b-agg-fn e))
+                     (b-agg-distinct e))
+             (if (eq (b-agg-fn e) :count-star)
+                 (write-char #\* out)
+                 (args (b-agg-args e)))
+             (write-char #\) out))
+      (t (write-char #\? out)))))

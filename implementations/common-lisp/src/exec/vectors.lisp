@@ -251,6 +251,20 @@ everywhere else."
               (map 'simple-vector (lambda (v) (and v (vec-slice v start end)))
                    (batch-columns batch))))
 
+(defun wide-slice-rows (width)
+  "Rows per batch for an operator evaluating WIDTH expressions at once: a
+full batch for ordinary widths; for very wide select lists or aggregations
+(CR-6) fewer rows, so about 64 full vectors are alive at a time."
+  (max 1 (min +batch-size+ (floor (* 64 +batch-size+) (max 1 width)))))
+
+(defun batch-slices (batch rows)
+  "BATCH split into consecutive batches of at most ROWS rows."
+  (let ((n (batch-count batch)))
+    (if (<= n rows)
+        (list batch)
+        (loop for start from 0 below n by rows
+              collect (batch-slice batch start (min n (+ start rows)))))))
+
 (defun batch-row (batch i)
   "Row I of BATCH as a fresh SIMPLE-VECTOR."
   (let* ((columns (batch-columns batch))
