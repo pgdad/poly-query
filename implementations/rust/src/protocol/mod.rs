@@ -52,6 +52,7 @@ pub const CAPABILITIES: &[&str] = &[
     "native.kernels",
     "change.union_all",
     "change.decimal38",
+    "change.expression_limits",
 ];
 
 /// The `version` response body (without id).

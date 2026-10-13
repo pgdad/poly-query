@@ -375,10 +375,16 @@ fn and_or(is_and: bool, lv: &Vector, r: &Expr, b: &Batch, ctx: &ExecContext) -> 
 // Long left-deep operator chains are evaluated link by link (see
 // `exec::eval::Chain`), with the same semantics as the recursive evaluation.
 
+/// Links (each over a whole batch) between two checks of the timeout.
+const VECTOR_CHAIN_INTERRUPT_LINKS: usize = 64;
+
 fn logic_chain(e: &Expr, b: &Batch, ctx: &ExecContext) -> Result<Vector> {
     let (links, first) = Chain::Logic.links(e);
     let mut acc = eval(first, b, ctx)?;
-    for link in links {
+    for (k, link) in links.into_iter().enumerate() {
+        if k % VECTOR_CHAIN_INTERRUPT_LINKS == 0 {
+            ctx.check_interrupt()?;
+        }
         let (Expr::And(_, r) | Expr::Or(_, r)) = link else {
             unreachable!("logic chain link");
         };
@@ -390,7 +396,10 @@ fn logic_chain(e: &Expr, b: &Batch, ctx: &ExecContext) -> Result<Vector> {
 fn arith_chain(e: &Expr, b: &Batch, ctx: &ExecContext) -> Result<Vector> {
     let (links, first) = Chain::Arith.links(e);
     let mut acc = operand(first, b, ctx)?;
-    for link in links {
+    for (k, link) in links.into_iter().enumerate() {
+        if k % VECTOR_CHAIN_INTERRUPT_LINKS == 0 {
+            ctx.check_interrupt()?;
+        }
         let Expr::Arith {
             op, kind, right, ..
         } = link
@@ -421,7 +430,10 @@ fn concat_chain(e: &Expr, b: &Batch, ctx: &ExecContext) -> Result<Vector> {
         }
     };
     append(operand(first, b, ctx)?);
-    for link in links {
+    for (k, link) in links.into_iter().enumerate() {
+        if k % VECTOR_CHAIN_INTERRUPT_LINKS == 0 {
+            ctx.check_interrupt()?;
+        }
         let Expr::Concat(_, r) = link else {
             unreachable!("concat chain link");
         };

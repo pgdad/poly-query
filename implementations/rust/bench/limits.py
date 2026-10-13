@@ -189,14 +189,29 @@ def edge_cases() -> list:
             f"c{i} AS (SELECT x FROM c{i - 1})" for i in range(1, 20000)) + " SELECT count(*) FROM c19999", 100),
         ("select_list_99999", "SELECT " + ", ".join("x" for _ in range(99_998)) + " FROM n LIMIT 1", 0),
         ("text_16mib", where("'" + "a" * 8_300_000 + "' = '" + "a" * 8_300_000 + "'"), 100),
+        ("aggs_25000", "SELECT " + ", ".join(f"sum(x + {i})" for i in range(25_000)) + " FROM n", 4950),
+        ("aggs_same_25000", "SELECT " + ", ".join("sum(x)" for _ in range(25_000)) + " FROM n", 4950),
+        ("group_by_20000", "SELECT count(*) FROM (SELECT x FROM n GROUP BY x, "
+         + ", ".join(f"x + {i}" for i in range(20_000)) + ") t", 100),
+        ("order_select_20000", "SELECT " + ", ".join(f"x + {i}" for i in range(20_000)) + " FROM n ORDER BY "
+         + ", ".join(f"x + {i}" for i in range(20_000)) + " LIMIT 1", 0),
+        ("select_exprs_49999", "SELECT " + ", ".join(f"x + {i}" for i in range(49_999)) + " FROM n LIMIT 1", 0),
+        ("distinct_20000", "SELECT count(*) FROM (SELECT DISTINCT " + ", ".join(f"x + {i}" for i in range(20_000))
+         + " FROM n) t", 100),
+        ("coalesce_99999", "SELECT max(COALESCE(" + "NULL, " * 99_998 + "x)) FROM n", 99),
+        ("where_and_cols_49999", where(" AND ".join("x >= 0" for _ in range(49_999))), 100),
+        ("scalar_subqs_10000", "SELECT " + ", ".join(f"(SELECT max(x) + {i} FROM n)" for i in range(10_000))
+         + " FROM n LIMIT 1", 99),
+        ("having_aggs_10000", "SELECT count(*) FROM (SELECT x FROM n GROUP BY x HAVING "
+         + " AND ".join(f"sum(x) >= {-i}" for i in range(10_000)) + ") t", 100),
     ]
 
 
 def timeout_cases() -> list:
     """Large statements with a short timeout: the answer must arrive within timeout + 1 s."""
-    return [(n, s, v) for n, s, v in minimum_cases() + beyond_cases()
-            if n in ("or_12500", "sum_25000", "in_25000", "case_12000", "or_100000", "in_100000", "join_chain_60",
-                     "cte_chain_990", "subq_5000", "union_all_5000", "derived_nested", "aggs_5000")]
+    picked = ("or_12500", "sum_25000", "in_25000", "case_12000", "join_chain_60", "cte_chain_990",
+              "derived_nested", "aggs_5000", "or_100000", "in_100000", "subq_5000", "union_all_5000")
+    return [c for c in minimum_cases() + beyond_cases() if c[0] in picked] + edge_cases()
 
 
 def main() -> int:
@@ -206,13 +221,15 @@ def main() -> int:
     ap.add_argument("--modes", default="row,vectorized,parallel,auto")
     ap.add_argument("--groups", default="min,beyond,timeout")
     ap.add_argument("--timeout-ms", type=int, default=200)
+    ap.add_argument("--rows", type=int, default=100,
+                    help="rows of n (results are only checked with the default 100)")
     a = ap.parse_args()
     engine = str(Path(a.engine).resolve())
     modes = [m for m in a.modes.split(",") if m]
     failures = 0
     with tempfile.TemporaryDirectory() as d:
         data = Path(d)
-        (data / "n.csv").write_text("x\n" + "\n".join(str(i) for i in range(100)) + "\n")
+        (data / "n.csv").write_text("x\n" + "\n".join(str(i % 100) for i in range(a.rows)) + "\n")
         env = {"PQ_PAR_MIN": "1", "PQ_PARALLEL_MIN_ROWS": "1"}
         state: dict = {"s": None}
 
@@ -241,6 +258,8 @@ def main() -> int:
                     dt = time.monotonic() - t0
                     c = code(r) if s.alive() else "CRASH"
                     val = (r.get("rows") or [[None]])[0][0] if c == "ok" else None
+                    if a.rows != 100:
+                        want = val
                     if g == "min":
                         ok = c == "ok" and (want is None or val == want or
                                             (isinstance(want, float) and abs(float(val) - want) < 1e-6))

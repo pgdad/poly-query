@@ -769,6 +769,8 @@ impl QueryCursor {
                 }
             }
         }
+        // A result completed after the deadline is a TIMEOUT (CR-6 §4).
+        self.ctx.check_interrupt()?;
         Ok(QueryResult {
             columns: self.columns,
             rows: Vec::new(),
@@ -833,6 +835,7 @@ impl QueryCursor {
             }
         }
         out.push(']');
+        self.ctx.check_interrupt()?;
         Ok(QueryResult {
             columns: self.columns,
             rows: Vec::new(),
@@ -865,6 +868,7 @@ impl QueryCursor {
                 rows.push(row);
             }
         }
+        self.ctx.check_interrupt()?;
         Ok(QueryResult {
             columns: self.columns,
             rows,

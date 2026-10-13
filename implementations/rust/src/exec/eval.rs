@@ -275,6 +275,9 @@ pub enum Chain {
 /// evaluated iteratively; shorter ones by plain recursion.
 const LONG_CHAIN: usize = 16;
 
+/// Links of a long chain evaluated between two checks of the timeout.
+pub const CHAIN_INTERRUPT_LINKS: usize = 4096;
+
 impl Chain {
     /// The left operand of `e` if `e` is a link of this kind of chain.
     pub fn left(self, e: &Expr) -> Option<&Expr> {
@@ -314,7 +317,10 @@ impl Chain {
 fn eval_logic_chain(e: &Expr, row: &[Value], ctx: &ExecContext) -> Result<Value> {
     let (links, first) = Chain::Logic.links(e);
     let mut acc = eval(first, row, ctx);
-    for link in links {
+    for (k, link) in links.into_iter().enumerate() {
+        if k % CHAIN_INTERRUPT_LINKS == 0 {
+            ctx.check_interrupt()?;
+        }
         let (Expr::And(_, r) | Expr::Or(_, r)) = link else {
             unreachable!("logic chain link");
         };
@@ -337,7 +343,10 @@ fn eval_logic_chain(e: &Expr, row: &[Value], ctx: &ExecContext) -> Result<Value>
 fn eval_arith_chain(e: &Expr, row: &[Value], ctx: &ExecContext) -> Result<Value> {
     let (links, first) = Chain::Arith.links(e);
     let mut acc = eval(first, row, ctx)?;
-    for link in links {
+    for (k, link) in links.into_iter().enumerate() {
+        if k % CHAIN_INTERRUPT_LINKS == 0 {
+            ctx.check_interrupt()?;
+        }
         let Expr::Arith {
             op, kind, right, ..
         } = link
@@ -363,7 +372,10 @@ fn eval_concat_chain(e: &Expr, row: &[Value], ctx: &ExecContext) -> Result<Value
         _ => out = None,
     };
     append(eval(first, row, ctx)?);
-    for link in links {
+    for (k, link) in links.into_iter().enumerate() {
+        if k % CHAIN_INTERRUPT_LINKS == 0 {
+            ctx.check_interrupt()?;
+        }
         let Expr::Concat(_, r) = link else {
             unreachable!("concat chain link");
         };
