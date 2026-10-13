@@ -1,6 +1,9 @@
 package optimizer
 
 import (
+	"slices"
+
+	"polyquery/internal/interrupt"
 	"polyquery/internal/plan"
 	"polyquery/internal/types"
 )
@@ -19,48 +22,56 @@ import (
 // commutative and associative, so results are unchanged; this avoids
 // cross products caused by the FROM order and keeps intermediate results
 // small.
-type JoinReorder struct{}
+type JoinReorder struct {
+	// Interrupt aborts the rule at the query's deadline (nil: never).
+	Interrupt *interrupt.Checker
+}
 
 // Name implements Rule.
 func (JoinReorder) Name() string { return "join_reorder" }
 
 // Apply implements Rule.
-func (JoinReorder) Apply(n plan.Node) plan.Node { return everyPlan(n, reorder) }
+func (r JoinReorder) Apply(n plan.Node) plan.Node {
+	return everyPlan(n, reorderer{r.Interrupt}.reorder)
+}
 
-func reorder(n plan.Node) plan.Node {
+type reorderer struct{ intr *interrupt.Checker }
+
+func (ro reorderer) reorder(n plan.Node) plan.Node {
+	tick(ro.intr)
 	switch x := n.(type) {
 	case *plan.Join:
 		if x.Kind == plan.JoinLeft {
-			return &plan.Join{Kind: x.Kind, Left: reorder(x.Left), Right: reorder(x.Right), Cond: x.Cond}
+			return &plan.Join{Kind: x.Kind, Left: ro.reorder(x.Left), Right: ro.reorder(x.Right), Cond: x.Cond}
 		}
 		var leaves []plan.Node
 		var conds []plan.Expr
 		flattenJoins(x, &leaves, &conds)
 		for i, l := range leaves {
-			leaves[i] = reorder(l)
+			leaves[i] = ro.reorder(l)
 		}
 		if len(leaves) < 3 {
 			return rebuildPair(x, leaves, conds)
 		}
-		return greedyJoin(x.Schema(), leaves, conds)
+		return ro.greedyJoin(x.Schema(), leaves, conds)
 	case *plan.Filter:
-		return &plan.Filter{Input: reorder(x.Input), Pred: x.Pred}
+		return &plan.Filter{Input: ro.reorder(x.Input), Pred: x.Pred}
 	case *plan.Project:
-		return &plan.Project{Input: reorder(x.Input), Exprs: x.Exprs, Cols: x.Cols}
+		return &plan.Project{Input: ro.reorder(x.Input), Exprs: x.Exprs, Cols: x.Cols}
 	case *plan.Aggregate:
 		c := *x
-		c.Input = reorder(x.Input)
+		c.Input = ro.reorder(x.Input)
 		return &c
 	case *plan.Sort:
-		return &plan.Sort{Input: reorder(x.Input), Keys: x.Keys}
+		return &plan.Sort{Input: ro.reorder(x.Input), Keys: x.Keys}
 	case *plan.Limit:
-		return &plan.Limit{Input: reorder(x.Input), Count: x.Count, Offset: x.Offset}
+		return &plan.Limit{Input: ro.reorder(x.Input), Count: x.Count, Offset: x.Offset}
 	case *plan.Distinct:
-		return &plan.Distinct{Input: reorder(x.Input)}
+		return &plan.Distinct{Input: ro.reorder(x.Input)}
 	case *plan.UnionAll:
 		c := &plan.UnionAll{Inputs: make([]plan.Node, len(x.Inputs)), Cols: x.Cols}
 		for i, in := range x.Inputs {
-			c.Inputs[i] = reorder(in)
+			c.Inputs[i] = ro.reorder(in)
 		}
 		return c
 	}
@@ -122,53 +133,77 @@ func estimate(n plan.Node) float64 {
 	return 1
 }
 
-func greedyJoin(schema []plan.Column, leaves []plan.Node, conds []plan.Expr) plan.Node {
+// greedyJoin rebuilds a join tree from its leaves and conjuncts (see
+// JoinReorder). A conjunct can be applied when every leaf it references
+// has been joined; to pick the next leaf in time linear in the number of
+// leaves, each unapplied conjunct tracks how many of its leaves are still
+// missing (one missing leaf i makes the conjunct connect i).
+func (ro reorderer) greedyJoin(schema []plan.Column, leaves []plan.Node, conds []plan.Expr) plan.Node {
 	ests := make([]float64, len(leaves))
-	ids := make([]map[plan.ColumnID]bool, len(leaves))
+	leafOf := map[plan.ColumnID]int{}
 	for i, l := range leaves {
 		ests[i] = estimate(l)
-		ids[i] = idSet(l.Schema())
-	}
-	refs := make([]map[plan.ColumnID]bool, len(conds))
-	for i, c := range conds {
-		refs[i] = plan.RefSet(c)
-	}
-	produced := map[plan.ColumnID]bool{}
-	for _, m := range ids {
-		for id := range m {
-			produced[id] = true
+		for _, c := range l.Schema() {
+			leafOf[c.ID] = i
 		}
 	}
-	for _, r := range refs {
-		for id := range r {
-			if !produced[id] {
-				delete(r, id) // outer reference (correlated subquery): always available
+	// condLeaves[c]: the leaves conjunct c references (outer references of
+	// correlated subqueries are always available); leafConds the inverse.
+	condLeaves := make([][]int, len(conds))
+	leafConds := make([][]int, len(leaves))
+	for c, e := range conds {
+		seen := map[int]bool{}
+		for id := range plan.RefSet(e) {
+			if l, ok := leafOf[id]; ok && !seen[l] {
+				seen[l] = true
+				condLeaves[c] = append(condLeaves[c], l)
+				leafConds[l] = append(leafConds[l], c)
 			}
 		}
 	}
 	used := make([]bool, len(leaves))
 	applied := make([]bool, len(conds))
-	have := map[plan.ColumnID]bool{}
-	covered := func(c int, extra map[plan.ColumnID]bool) bool {
-		for id := range refs[c] {
-			if !have[id] && !extra[id] {
-				return false
+	missing := make([]int, len(conds))   // referenced leaves not yet joined
+	ready := map[int]bool{}              // unapplied conjuncts with no missing leaf
+	connects := make([]int, len(leaves)) // unapplied conjuncts whose only missing leaf is i
+	lastMissing := func(c int) int {
+		for _, l := range condLeaves[c] {
+			if !used[l] {
+				return l
 			}
 		}
-		return true
+		return -1
 	}
-	connected := func(i int) bool {
-		for c := range conds {
-			if !applied[c] && covered(c, ids[i]) {
-				return true
+	for c := range conds {
+		missing[c] = len(condLeaves[c])
+		switch missing[c] {
+		case 0:
+			ready[c] = true
+		case 1:
+			connects[condLeaves[c][0]]++
+		}
+	}
+	use := func(i int) {
+		used[i] = true
+		for _, c := range leafConds[i] {
+			missing[c]--
+			if applied[c] {
+				continue
+			}
+			switch missing[c] {
+			case 1:
+				connects[lastMissing(c)]++
+			case 0:
+				connects[i]--
+				ready[c] = true
 			}
 		}
-		return false
 	}
 	pick := func(needConnected bool) int {
 		best := -1
 		for i := range leaves {
-			if used[i] || (needConnected && !connected(i)) {
+			tick(ro.intr)
+			if used[i] || (needConnected && len(ready) == 0 && connects[i] == 0) {
 				continue
 			}
 			if best < 0 || ests[i] < ests[best] {
@@ -178,32 +213,39 @@ func greedyJoin(schema []plan.Column, leaves []plan.Node, conds []plan.Expr) pla
 		return best
 	}
 	first := pick(false)
-	used[first] = true
 	var tree plan.Node = leaves[first]
-	for id := range ids[first] {
-		have[id] = true
-	}
+	use(first)
 	for k := 1; k < len(leaves); k++ {
 		i := pick(true)
 		if i < 0 {
 			i = pick(false)
 		}
-		used[i] = true
-		var on []plan.Expr
-		for c := range conds {
-			if !applied[c] && covered(c, ids[i]) {
-				applied[c] = true
-				on = append(on, conds[c])
+		// Conjuncts covered once i is joined, in their original order.
+		var idx []int
+		for c := range ready {
+			idx = append(idx, c)
+		}
+		for _, c := range leafConds[i] {
+			if !applied[c] && missing[c] == 1 {
+				idx = append(idx, c)
 			}
+		}
+		slices.Sort(idx)
+		var on []plan.Expr
+		for _, c := range idx {
+			applied[c] = true
+			delete(ready, c)
+			if missing[c] == 1 {
+				connects[i]--
+			}
+			on = append(on, conds[c])
 		}
 		kind := plan.JoinInner
 		if len(on) == 0 {
 			kind = plan.JoinCross
 		}
 		tree = &plan.Join{Kind: kind, Left: tree, Right: leaves[i], Cond: plan.And(on)}
-		for id := range ids[i] {
-			have[id] = true
-		}
+		use(i)
 	}
 	var rest []plan.Expr
 	for c, done := range applied {

@@ -1,6 +1,9 @@
 package optimizer
 
-import "polyquery/internal/plan"
+import (
+	"polyquery/internal/interrupt"
+	"polyquery/internal/plan"
+)
 
 // ColumnPruning (projection pushdown) removes columns that no operator
 // above needs: scans list only the table columns referenced by the plan,
@@ -13,15 +16,18 @@ import "polyquery/internal/plan"
 // columns are kept, so the correlation of every subtree — which the
 // physical planner uses to decide what is computed once per query and what
 // per outer row — is unchanged.
-type ColumnPruning struct{}
+type ColumnPruning struct {
+	// Interrupt aborts the rule at the query's deadline (nil: never).
+	Interrupt *interrupt.Checker
+}
 
 // Name implements Rule.
 func (ColumnPruning) Name() string { return "column_pruning" }
 
 // Apply implements Rule.
-func (ColumnPruning) Apply(n plan.Node) plan.Node {
+func (r ColumnPruning) Apply(n plan.Node) plan.Node {
 	return everyPlan(n, func(n plan.Node) plan.Node {
-		p := pruner{outer: idSet(plan.FreeColumns(n))}
+		p := pruner{outer: idSet(plan.FreeColumns(n)), intr: r.Interrupt}
 		return p.prune(n, idSet(n.Schema()))
 	})
 }
@@ -30,11 +36,13 @@ type pruner struct {
 	// outer holds the outer columns the plan references (correlated
 	// subqueries).
 	outer map[plan.ColumnID]bool
+	intr  *interrupt.Checker
 }
 
 // prune returns n restricted to the output columns in req (and those it
 // cannot drop). req may contain IDs n does not produce.
 func (p pruner) prune(n plan.Node, req map[plan.ColumnID]bool) plan.Node {
+	tick(p.intr)
 	switch x := n.(type) {
 	case *plan.Scan:
 		out := &plan.Scan{Table: x.Table}

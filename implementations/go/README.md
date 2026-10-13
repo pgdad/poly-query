@@ -418,7 +418,10 @@ carries it through every stage:
 
 * parsing: checked every 256 tokens;
 * analysis: every 256 bound expressions and per query block;
-* optimization: before each optimizer rule;
+* optimization: before each optimizer rule and every 256 steps inside one
+  (rules return plans, not errors, so an expired rule panics with a
+  private value that `Optimize` recovers into `TIMEOUT`; rules never
+  modify their input, so the abandoned plan needs no cleanup);
 * physical planning: per plan node;
 * operator construction: per operator and per parallel worker copy;
 * execution: operators check every 4,096 rows, and an expression of 4,096+
@@ -453,6 +456,14 @@ passes. They are now linear (or n log n):
   are still analyzed afresh.
 * the parallel-pipeline probe walked the whole pipeline below every
   operator. It is memoized per node.
+* the schema of a join was built from its inputs' schemas, so one call on
+  a left-deep chain of n joins copied O(n²) columns, and the passes call it
+  at every level. Joins now append their leaves' columns into a single
+  slice (logical and physical plans).
+* greedy join reordering rescanned all conjuncts for every candidate input
+  at every step (O(n²·m)). Each conjunct now tracks how many of its inputs
+  are still missing; the join order and conjunct placement are the same as
+  before. A 1,000-table join chain went from 16 s to 0.2 s of planning.
 
 **Memory.** Three changes keep vectorized memory bounded:
 
@@ -472,9 +483,9 @@ passes. They are now linear (or n log n):
 | `internal/engine` | timeout context created before parsing (from `Received`) and passed to every stage; `Explain` takes a context; `Config.Limits`; claims `change.expression_limits` |
 | `internal/protocol` | requests record their receipt time; the `explain` op gets the request context |
 | `internal/analyzer` | deadline ticks in binding and per query block; linear GROUP BY key and ORDER BY item matching; linear CTE validation |
-| `internal/optimizer` | `Optimize` checks the deadline before each rule and returns an error; constant folding uses `plan.Props` |
-| `internal/physical` | deadline check per planned node; O(n log n) IN-list points |
-| `internal/plan` | `Props` (memoized constant/volatile/movable/size), `ChainOperands` |
+| `internal/optimizer` | `Optimize` checks the deadline before each rule and returns an error; rules take an `Interrupt` and tick it in their recursion (`interrupted`, recovered by `Optimize`); constant folding uses `plan.Props`; linear-time greedy join reordering |
+| `internal/physical` | deadline check per planned node; O(n log n) IN-list points; join schemas built in one pass |
+| `internal/plan` | `Props` (memoized constant/volatile/movable/size), `ChainOperands`; join schemas built in one pass |
 | `internal/exec` | `compile` (operator entry point; per-evaluation deadline check for big expressions) vs `compileExpr` (recursion); n-ary `\|\|`; lazy constant vectors; row fallback for huge expressions; per-copy deadline checks for parallel workers; memoized pipeline probe |
 
 Tests:
@@ -486,6 +497,8 @@ Tests:
   row/vectorized/parallel/auto mode with real parallel workers, `||` chain
   semantics, RESOURCE_LIMIT, timeouts in every stage, CTE chains and
   validation;
+* `internal/optimizer/interrupt_test.go`: rules stop at the deadline, many-way
+  join reordering;
 * `internal/plan/props_test.go` and `internal/interrupt/interrupt_test.go`;
 * black-box: `tests/regression/robustness_probe.py --only expression_limits`.
 

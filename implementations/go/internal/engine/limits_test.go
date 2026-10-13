@@ -192,3 +192,28 @@ func TestCTEChain(t *testing.T) {
 		t.Errorf("renamed CTE columns: got %s, %v", got, err)
 	}
 }
+
+// TestManyJoins: planning a long chain of joins is fast (no quadratic
+// schema building or join ordering) and observes the deadline.
+func TestManyJoins(t *testing.T) {
+	e := newNumbers(t)
+	from, conds := make([]string, 1000), make([]string, 999)
+	for i := range from {
+		from[i] = fmt.Sprintf("n t%d", i)
+		if i > 0 {
+			conds[i-1] = fmt.Sprintf("t%d.x = t%d.x", i-1, i)
+		}
+	}
+	sql := "SELECT count(*) FROM " + strings.Join(from, ", ") + " WHERE " + strings.Join(conds, " AND ")
+	start := time.Now()
+	if got, err := firstCell(t, e, sql, QueryOptions{MaxRows: -1}); err != nil || got != "100" {
+		t.Errorf("1,000 joined tables: got %s, %v", got, err)
+	}
+	if d := time.Since(start); d > 10*time.Second {
+		t.Errorf("1,000 joined tables took %v", d)
+	}
+	_, err := e.Query(context.Background(), sql, QueryOptions{MaxRows: -1, Timeout: 20 * time.Millisecond})
+	if err != nil && !errs.Is(err, errs.Timeout) {
+		t.Errorf("with a 20 ms timeout: %v", err)
+	}
+}
