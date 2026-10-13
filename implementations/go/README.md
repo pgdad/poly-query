@@ -464,6 +464,13 @@ passes. They are now linear (or n log n):
   at every step (O(n²·m)). Each conjunct now tracks how many of its inputs
   are still missing; the join order and conjunct placement are the same as
   before. A 1,000-table join chain went from 16 s to 0.2 s of planning.
+* a correlated subquery nested in another one is compiled anew for each
+  evaluation of the enclosing one, and its memo of results (by outer
+  values) went with it, so non-equality correlation was exponential in the
+  nesting depth (5 levels: > 30 s). The memo is now shared per query by
+  every evaluator of the subquery: `Correlated` lists all the outer columns
+  the result depends on. Subqueries calling PQ_SLEEP keep a memo per
+  evaluator. 400 such levels take 2 s.
 
 **Memory.** Three changes keep vectorized memory bounded:
 
@@ -486,7 +493,7 @@ passes. They are now linear (or n log n):
 | `internal/optimizer` | `Optimize` checks the deadline before each rule and returns an error; rules take an `Interrupt` and tick it in their recursion (`interrupted`, recovered by `Optimize`); constant folding uses `plan.Props`; linear-time greedy join reordering |
 | `internal/physical` | deadline check per planned node; O(n log n) IN-list points; join schemas built in one pass |
 | `internal/plan` | `Props` (memoized constant/volatile/movable/size), `ChainOperands`; join schemas built in one pass |
-| `internal/exec` | `compile` (operator entry point; per-evaluation deadline check for big expressions) vs `compileExpr` (recursion); n-ary `\|\|`; lazy constant vectors; row fallback for huge expressions; per-copy deadline checks for parallel workers; memoized pipeline probe |
+| `internal/exec` | `compile` (operator entry point; per-evaluation deadline check for big expressions) vs `compileExpr` (recursion); n-ary `\|\|`; lazy constant vectors; row fallback for huge expressions; per-copy deadline checks for parallel workers; memoized pipeline probe; correlated-subquery memos shared per query |
 
 Tests:
 

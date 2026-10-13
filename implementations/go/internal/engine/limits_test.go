@@ -217,3 +217,22 @@ func TestManyJoins(t *testing.T) {
 		t.Errorf("with a 20 ms timeout: %v", err)
 	}
 }
+
+// TestNestedCorrelatedSubqueries: correlated subqueries nested in each
+// other share their memo across evaluations of the enclosing subquery, so
+// the work grows polynomially, not exponentially, with the nesting depth.
+func TestNestedCorrelatedSubqueries(t *testing.T) {
+	e := newNumbers(t)
+	const k = 60
+	s := fmt.Sprintf("SELECT max(m%d.x) FROM n m%d WHERE m%d.x <= m%d.x", k, k, k, k-1)
+	for i := k - 1; i > 1; i-- {
+		s = fmt.Sprintf("SELECT max(m%d.x) FROM n m%d WHERE m%d.x <= (%s) AND m%d.x <= m%d.x", i, i, i, s, i, i-1)
+	}
+	sql := fmt.Sprintf("SELECT count(*) FROM n m0 WHERE m0.x <= (SELECT max(m1.x) FROM n m1 WHERE m1.x <= (%s) AND m1.x <= 49)", s)
+	for _, opts := range limitModes {
+		opts.Timeout = 30 * time.Second
+		if got, err := firstCell(t, e, sql, opts); err != nil || got != "50" {
+			t.Errorf("%s/%d threads: got %s, %v; want 50", opts.Mode, opts.Threads, got, err)
+		}
+	}
+}

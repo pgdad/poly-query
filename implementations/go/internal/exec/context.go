@@ -50,6 +50,9 @@ type Context struct {
 	// shared holds the rows of shared aggregations by key.
 	sharedMu sync.Mutex
 	shared   map[string]*sharedResult
+	// memos holds the memoized results of correlated subqueries (see
+	// subqueryMemo).
+	memos map[*plan.Subquery]map[string]*subResult
 	// pipes memoizes the table scan at the bottom of the scan pipeline
 	// rooted at a node (nil: not a pipeline).
 	pipeMu sync.Mutex
