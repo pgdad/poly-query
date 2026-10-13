@@ -43,7 +43,11 @@ It also implements the architectural change **CR-1 `UNION ALL`**
 [Change CR-1: UNION ALL](#change-cr-1-union-all), and the behaviour-preserving
 refactoring **CR-3 logical / physical plan separation**
 (`spec/changes/refactor-plan-separation.md`); see
-[Change CR-3](#change-cr-3-logical--physical-plan-separation).
+[Change CR-3](#change-cr-3-logical--physical-plan-separation), and the
+requirement change **CR-6 expression size limits**
+(`spec/changes/expression-limits.md`, capability `change.expression_limits`);
+see [Change CR-6](#change-cr-6-expression-size-limits) — the engine's
+**limits** are listed there.
 
 ## Build prerequisites
 
@@ -895,6 +899,95 @@ conjuncts, LEFT joins, correlated subqueries, derived tables, CTEs,
 UNION ALL, constant folding that raises, simplification), each as `explain`
 and `query` under ten option sets: 9059 requests, no difference.
 
+## Change CR-6: expression size limits
+
+Every statement within the CR-6 minimums (1 MiB of SQL text, nesting depth
+1,000, 25,000 operands) runs like a small one in every execution mode
+(`row`, `vectorized`, parallel `threads`, `auto`, `optimize: false`), over
+the session and the HTTP transport. Beyond the engine's own limits a
+statement fails with `RESOURCE_LIMIT` naming the measure; running out of
+stack in any thread is `RESOURCE_LIMIT` too, never a crash; and the query
+timeout covers lexing, parsing, binding, planning and execution.
+
+### Limits
+
+| measure | limit | error beyond it |
+|---|---|---|
+| SQL text | none of its own (memory; `serve`: `--max-request-bytes`, default 1 GiB, `RESOURCE_LIMIT` / HTTP 413 as protocol.md specifies) | — |
+| nesting depth | **4,096** levels, counted by the parser: each parenthesised expression, unary `+`/`-`, `NOT`, function argument list, `CAST`, `CASE`, `IN` / `BETWEEN` / `LIKE` / comparison operand, subquery and derived table / FROM item adds one; a chain of one binary operator (`a OR b OR …`, `a + b - c`, `a \|\| b`) adds one whatever its length (never more than the spec's count) | `RESOURCE_LIMIT` "expression nesting depth exceeds 4096" |
+| operand count | **1,000,000** literals, column references and `*` arguments | `RESOURCE_LIMIT` "operand count exceeds 1000000" |
+| stack | 256 MiB per thread that runs request code (session / exec thread, HTTP connection threads, worker pool threads); every statement within the two limits above fits (measured: 1,000,000-operand `+` / `*` / `||` / AND / OR chains in WHERE, HAVING, ON, EXPLAIN, in every mode; before the operand limit existed a 2,000,000-term chain also fitted in row mode) | `RESOURCE_LIMIT` "expression nesting depth exceeds the thread stack (statement too complex)" |
+| memory | `--max-query-memory-mb` (default 4 GiB) as before | `RESOURCE_LIMIT` "query memory budget exceeded" |
+
+Measured on this machine (100-row table, every mode): a 1,000,000-term OR /
+sum / `||` chain runs in 0.2–1.8 s; 100,000-term chains, 100,000-item IN
+lists, 50,000-branch CASE and 100,000-column select lists in ≤ 0.3 s.
+
+### Design
+
+* **Stack guard instead of new depth limits everywhere.** A call-graph
+  analysis of all `.S` files (functions on a cycle: parser, binder,
+  `functions.S` bind hooks, logical builder, optimizer rules, physical
+  planner, EXPLAIN printer, `eval`, `veval`, the executor and the Volcano
+  iterators, vectorized helpers, `expr_par_safe`, …) found 115 recursive
+  functions; each starts with `GUARD_TICK` (pq.inc). Its stack part compares
+  `sp` with the thread-local `g_stack_limit` (lowest stack address + 512 KiB
+  margin, set by `stack_guard_init` from `pthread_getattr_np`) and calls
+  `stack_exhausted` (`RESOURCE_LIMIT` through the request's `longjmp`
+  handler — in a worker the error is recorded and re-raised by `par_run` as
+  for any task error). Every cycle of the call graph passes through a
+  guarded function; the per-row evaluators reached only through `eval`
+  (`ev_binary`, `ev_case`, …) rely on its guard, and `eval` dispatches
+  column references and literals before the guard.
+* **Big stacks.** Session and exec mode run their request loop on a
+  thread created with a 256 MiB stack (`run_request_thread`, main.S); HTTP
+  connection threads and pool threads get the same size (`big_stack_attr`,
+  rt.S). The stacks are only reserved; pages are committed when touched.
+* **Deadline ticks.** The same macro counts down a thread-local counter and
+  every 1,024th execution calls `check_deadline` (`deadline_tick`, which
+  saves every register but x16/x17), so the lexer (per token), parser,
+  binder, optimizer, planner, EXPLAIN and both evaluators check the
+  deadline and the cancel flag inside their work. Constant folding no
+  longer swallows a `TIMEOUT` raised while it evaluates a constant. A
+  2,000,000-term statement with `timeout_ms` 300 answers `TIMEOUT` after
+  0.3–0.5 s in every mode.
+* **Linear work on long chains.**
+  * Vectorized: the dictionary-memo analysis (`ds_walk`) is bottom-up and
+    caches its verdict on every node (it was re-run at every node of a
+    chain: O(n²)); a single-column subtree that cannot use the memo marks
+    its whole subtree (`NF_DSNODICT`). Binary / AND / OR kernels evaluate
+    their left operand into the output vector, so a left-deep chain holds
+    O(1) scratch vectors; the vector pool grows instead of falling back to
+    unpooled allocations.
+  * Row evaluator: a left-deep `||` chain is evaluated in one pass
+    (`ev_concat_chain`: operands left to right as before, one allocation),
+    instead of O(n²) bytes of intermediate strings per row.
+  * Binder: duplicate CTE names in a WITH list are found by sorting the
+    names (`cte_names_distinct`), the pairwise scan only runs when a
+    duplicate exists (so the error is reported exactly as before).
+  * Arenas: chunks grow from 32 KiB to 256 KiB, so deeply nested parallel
+    queries (thousands of small task arenas) stay within the memory budget.
+
+### Modules touched
+
+| module | change |
+|---|---|
+| `include/pq.inc` | `QUERY_STACK_SIZE`, `STACK_GUARD`, `DEADLINE_TICK`, `GUARD_TICK`; `VB_POOLCAP`; `NF_DSNODICT` |
+| `rt.S` | `g_stack_limit` / `g_tick`, `stack_guard_init`, `stack_exhausted`, `deadline_tick`, `big_stack_attr`; growing arena chunks |
+| `main.S` | session / exec on a big-stack thread |
+| `http.S`, `parallel.S` | big-stack connection and pool threads, guard initialisation |
+| `lexer.S`, `parser.S` | deadline tick per token; depth limit 4,096; operand count (`p_count_operand`) |
+| `binder.S`, `functions.S`, `logical.S`, `plan.S`, `physical.S`, `access.S`, `optimize.S` rules (`rule_*.S`) | `GUARD_TICK` in recursive functions; WITH duplicate check; ticks in CTE lookups; `try_eval` keeps timeouts |
+| `eval.S`, `exec.S`, `join.S`, `ops.S`, `vagg.S`, `volcano.S`, `sort.S`, `index.S` | `GUARD_TICK`; `ev_concat_chain` |
+| `vexec.S` | linear dictionary-memo analysis, left operand into the output vector, growable vector pool |
+| `protocol.S` | capability `change.expression_limits` |
+| tests | `tests/sh/run_limits_tests.sh` (minimums in every mode, limits, worker stacks, timeout while preparing); `test_rt` (guard, tick, arena chunk); `test_parser` (depth 1,000 ok, 5,000 `RESOURCE_LIMIT`) |
+
+`spec_version` stays `1.0.0` (as for CR-1 / CR-2: the Phase 1 conformance
+case requires it). Cost: the guard and tick add a few instructions per
+recursive call; vectorized / parallel / auto timings are unchanged, row mode
+is up to ~10–15 % slower on expression-heavy filters.
+
 ## Implementation-defined choices
 
 * Phase 5: `mode: "auto"` is vectorized; `join: "auto"` is a hash join for
@@ -921,7 +1014,7 @@ and `query` under ten option sets: 9059 requests, no difference.
 * DECIMAL ± DECIMAL with different scales is aligned exactly (128-bit for
   narrow, 256-bit for wide operands: no spurious overflow); INT64 operands
   of arithmetic are promoted to DECIMAL(W,s) as the spec requires.
-* SQL nesting deeper than 256 levels is `RESOURCE_LIMIT`.
+* Statement size limits: see [Change CR-6](#change-cr-6-expression-size-limits).
 * `serve` without `--port` is a usage error (exit 2); `--workers 0` (or
   absent) means the number of online CPUs.
 * HTTP: `GET /v1/tables/{name}` with another method than PUT/DELETE, and
@@ -988,6 +1081,11 @@ and `query` under ten option sets: 9059 requests, no difference.
   their arithmetic / comparisons go through 256-bit routines; the vectorized
   evaluator handles wide arithmetic and comparisons per value (no SIMD), and
   wide casts fall back to the row evaluator.
+* A WITH list with tens of thousands of CTEs that each reference a base
+  table is bound in O(n²) (CTE names are looked up by a linear scan; the
+  deadline is checked inside it, 100,000 such CTEs take ≈ 17 s).
+* Row mode pays a stack guard and a deadline tick per evaluated operator
+  node (CR-6).
 * Ingestion builds a plain columnar table first; converting it (row layout,
   dictionary encoding) rebuilds it into a fresh arena, so loading needs
   transient memory for both representations.
