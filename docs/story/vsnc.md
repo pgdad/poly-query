@@ -1,5 +1,10 @@
 # PolyQuery
 
+**An AI just wrote a SQL database in assembly language, and it outruns Java.**
+Same benchmark, same machine: 2.85 ms for the AI-written x86-64 assembly
+engine, 3.41 ms for Java, at half the memory. That is the surprise. The real
+story is how it got there, and why we can trust the answer.
+
 ![The PolyQuery symbol: an octagon, one corner per engine, one specification in the middle](charts/polyquery-symbol.svg)
 
 > **One spec. Eight languages. One answer.**
@@ -111,31 +116,43 @@ all its later changes came to about **\$120–180 per language**.
 
 ## N — News
 
-*What's the headline? Here are candidates, each backed by the data. Pick the
-lead for the audience.*
+### Six strangers, one answer
 
-1. **"AI writes a SQL database in assembly language, and it outruns Java."**
-   The surprise. Best for a broad or technical audience.
-2. **"Eight database engines in one weekend, for the price of a laptop."**
-   Speed and cost: under 10 hours for six engines through five phases, and
-   $1,256 at list price for everything.
-3. **"Six strangers, one answer."** Six independently written engines give
-   identical results on every one of 20 benchmark queries, and each reads every
-   other engine's storage files. This is the salient point, made concrete.
-4. **"When the robots disagreed, the spec got better."** Divergence between
-   engines exposed two gaps in the specification. One (huge integers compared
-   with decimals) was flagged independently by two agents. The other (what to
-   do with gigantic SQL expressions) became change request CR-6, which is
-   being implemented by the agents right now.
-5. **"75 hours of AI work, zero overage."** Guard rails, not luck: a usage gate
-   that pauses work instead of raising the bill.
-6. **"The AI auditors caught real bugs."** Independent AI code reviews flagged
-   suspected defects. Black-box probes confirmed some, such as a crash on
-   extremely long conditions in both assembly engines, and cleared others.
-   Every result is published, including the failures.
-7. **"Next: twin implementations for the numbers that matter."** The same
-   recipe applied to pricing, billing or interest calculations, with two
-   independent implementations checking each other on every input.
+Six AI agents never saw each other's work. Each built a complete database
+engine, in Java, Clojure, Rust, Python, Go and Common Lisp, from the same
+specification. Given the same 20 benchmark queries over a million rows, **all
+six return identical answers, every time.** Each engine also reads the storage
+files written by every other engine: 36 out of 36 combinations work. The two
+assembly-language engines that followed pass the same conformance
+suite.
+
+That is the salient point made concrete. When independent builds agree on
+everything a shared, language-agnostic test suite can ask, agreement becomes
+evidence.
+
+**Also in the news:**
+
+* **Disagreement is useful too.** Where the engines *did* differ, the
+  specification had a gap.
+  * Two agents independently flagged that comparing huge integers with
+    decimals overflowed under the spec's own rule. The spec was fixed.
+  * The engines split on what to do with gigantic SQL expressions: some
+    computed them, some refused, some hung. That became change request CR-6,
+    which the agents are implementing right now.
+* **The opening hook, in numbers.** The AI-written x86-64 assembly engine
+  answers in 2.85 ms against Java's 3.41 ms, at 1,612 MiB peak memory against
+  3,219 MiB. Both assembly engines together cost \$310.
+* **Eight engines in one weekend, for the price of a laptop.** Six engines
+  went through all five phases in under 10 hours. Everything cost \$1,256 at
+  API list prices.
+* **75 hours of AI work, zero overage.** A usage gate paused work instead of
+  raising the bill.
+* **The AI auditors caught real bugs.** Independent AI code reviews flagged
+  suspected defects; black-box probes confirmed some and cleared others.
+  Everything is published, failures included.
+* **Next: twin implementations for the numbers that matter.** The same recipe
+  applies to pricing, billing or interest calculations, with two independent
+  implementations checking each other on every input.
 
 ![All eight engines pass their full conformance suite](charts/conformance.svg)
 
