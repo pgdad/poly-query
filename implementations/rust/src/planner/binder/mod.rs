@@ -16,6 +16,7 @@ mod functions;
 mod scope;
 
 use std::cell::Cell;
+use std::collections::HashMap;
 
 use super::expr::{AggregateCall, Expr};
 use super::logical::{JoinType, LogicalPlan, SortKey};
@@ -196,6 +197,66 @@ fn rewrite_grouped(e: &mut Expr, groups: &[Expr]) -> Result<()> {
 }
 
 /// Positive integer literal text (`ORDER BY 2`, `GROUP BY 1`).
+/// Counts the base-table / CTE references in the FROM clauses of `q` and
+/// of every query nested in it, by ASCII-lowercased name. The count of a
+/// CTE's name bounds the number of references that resolve to it.
+fn count_table_refs(q: &ast::Query, counts: &mut HashMap<String, usize>) -> Result<()> {
+    crate::stack::check()?;
+    for cte in &q.with {
+        count_table_refs(&cte.query, counts)?;
+    }
+    let mut exprs: Vec<&ast::Expr> = Vec::new();
+    for core in q.branches() {
+        for item in &core.items {
+            if let SelectItem::Expr { expr, .. } = item {
+                exprs.push(expr);
+            }
+        }
+        if let Some(from) = &core.from {
+            count_from_refs(from, counts, &mut exprs)?;
+        }
+        exprs.extend(&core.where_clause);
+        exprs.extend(&core.group_by);
+        exprs.extend(&core.having);
+    }
+    exprs.extend(q.order_by.iter().map(|o| &o.expr));
+    exprs.extend(&q.limit);
+    exprs.extend(&q.offset);
+    // Expressions are walked with an explicit stack (operator chains are
+    // deep); only their subqueries recurse.
+    while let Some(e) = exprs.pop() {
+        crate::interrupt::poll()?;
+        match &e.kind {
+            ExprKind::Subquery(sub) | ExprKind::Exists(sub) => count_table_refs(sub, counts)?,
+            ExprKind::InSubquery { query, .. } => count_table_refs(query, counts)?,
+            _ => {}
+        }
+        exprs.extend(exprs::ast_children(e));
+    }
+    Ok(())
+}
+
+fn count_from_refs<'q>(
+    item: &'q FromItem,
+    counts: &mut HashMap<String, usize>,
+    exprs: &mut Vec<&'q ast::Expr>,
+) -> Result<()> {
+    match item {
+        FromItem::Table { name, .. } => {
+            *counts.entry(name.value.to_ascii_lowercase()).or_default() += 1;
+        }
+        FromItem::Derived { query, .. } => count_table_refs(query, counts)?,
+        FromItem::Join {
+            left, right, on, ..
+        } => {
+            count_from_refs(left, counts, exprs)?;
+            count_from_refs(right, counts, exprs)?;
+            exprs.extend(on);
+        }
+    }
+    Ok(())
+}
+
 fn ordinal(e: &ast::Expr) -> Option<&str> {
     match &e.kind {
         ExprKind::Literal(Literal::Number(text)) if text.bytes().all(|b| b.is_ascii_digit()) => {
@@ -220,15 +281,16 @@ impl Binder<'_> {
         corr: Option<&Correlation<'_>>,
         env: &CteEnv<'_>,
     ) -> Result<LogicalPlan> {
+        crate::stack::check()?;
+        crate::interrupt::poll()?;
         if q.with.is_empty() {
             return self.query_body(q, corr, env);
         }
-        let mut local = CteEnv {
-            defs: Vec::new(),
-            parent: Some(env),
-        };
+        let mut local = CteEnv::new(Some(env));
+        let mut uses = HashMap::new();
+        count_table_refs(q, &mut uses)?;
         for cte in &q.with {
-            if local.defs.iter().any(|d| cte.name.matches(&d.name)) {
+            if local.defines(&cte.name.value) {
                 return Err(cte.name.pos.error(Error::semantic(format!(
                     "duplicate CTE name '{}'",
                     cte.name.value
@@ -250,17 +312,25 @@ impl Binder<'_> {
                     f.name = c.value.clone();
                 }
             }
+            // Only a CTE of a subquery can reference outer columns.
             let mut correlated = false;
-            plan.visit_exprs(&mut |e| {
-                correlated |= e.any(&|x| matches!(x, Expr::Param { .. }));
-            });
-            local.defs.push(CteDef {
-                name: cte.name.value.clone(),
+            if corr.is_some() {
+                plan.visit_exprs(&mut |e| {
+                    correlated |= e.any(&|x| matches!(x, Expr::Param { .. }));
+                });
+            }
+            let uses = uses
+                .get(&cte.name.value.to_ascii_lowercase())
+                .copied()
+                .unwrap_or(0);
+            local.define(CteDef::new(
+                cte.name.value.clone(),
                 plan,
+                uses,
                 fields,
-                corr_key: corr_key(corr),
+                corr_key(corr),
                 correlated,
-            });
+            ));
         }
         self.query_body(q, corr, &local)
     }
@@ -408,7 +478,8 @@ impl Binder<'_> {
                             "a correlated CTE referenced from a nested subquery is not supported",
                         )));
                     }
-                    return Ok((def.plan.clone(), Scope::single(var, def.fields.clone())));
+                    let plan = def.instantiate().map_err(|e| name.pos.error(e))?;
+                    return Ok((plan, Scope::single(var, def.fields.clone())));
                 }
                 let table = self.ctx.catalog.get(&name.value).ok_or_else(|| {
                     name.pos

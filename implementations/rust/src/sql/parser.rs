@@ -138,7 +138,8 @@ impl Parser {
     /// Enters a construct that adds one nesting level around what follows.
     fn enter(&mut self) -> Result<()> {
         self.depth += 1;
-        self.reach(self.depth)
+        self.reach(self.depth)?;
+        crate::stack::check()
     }
 
     fn leave(&mut self) {
@@ -734,6 +735,7 @@ impl Parser {
     }
 
     fn primary(&mut self) -> Result<Expr> {
+        crate::interrupt::poll()?;
         let pos = self.pos();
         let kind = match self.peek().clone() {
             TokenKind::Number(n) => {

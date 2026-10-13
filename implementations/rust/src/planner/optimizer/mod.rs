@@ -25,6 +25,8 @@ use std::sync::Arc;
 
 use super::expr::SubqueryPlan;
 use super::logical::LogicalPlan;
+use crate::error::Result;
+use crate::interrupt;
 pub use column_pruning::ColumnPruning;
 pub use constant_folding::ConstantFolding;
 pub use join_reorder::JoinReorder;
@@ -76,7 +78,9 @@ impl<'r> Optimizer<'r> {
 
     /// Optimizes the plans of the subqueries in `plan`'s expressions (each
     /// subquery once, however often it is referenced), then `plan` itself.
-    pub fn optimize(&self, plan: LogicalPlan) -> LogicalPlan {
+    /// Fails only if the statement is interrupted (timeout, cancellation;
+    /// checked between rule applications) or nested too deeply.
+    pub fn optimize(&self, plan: LogicalPlan) -> Result<LogicalPlan> {
         self.optimize_level(plan, &mut HashMap::new())
     }
 
@@ -84,25 +88,39 @@ impl<'r> Optimizer<'r> {
         &self,
         mut plan: LogicalPlan,
         done: &mut HashMap<usize, Arc<SubqueryPlan>>,
-    ) -> LogicalPlan {
+    ) -> Result<LogicalPlan> {
         if self.rules.is_empty() {
-            return plan;
+            return Ok(plan);
         }
+        crate::stack::check()?;
+        let mut failed = None;
         plan.visit_exprs_mut(&mut |e| {
             e.visit_subqueries_mut(&mut |sub| {
+                if failed.is_some() {
+                    return;
+                }
                 if let Some(optimized) = done.get(&sub.id) {
                     *sub = optimized.clone();
                     return;
                 }
-                let optimized = Arc::new(SubqueryPlan {
-                    id: sub.id,
-                    plan: self.optimize_level(sub.plan.clone(), done),
-                });
-                done.insert(sub.id, optimized.clone());
-                *sub = optimized;
+                match self.optimize_level(sub.plan.clone(), done) {
+                    Ok(plan) => {
+                        let optimized = Arc::new(SubqueryPlan { id: sub.id, plan });
+                        done.insert(sub.id, optimized.clone());
+                        *sub = optimized;
+                    }
+                    Err(e) => failed = Some(e),
+                }
             })
         });
-        self.rules.iter().fold(plan, |plan, rule| rule.apply(plan))
+        if let Some(e) = failed {
+            return Err(e);
+        }
+        for rule in self.rules {
+            interrupt::check()?;
+            plan = rule.apply(plan);
+        }
+        Ok(plan)
     }
 }
 
@@ -277,12 +295,17 @@ mod tests {
         let plan = plan_with_subquery();
         let before = show(&plan);
         assert!(Optimizer::for_query(false).rule_names().is_empty());
-        assert_eq!(show(&Optimizer::for_query(false).optimize(plan)), before);
+        assert_eq!(
+            show(&Optimizer::for_query(false).optimize(plan).unwrap()),
+            before
+        );
     }
 
     #[test]
     fn subquery_plans_are_optimized_too() {
-        let optimized = Optimizer::for_query(true).optimize(plan_with_subquery());
+        let optimized = Optimizer::for_query(true)
+            .optimize(plan_with_subquery())
+            .unwrap();
         assert_eq!(
             show(&optimized),
             "Project [a := #0]\n\
@@ -298,7 +321,7 @@ mod tests {
     #[test]
     fn a_single_rule_can_be_applied_alone() {
         let optimizer = Optimizer::new(&[&ColumnPruning]);
-        let optimized = optimizer.optimize(plan_with_subquery());
+        let optimized = optimizer.optimize(plan_with_subquery()).unwrap();
         // The tautology is still there: only pruning ran.
         assert!(show(&optimized).contains("Filter ((1 = 1) AND (#0 > 3))"));
         assert!(show(&optimized).contains("Scan t [a]"));

@@ -7,7 +7,7 @@ pub mod session;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::time::{Duration, Instant};
 
-use crate::engine::{Engine, QueryResult};
+use crate::engine::{Engine, QueryControl, QueryResult};
 use crate::error::{Error, Result};
 use crate::exec::Row;
 use crate::json::{self, Json};
@@ -147,10 +147,11 @@ pub fn error_response(id: Json, err: &Error) -> Json {
     )
 }
 
-/// Handles one raw request line and returns the single-line response.
-pub fn handle_line(engine: &Engine, line: &str) -> String {
+/// Handles one raw request line, received at `received`, and returns the
+/// single-line response.
+pub fn handle_line(engine: &Engine, line: &str, received: Instant) -> String {
     let resp = match json::parse(line) {
-        Ok(v) => handle_json(engine, &v),
+        Ok(v) => handle_json(engine, &v, received),
         Err(e) => error_response(
             Json::Null,
             &Error::invalid_request(format!("invalid JSON: {e}")),
@@ -159,8 +160,9 @@ pub fn handle_line(engine: &Engine, line: &str) -> String {
     resp.to_string_compact()
 }
 
-/// Handles one parsed request value, never panicking.
-pub fn handle_json(engine: &Engine, req: &Json) -> Json {
+/// Handles one parsed request value, received at `received` (the query
+/// timeout counts from then), never panicking.
+pub fn handle_json(engine: &Engine, req: &Json, received: Instant) -> Json {
     let id = request_id(req);
     if !req.is_object() {
         return error_response(
@@ -168,9 +170,8 @@ pub fn handle_json(engine: &Engine, req: &Json) -> Json {
             &Error::invalid_request("request must be a JSON object"),
         );
     }
-    let started = Instant::now();
     let result = catch_panic(|| {
-        Request::parse(req, engine.config.test_functions).and_then(|r| execute(engine, r, started))
+        Request::parse(req, engine.config.test_functions).and_then(|r| execute(engine, r, received))
     });
     respond(id, result)
 }
@@ -357,13 +358,21 @@ pub fn execute(engine: &Engine, req: Request, started: Instant) -> Result<Json> 
             body
         }
         Request::Query { sql, options } => {
+            let control = QueryControl {
+                deadline: engine.deadline(started, &options),
+                cancel: None,
+            };
             let result = engine
-                .start_query(&sql, &options, Default::default())?
+                .start_query(&sql, &options, control)?
                 .collect_json(options.count_only)?;
             return Ok(query_body(result, options.count_only, started.elapsed()));
         }
         Request::Explain { sql, options } => {
-            vec![ok(), ("plan", engine.explain(&sql, &options)?)]
+            let control = QueryControl {
+                deadline: engine.deadline(started, &options),
+                cancel: None,
+            };
+            vec![ok(), ("plan", engine.explain(&sql, &options, control)?)]
         }
         Request::Sleep { ms } => {
             std::thread::sleep(Duration::from_millis(ms));

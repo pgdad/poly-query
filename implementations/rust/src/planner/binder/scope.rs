@@ -1,7 +1,8 @@
 //! Name-resolution scopes (semantics.md §1, §8, §9): range variables of a
 //! FROM clause, CTE environments and correlation to enclosing queries.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
+use std::collections::HashMap;
 
 use crate::error::{Error, Result};
 use crate::planner::expr::Expr;
@@ -103,7 +104,13 @@ impl Scope {
 #[derive(Debug)]
 pub struct CteDef {
     pub name: String,
-    pub plan: LogicalPlan,
+    /// The bound plan; each reference gets a copy, the last one the plan
+    /// itself (so a chain of CTEs each referencing the previous one is
+    /// bound in linear time and memory).
+    plan: RefCell<Option<LogicalPlan>>,
+    /// References not yet bound: an upper bound (references counted by
+    /// name in the query text, see `count_table_refs`).
+    uses_left: Cell<usize>,
     /// Output fields (renamed by the CTE column list, if any).
     pub fields: Vec<Field>,
     /// Identity of the correlation context the CTE was bound in.
@@ -112,19 +119,74 @@ pub struct CteDef {
     pub correlated: bool,
 }
 
+impl CteDef {
+    pub fn new(
+        name: String,
+        plan: LogicalPlan,
+        uses: usize,
+        fields: Vec<Field>,
+        corr_key: usize,
+        correlated: bool,
+    ) -> Self {
+        CteDef {
+            name,
+            plan: RefCell::new(Some(plan)),
+            uses_left: Cell::new(uses),
+            fields,
+            corr_key,
+            correlated,
+        }
+    }
+
+    /// The plan for one reference to the CTE.
+    pub fn instantiate(&self) -> Result<LogicalPlan> {
+        let left = self.uses_left.get().saturating_sub(1);
+        self.uses_left.set(left);
+        let mut slot = self.plan.borrow_mut();
+        let plan = if left == 0 { slot.take() } else { slot.clone() };
+        plan.ok_or_else(|| {
+            Error::internal(format!(
+                "CTE '{}' referenced more often than counted",
+                self.name
+            ))
+        })
+    }
+}
+
 /// CTEs visible at some point of a query, innermost `WITH` first.
 #[derive(Debug, Default)]
 pub struct CteEnv<'a> {
-    pub defs: Vec<CteDef>,
+    defs: Vec<CteDef>,
+    /// Index of each definition by ASCII-lowercased name.
+    index: HashMap<String, usize>,
     pub parent: Option<&'a CteEnv<'a>>,
 }
 
-impl CteEnv<'_> {
+impl<'a> CteEnv<'a> {
+    pub fn new(parent: Option<&'a CteEnv<'a>>) -> Self {
+        CteEnv {
+            defs: Vec::new(),
+            index: HashMap::new(),
+            parent,
+        }
+    }
+
     pub fn lookup(&self, name: &str) -> Option<&CteDef> {
-        self.defs
-            .iter()
-            .find(|d| d.name.eq_ignore_ascii_case(name))
-            .or_else(|| self.parent.and_then(|p| p.lookup(name)))
+        match self.index.get(&name.to_ascii_lowercase()) {
+            Some(&i) => Some(&self.defs[i]),
+            None => self.parent.and_then(|p| p.lookup(name)),
+        }
+    }
+
+    /// True if this (innermost) `WITH` already defines `name`.
+    pub fn defines(&self, name: &str) -> bool {
+        self.index.contains_key(&name.to_ascii_lowercase())
+    }
+
+    pub fn define(&mut self, def: CteDef) {
+        self.index
+            .insert(def.name.to_ascii_lowercase(), self.defs.len());
+        self.defs.push(def);
     }
 }
 

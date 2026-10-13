@@ -12,6 +12,7 @@ use crate::error::{Error, ErrorCode, Result};
 use crate::exec::parallel::default_morsel_rows;
 use crate::exec::{ExecContext, Operator, Row, build};
 use crate::ingest::{self, Format, IngestOptions};
+use crate::interrupt::{self, Interrupt};
 use crate::json::Json;
 use crate::planner::physical::{self, JoinStrategy};
 use crate::planner::{
@@ -444,7 +445,19 @@ impl Engine {
             catalog,
             test_functions: self.config.test_functions,
         };
-        Ok(Optimizer::for_query(opts.optimize).optimize(plan_query(q, &ctx)?))
+        let t0 = Instant::now();
+        let bound = plan_query(q, &ctx)?;
+        interrupt::check()?;
+        let t1 = Instant::now();
+        let optimized = Optimizer::for_query(opts.optimize).optimize(bound);
+        crate::log::debug(
+            "statement bound",
+            vec![
+                ("bind_us", Json::uint((t1 - t0).as_micros() as u64)),
+                ("optimize_us", Json::uint(t1.elapsed().as_micros() as u64)),
+            ],
+        );
+        optimized
     }
 
     /// The query options that steer physical planning.
@@ -459,9 +472,14 @@ impl Engine {
     }
 
     /// The physical plan of a query (`explain` op; also accepts `EXPLAIN …`).
-    pub fn explain(&self, sql: &str, opts: &QueryOptions) -> Result<Json> {
+    pub fn explain(&self, sql: &str, opts: &QueryOptions, control: QueryControl) -> Result<Json> {
+        let interrupt = self.interrupt(opts, control);
+        let _installed = interrupt::install(interrupt.clone());
         match parse_statement(sql)? {
-            Statement::Query(q) | Statement::Explain(q) => self.explain_query(&q, opts),
+            Statement::Query(q) | Statement::Explain(q) => {
+                interrupt.check()?;
+                self.explain_query(&q, opts, &interrupt)
+            }
             Statement::CreateIndex { .. } | Statement::DropIndex { .. } => {
                 Err(Error::unsupported("only queries can be explained"))
             }
@@ -469,10 +487,37 @@ impl Engine {
     }
 
     /// The EXPLAIN plan JSON of a query.
-    fn explain_query(&self, q: &Query, opts: &QueryOptions) -> Result<Json> {
+    fn explain_query(&self, q: &Query, opts: &QueryOptions, interrupt: &Interrupt) -> Result<Json> {
         let catalog = self.catalog();
         let logical = self.logical_plan(&catalog, q, opts)?;
-        Ok(physical::plan(&logical, &catalog, self.physical_options(opts)).to_json())
+        interrupt.check()?;
+        let plan = physical::plan(&logical, &catalog, self.physical_options(opts));
+        interrupt.check()?;
+        let json = plan.to_json();
+        interrupt.check()?;
+        Ok(json)
+    }
+
+    /// The effective deadline of a statement received at `arrival`:
+    /// `options.timeout_ms`, else the configured default (concurrency.md §3).
+    pub fn deadline(&self, arrival: Instant, opts: &QueryOptions) -> Option<Instant> {
+        let timeout_ms = if opts.timeout_ms > 0 {
+            opts.timeout_ms
+        } else {
+            self.config.query_timeout_ms
+        };
+        (timeout_ms > 0).then(|| arrival + Duration::from_millis(timeout_ms))
+    }
+
+    /// How the statement is interrupted; without an explicit deadline the
+    /// timeout counts from now.
+    fn interrupt(&self, opts: &QueryOptions, control: QueryControl) -> Interrupt {
+        Interrupt {
+            deadline: control
+                .deadline
+                .or_else(|| self.deadline(Instant::now(), opts)),
+            cancel: control.cancel,
+        }
     }
 
     /// Executes a SQL statement and materializes its result.
@@ -500,26 +545,40 @@ impl Engine {
             row_count: 0,
             replay: None,
         };
-        match parse_statement(sql)? {
+        // The timeout covers parsing, binding, planning and execution
+        // (CR-6 §4): the stages before execution poll the installed interrupt.
+        let interrupt = self.interrupt(opts, control);
+        let _installed = interrupt::install(interrupt.clone());
+        let t0 = Instant::now();
+        let statement = parse_statement(sql)?;
+        interrupt.check()?;
+        match statement {
             Statement::Query(q) => {
+                let t1 = Instant::now();
                 let catalog = self.catalog();
                 let logical = self.logical_plan(&catalog, &q, opts)?;
+                interrupt.check()?;
+                let t2 = Instant::now();
                 let physical_opts = self.physical_options(opts);
                 let plan = physical::plan(&logical, &catalog, physical_opts);
+                interrupt.check()?;
+                if crate::log::enabled(crate::log::LogLevel::Debug) {
+                    let us = |d: Duration| Json::uint(d.as_micros() as u64);
+                    crate::log::debug(
+                        "statement planned",
+                        vec![
+                            ("parse_us", us(t1 - t0)),
+                            ("bind_optimize_us", us(t2 - t1)),
+                            ("physical_us", us(t2.elapsed())),
+                        ],
+                    );
+                }
                 let columns = plan
                     .schema()
                     .iter()
                     .map(|f| Field::new(f.name.clone(), f.data_type.result_type()))
                     .collect();
-                let timeout_ms = if opts.timeout_ms > 0 {
-                    opts.timeout_ms
-                } else {
-                    self.config.query_timeout_ms
-                };
-                let timeout = (timeout_ms > 0).then(|| Duration::from_millis(timeout_ms));
-                let deadline = control
-                    .deadline
-                    .or_else(|| timeout.map(|t| Instant::now() + t));
+                let deadline = interrupt.deadline;
                 let memory =
                     usize::try_from(self.config.max_query_memory_mb.saturating_mul(1024 * 1024))
                         .unwrap_or(usize::MAX);
@@ -530,7 +589,7 @@ impl Engine {
                         .with_max_join_rows(self.config.max_join_rows)
                         .with_plan(plan)
                         .with_morsel_rows(morsel_rows);
-                    match &control.cancel {
+                    match &interrupt.cancel {
                         Some(flag) => ctx.with_cancel_flag(flag.clone()),
                         None => ctx,
                     }
@@ -555,7 +614,9 @@ impl Engine {
                 })
             }
             Statement::Explain(q) => {
-                let text = self.explain_query(&q, opts)?.to_string_compact();
+                let text = self
+                    .explain_query(&q, opts, &interrupt)?
+                    .to_string_compact();
                 Ok(ready(
                     vec![Field::new("plan", DataType::String)],
                     vec![vec![Value::str(&text)]],
@@ -1101,6 +1162,7 @@ mod tests {
             .explain(
                 "SELECT id FROM t UNION ALL SELECT id FROM u",
                 &QueryOptions::default(),
+                QueryControl::default(),
             )
             .unwrap()
             .to_string_compact();
@@ -1114,6 +1176,7 @@ mod tests {
             .explain(
                 "SELECT t.name FROM t JOIN u ON t.id = u.id WHERE u.tag = 'x'",
                 &QueryOptions::default(),
+                QueryControl::default(),
             )
             .unwrap()
             .to_string_compact();

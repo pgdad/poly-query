@@ -1,6 +1,7 @@
 //! `session` (JSON lines on stdin/stdout) and `exec` CLI modes.
 
 use std::io::{self, BufRead, Read, Write};
+use std::time::Instant;
 
 use super::{error_response, handle_json, handle_line};
 use crate::engine::Engine;
@@ -19,6 +20,7 @@ pub fn run_session(engine: &Engine) -> io::Result<()> {
         if input.read_until(b'\n', &mut buf)? == 0 {
             return Ok(());
         }
+        let received = Instant::now();
         let line = match std::str::from_utf8(&buf) {
             Ok(s) => s.trim_end_matches(['\n', '\r']),
             Err(_) => {
@@ -34,7 +36,7 @@ pub fn run_session(engine: &Engine) -> io::Result<()> {
         if line.trim().is_empty() {
             continue;
         }
-        let resp = handle_line(engine, line);
+        let resp = handle_line(engine, line, received);
         out.write_all(resp.as_bytes())?;
         out.write_all(b"\n")?;
         out.flush()?;
@@ -56,13 +58,17 @@ pub fn run_exec(engine: &Engine, source: &str) -> io::Result<()> {
     match json::parse(&text) {
         Ok(Json::Array(items)) => {
             for item in &items {
-                let resp = handle_json(engine, item);
+                let resp = handle_json(engine, item, Instant::now());
                 writeln!(out, "{}", resp.to_string_compact())?;
                 out.flush()?;
             }
         }
         Ok(v) => {
-            writeln!(out, "{}", handle_json(engine, &v).to_string_compact())?;
+            writeln!(
+                out,
+                "{}",
+                handle_json(engine, &v, Instant::now()).to_string_compact()
+            )?;
         }
         Err(e) => {
             let resp = error_response(

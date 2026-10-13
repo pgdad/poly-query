@@ -153,6 +153,8 @@ impl Binder<'_> {
         sc: &ExprScope<'_>,
         mode: &mut AggMode<'_>,
     ) -> Result<Expr> {
+        crate::stack::check()?;
+        crate::interrupt::poll()?;
         Ok(match &e.kind {
             ExprKind::Literal(lit) => literal(lit, e.pos)?,
             ExprKind::Column { qualifier, name } => sc.resolve(qualifier.as_ref(), name)?.0,

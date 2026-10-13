@@ -21,6 +21,7 @@ pub mod engine;
 pub mod error;
 pub mod exec;
 pub mod ingest;
+pub mod interrupt;
 pub mod json;
 pub mod log;
 pub mod native;

@@ -151,6 +151,47 @@ def beyond_cases() -> list:
     ]
 
 
+def edge_cases() -> list:
+    """At the engine's own limits (nesting depth 4096, 100,000 operands): the
+    result, or RESOURCE_LIMIT (never a crash)."""
+    d = 4000
+    return [
+        ("parens_4000", where("(" * d + "x >= 0" + ")" * d), 100),
+        ("abs_4000", where("ABS(" * d + "x" + ")" * d + " >= 0"), 100),
+        ("minus_4000", where("- " * d + "x <= 0"), 1),
+        ("not_4000", where("NOT " * d + "x >= 0"), 100),
+        ("cast_4000", where("CAST(" * d + "x" + " AS INT64)" * d + " >= 0"), 100),
+        ("case_nested_4000", where("CASE WHEN TRUE THEN " * d + "x" + " END" * d + " >= 0"), 100),
+        ("paren_sum_2000", "SELECT max(" + "(" * 2000 + "x" + " + 1)" * 2000 + ") FROM n", 99 + 2000),
+        ("right_sum_2000", "SELECT max(x" + " + (1" * 2000 + ")" * 2000 + ") FROM n", 99 + 2000),
+        ("right_or_2000", where("x = -1" + " OR (x = -1" * 1999 + " OR x >= 0" + ")" * 1999), 100),
+        ("scalar_subq_4000", where("x >= " + "(SELECT " * d + "0" + ")" * d), 100),
+        ("derived_4000", "SELECT count(*) FROM " + "(SELECT * FROM " * d + "n" + ") t" * d, 100),
+        ("exists_4000", where("EXISTS (SELECT 1 WHERE " * d + "TRUE" + ")" * d), 100),
+        ("in_subq_1300", where("x IN (SELECT x FROM n WHERE " * 1300 + "TRUE" + ")" * 1300), 100),
+        ("cte_nested_4000", "SELECT count(*) FROM (" + "WITH c AS (" * 3990 + "SELECT * FROM n"
+         + ") SELECT * FROM c" * 3990 + ") t", 100),
+        ("corr_subq_2000", "SELECT count(*) FROM n a WHERE " + "EXISTS (SELECT 1 FROM n b WHERE b.x = a.x AND " * 30
+         + "x >= " + "(SELECT " * 1900 + "a.x" + ")" * 1900 + ")" * 30, 100),
+        ("sum_99999", "SELECT max(x" + " + 1" * 99_998 + ") FROM n", 99 + 99_998),
+        ("colsum_99999", "SELECT max(x" + " + x" * 99_998 + ") FROM n", 99 * 99_999),
+        ("or_49999", where(" OR ".join(f"x = {i}" for i in range(49_999))), 100),
+        ("in_99999", where("x IN (" + ", ".join(str(i) for i in range(99_998)) + ")"), 100),
+        ("case_49999", "SELECT sum(CASE " + " ".join(f"WHEN x = {i} THEN {i}" for i in range(49_999))
+         + " ELSE 0 END) FROM n", 4950),
+        ("concat_99999", "SELECT max(length(" + " || ".join("CAST(x AS STRING)" for _ in range(99_999)) + ")) FROM n",
+         199_998),
+        ("union_all_50000", "SELECT count(*) FROM (" + " UNION ALL ".join("SELECT x FROM n" for _ in range(50_000))
+         + ") t", 5_000_000),
+        ("join_chain_2000", "SELECT count(*) FROM n t0 " + " ".join(f"JOIN n t{i} ON t{i - 1}.x = t{i}.x"
+                                                                   for i in range(1, 2000)), 100),
+        ("cte_chain_20000", "WITH c0 AS (SELECT x FROM n), " + ", ".join(
+            f"c{i} AS (SELECT x FROM c{i - 1})" for i in range(1, 20000)) + " SELECT count(*) FROM c19999", 100),
+        ("select_list_99999", "SELECT " + ", ".join("x" for _ in range(99_998)) + " FROM n LIMIT 1", 0),
+        ("text_16mib", where("'" + "a" * 8_300_000 + "' = '" + "a" * 8_300_000 + "'"), 100),
+    ]
+
+
 def timeout_cases() -> list:
     """Large statements with a short timeout: the answer must arrive within timeout + 1 s."""
     return [(n, s, v) for n, s, v in minimum_cases() + beyond_cases()
@@ -186,7 +227,7 @@ def main() -> int:
             return s
 
         groups = {"min": (minimum_cases, 120_000), "beyond": (beyond_cases, 30_000),
-                  "timeout": (timeout_cases, a.timeout_ms)}
+                  "edge": (edge_cases, 60_000), "timeout": (timeout_cases, a.timeout_ms)}
         for g in a.groups.split(","):
             make, tmo = groups[g]
             for name, sql, want in make():
