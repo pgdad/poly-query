@@ -2,8 +2,11 @@ package polyquery.exec.vector;
 
 import java.util.ArrayList;
 import java.util.HashSet;
+import java.util.IdentityHashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
+import polyquery.common.Checkpoint;
 import polyquery.common.PolyQueryException;
 import polyquery.exec.ExecContext;
 import polyquery.exec.ExpressionCompiler;
@@ -21,11 +24,20 @@ import polyquery.types.DataType;
  */
 final class VecCompiler {
     private static final Object[] NO_ROW = new Object[0];
+    /**
+     * Every kernel at a multiple of this nesting level polls the query's timeout when evaluated:
+     * a batch through a deep expression (a long operator chain) may take seconds (CR-6 §4).
+     */
+    private static final int POLL_DEPTH = 32;
 
     private final ExecContext ctx;
     private final ExpressionCompiler rows;
     /** Holder of the shared operand while compiling the expressions that read it. */
     private Kernels.Operand operand;
+    /** Memo of {@link #foldable} (a compiler is confined to one thread). */
+    private final Map<BoundExpr, Boolean> foldable = new IdentityHashMap<>();
+    /** Nesting level of the kernel being compiled (see {@link #POLL_DEPTH}). */
+    private int depth;
 
     VecCompiler(ExecContext ctx, ExpressionCompiler rows) {
         this.ctx = ctx;
@@ -42,11 +54,27 @@ final class VecCompiler {
     }
 
     VecExpr compile(BoundExpr e) {
+        Checkpoint.poll();
+        depth++;
+        try {
+            VecExpr kernel = compileNode(e);
+            boolean leaf = kernel instanceof Kernels.Constant || kernel instanceof Kernels.ColumnRef
+                    || kernel instanceof Kernels.Operand;
+            return depth % POLL_DEPTH == 0 && !leaf ? new Kernels.Polling(kernel) : kernel;
+        } finally {
+            depth--;
+        }
+    }
+
+    private VecExpr compileNode(BoundExpr e) {
         if (!(e instanceof BoundExpr.Literal) && foldable(e)) {
             try {
                 return new Kernels.Constant(e.type(), rows.compile(e).eval(NO_ROW));
             } catch (PolyQueryException ex) {
-                // not folded: the error is raised when (and if) a row evaluates it
+                // not folded: the error is raised when (and if) a row evaluates it. Row code
+                // evaluates the whole constant once per row instead of folding each of its
+                // subexpressions, which would be quadratic for a long failing chain.
+                return rowEval(e);
             }
         }
         return switch (e) {
@@ -66,7 +94,14 @@ final class VecCompiler {
             case BoundExpr.IsNull n -> new Kernels.IsNull(compile(n.input()), n.negated());
             case BoundExpr.And a -> new Kernels.AndOr(true, compile(a.left()), compile(a.right()));
             case BoundExpr.Or o -> new Kernels.AndOr(false, compile(o.left()), compile(o.right()));
-            case BoundExpr.Concat c -> new Kernels.Concat(compile(c.left()), compile(c.right()));
+            case BoundExpr.Concat c -> {
+                List<BoundExpr> operands = BoundExprs.concatOperands(c);
+                VecExpr[] parts = new VecExpr[operands.size()];
+                for (int i = 0; i < parts.length; i++) {
+                    parts[i] = compile(operands.get(i));
+                }
+                yield new Kernels.Concat(parts);
+            }
             case BoundExpr.Arithmetic a -> arithmetic(a);
             case BoundExpr.Comparison c -> comparison(c);
             case BoundExpr.Like l -> like(l);
@@ -85,12 +120,27 @@ final class VecCompiler {
         };
     }
 
-    /** True if {@code e} reads no row, frame or operand and has no side effects. */
-    private static boolean foldable(BoundExpr e) {
-        return !BoundExprs.any(e, x -> x instanceof BoundExpr.ColumnRef || x instanceof BoundExpr.AggregateRef
-                || x instanceof BoundExpr.OuterRef || x instanceof BoundExpr.Placeholder
-                || BoundExprs.subqueryOf(x) != null
-                || x instanceof BoundExpr.Function f && f.name().equals("PQ_SLEEP"));
+    /**
+     * True if {@code e} reads no row, frame or operand and has no side effects. Memoized by
+     * node identity: {@link #compile} asks about every node, and a subtree scan per node would be
+     * quadratic for long operator chains.
+     */
+    private boolean foldable(BoundExpr e) {
+        Boolean known = foldable.get(e);
+        if (known != null) {
+            return known;
+        }
+        boolean result = !(BoundExprs.isRowInput(e) || e instanceof BoundExpr.Placeholder);
+        if (result) {
+            for (BoundExpr c : BoundExprs.children(e)) {
+                if (!foldable(c)) {
+                    result = false;
+                    break;
+                }
+            }
+        }
+        foldable.put(e, result);
+        return result;
     }
 
     private VecExpr withOperand(Kernels.Operand holder, BoundExpr e) {

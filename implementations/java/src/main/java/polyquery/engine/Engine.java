@@ -14,6 +14,7 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.function.Function;
+import polyquery.common.Checkpoint;
 import polyquery.common.ErrorCode;
 import polyquery.common.PolyQueryException;
 import polyquery.exec.ExecContext;
@@ -29,6 +30,7 @@ import polyquery.ingest.CsvIngest;
 import polyquery.ingest.IngestOptions;
 import polyquery.ingest.JsonIngest;
 import polyquery.json.JsonWriter;
+import polyquery.physical.PhysicalPlan;
 import polyquery.physical.PhysicalQuery;
 import polyquery.physical.PlanExplainer;
 import polyquery.plan.LogicalPlan;
@@ -204,17 +206,32 @@ public final class Engine {
      */
     private long execute(String sql, QueryOptions opts, QueryControl control,
                          Function<ExecContext, ResultSink> sinkFactory) {
-        control.check();
-        Statement stmt = Parser.parse(sql);
+        // The timeout covers every stage (CR-6 §4): parsing, binding and planning poll it too.
+        return Checkpoint.with(control::check, () -> {
+            control.check();
+            Statement stmt = Parser.parse(sql);
+            control.check();
+            return execute(stmt, opts, control, sinkFactory);
+        });
+    }
+
+    private long execute(Statement stmt, QueryOptions opts, QueryControl control,
+                         Function<ExecContext, ResultSink> sinkFactory) {
         ExecContext ctx = newContext(opts, control);
         ResultSink sink = sinkFactory.apply(ctx);
         return switch (stmt) {
             case Statement.QueryStatement qs -> {
                 QueryPlanner planner = planner(opts);
-                PhysicalQuery query = planner.planQuery(analyze(qs.query(), catalog.snapshot()));
+                LogicalPlan logical = analyze(qs.query(), catalog.snapshot());
+                control.check();
+                PhysicalQuery query = planner.planQuery(logical);
+                control.check();
                 ctx.withNativeKernels(query.nativeKernels() ? config.nativeKernels() : null);
-                yield query.mode() == ExecMode.ROW ? Executor.stream(query.root(), ctx, planner::plan, sink)
-                        : VectorExecutor.stream(query.root(), ctx, planner::plan, sink, query.threads());
+                // subqueries are planned when first executed, possibly by a worker thread
+                Function<LogicalPlan, PhysicalPlan> subqueries =
+                        plan -> Checkpoint.with(control::check, () -> planner.plan(plan));
+                yield query.mode() == ExecMode.ROW ? Executor.stream(query.root(), ctx, subqueries, sink)
+                        : VectorExecutor.stream(query.root(), ctx, subqueries, sink, query.threads());
             }
             case Statement.Explain e -> {
                 String text = JsonWriter.write(explainQuery(e.query(), opts, catalog.snapshot()));
@@ -239,17 +256,23 @@ public final class Engine {
         };
     }
 
-    /** The EXPLAIN plan tree of a query (or of the query of an EXPLAIN statement). */
+    /**
+     * The EXPLAIN plan tree of a query (or of the query of an EXPLAIN statement), computed
+     * within the timeout of {@code opts}.
+     */
     public Map<String, Object> explain(String sql, QueryOptions opts) {
-        Statement stmt = Parser.parse(sql);
-        return switch (stmt) {
-            case Statement.QueryStatement qs -> explainQuery(qs.query(), opts, catalog.snapshot());
-            case Statement.Explain e -> explainQuery(e.query(), opts, catalog.snapshot());
-            case Statement.CreateIndex c -> throw new PolyQueryException(ErrorCode.SEMANTIC_ERROR,
-                    "only queries can be explained");
-            case Statement.DropIndex d -> throw new PolyQueryException(ErrorCode.SEMANTIC_ERROR,
-                    "only queries can be explained");
-        };
+        QueryControl control = QueryControl.withTimeout(opts.timeoutMs());
+        return Checkpoint.with(control::check, () -> {
+            Statement stmt = Parser.parse(sql);
+            return switch (stmt) {
+                case Statement.QueryStatement qs -> explainQuery(qs.query(), opts, catalog.snapshot());
+                case Statement.Explain e -> explainQuery(e.query(), opts, catalog.snapshot());
+                case Statement.CreateIndex c -> throw new PolyQueryException(ErrorCode.SEMANTIC_ERROR,
+                        "only queries can be explained");
+                case Statement.DropIndex d -> throw new PolyQueryException(ErrorCode.SEMANTIC_ERROR,
+                        "only queries can be explained");
+            };
+        });
     }
 
     /**

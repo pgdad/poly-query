@@ -20,12 +20,21 @@ public final class Lexer {
     private int line = 1;
     private int lineStart;
 
-    private Lexer(String src) {
+    /** A lexer producing the tokens of {@code src} on demand ({@link #next}). */
+    public Lexer(String src) {
         this.src = src;
     }
 
+    /** All tokens of {@code sql}, ending with EOF. */
     public static List<Token> tokenize(String sql) {
-        return new Lexer(sql).run();
+        Lexer lexer = new Lexer(sql);
+        List<Token> out = new ArrayList<>();
+        Token t;
+        do {
+            t = lexer.next();
+            out.add(t);
+        } while (!t.is(TokenType.EOF));
+        return out;
     }
 
     private int col() {
@@ -53,44 +62,42 @@ public final class Lexer {
         return c >= '0' && c <= '9';
     }
 
-    private List<Token> run() {
-        List<Token> out = new ArrayList<>();
+    /** The next token; EOF at the end of the text (and on every later call). */
+    public Token next() {
         int n = src.length();
-        while (true) {
-            skipTrivia();
-            if (pos >= n) {
-                out.add(new Token(TokenType.EOF, "", line, col()));
-                return out;
-            }
-            int l = line;
-            int c = col();
-            char ch = src.charAt(pos);
-            if (identStart(ch)) {
-                int start = pos;
-                while (pos < n && identPart(src.charAt(pos))) {
-                    pos++;
-                }
-                String word = src.substring(start, pos);
-                String upper = word.toUpperCase(Locale.ROOT);
-                if (RESERVED.contains(upper)) {
-                    out.add(new Token(TokenType.KEYWORD, upper, l, c, word));
-                } else {
-                    out.add(new Token(TokenType.IDENT, word, l, c));
-                }
-            } else if (digit(ch) || (ch == '.' && pos + 1 < n && digit(src.charAt(pos + 1)))) {
-                out.add(number(l, c));
-            } else if (ch == '\'') {
-                out.add(new Token(TokenType.STRING, quoted('\'', l, c, "string literal"), l, c));
-            } else if (ch == '"') {
-                String id = quoted('"', l, c, "quoted identifier");
-                if (id.isEmpty()) {
-                    throw error("empty quoted identifier", l, c);
-                }
-                out.add(new Token(TokenType.QUOTED_IDENT, id, l, c));
-            } else {
-                out.add(operator(ch, l, c));
-            }
+        skipTrivia();
+        if (pos >= n) {
+            return new Token(TokenType.EOF, "", line, col());
         }
+        int l = line;
+        int c = col();
+        char ch = src.charAt(pos);
+        if (identStart(ch)) {
+            int start = pos;
+            while (pos < n && identPart(src.charAt(pos))) {
+                pos++;
+            }
+            String word = src.substring(start, pos);
+            String upper = word.toUpperCase(Locale.ROOT);
+            if (RESERVED.contains(upper)) {
+                return new Token(TokenType.KEYWORD, upper, l, c, word);
+            }
+            return new Token(TokenType.IDENT, word, l, c);
+        }
+        if (digit(ch) || (ch == '.' && pos + 1 < n && digit(src.charAt(pos + 1)))) {
+            return number(l, c);
+        }
+        if (ch == '\'') {
+            return new Token(TokenType.STRING, quoted('\'', l, c, "string literal"), l, c);
+        }
+        if (ch == '"') {
+            String id = quoted('"', l, c, "quoted identifier");
+            if (id.isEmpty()) {
+                throw error("empty quoted identifier", l, c);
+            }
+            return new Token(TokenType.QUOTED_IDENT, id, l, c);
+        }
+        return operator(ch, l, c);
     }
 
     private void skipTrivia() {

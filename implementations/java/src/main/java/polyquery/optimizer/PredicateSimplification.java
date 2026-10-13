@@ -12,7 +12,7 @@ import polyquery.plan.LogicalPlan;
  * whose predicate is {@code TRUE} disappear. AND/OR evaluate their right operand only if the
  * left one does not decide the result, so a right-hand constant decides only if the left
  * operand cannot fail. An expression that becomes literal-only through a simplification is
- * folded ({@link ConstantFolding#foldNode}).
+ * folded ({@link ConstantFolding.Folder#foldNode}).
  */
 public final class PredicateSimplification implements OptimizerRule {
     @Override
@@ -22,14 +22,15 @@ public final class PredicateSimplification implements OptimizerRule {
 
     @Override
     public LogicalPlan apply(LogicalPlan plan) {
+        ConstantFolding.Folder folder = new ConstantFolding.Folder();
         return plan.transformUp(node -> {
-            LogicalPlan simplified = PlanExpressions.map(node, PredicateSimplification::simplify);
+            LogicalPlan simplified = PlanExpressions.map(node, e -> simplify(e, folder));
             return simplified instanceof LogicalPlan.Filter f && isTrue(f.predicate()) ? f.input() : simplified;
         });
     }
 
-    static BoundExpr simplify(BoundExpr e) {
-        if (ConstantFolding.isFoldable(e)) {
+    static BoundExpr simplify(BoundExpr e, ConstantFolding.Folder folder) {
+        if (folder.isFoldable(e)) {
             return e; // constant folding's business (or its evaluation fails)
         }
         List<BoundExpr> children = BoundExprs.children(e);
@@ -37,14 +38,14 @@ public final class PredicateSimplification implements OptimizerRule {
             List<BoundExpr> simplified = new ArrayList<>(children.size());
             boolean changed = false;
             for (BoundExpr c : children) {
-                BoundExpr s = simplify(c);
+                BoundExpr s = simplify(c, folder);
                 changed |= s != c;
                 simplified.add(s);
             }
             if (changed) {
                 e = BoundExprs.withChildren(e, simplified);
-                if (ConstantFolding.isFoldable(e)) {
-                    return ConstantFolding.foldNode(e);
+                if (folder.isFoldable(e)) {
+                    return folder.foldNode(e);
                 }
             }
         }

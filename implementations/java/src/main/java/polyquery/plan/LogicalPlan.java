@@ -3,6 +3,7 @@ package polyquery.plan;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.function.UnaryOperator;
+import polyquery.common.Checkpoint;
 import polyquery.storage.ColumnSchema;
 import polyquery.storage.Table;
 
@@ -16,6 +17,14 @@ import polyquery.storage.Table;
 public sealed interface LogicalPlan {
     List<ColumnSchema> schema();
 
+    /**
+     * The number of output columns, {@code schema().size()} without building the schema (which
+     * a deep join or filter tree would assemble from all of its levels on every call).
+     */
+    default int width() {
+        return schema().size();
+    }
+
     /** Input plans, in order. */
     List<LogicalPlan> children();
 
@@ -24,6 +33,7 @@ public sealed interface LogicalPlan {
 
     /** Rewrites the plan bottom-up: {@code rule} is applied to every node after its inputs were rewritten. */
     default LogicalPlan transformUp(UnaryOperator<LogicalPlan> rule) {
+        Checkpoint.poll();
         List<LogicalPlan> inputs = children();
         if (inputs.isEmpty()) {
             return rule.apply(this);
@@ -78,6 +88,11 @@ public sealed interface LogicalPlan {
         }
 
         @Override
+        public int width() {
+            return input.width();
+        }
+
+        @Override
         public List<LogicalPlan> children() {
             return List.of(input);
         }
@@ -97,9 +112,24 @@ public sealed interface LogicalPlan {
     record Join(LogicalPlan left, LogicalPlan right, JoinKind kind, BoundExpr condition) implements LogicalPlan {
         @Override
         public List<ColumnSchema> schema() {
-            List<ColumnSchema> out = new ArrayList<>(left.schema());
-            out.addAll(right.schema());
+            List<ColumnSchema> out = new ArrayList<>(width());
+            appendSchema(this, out);
             return out;
+        }
+
+        /** Appends the schema of {@code plan}; joins append their inputs' (no copy per level of a join tree). */
+        private static void appendSchema(LogicalPlan plan, List<ColumnSchema> out) {
+            if (plan instanceof Join j) {
+                appendSchema(j.left(), out);
+                appendSchema(j.right(), out);
+            } else {
+                out.addAll(plan.schema());
+            }
+        }
+
+        @Override
+        public int width() {
+            return left.width() + right.width();
         }
 
         @Override
@@ -150,6 +180,11 @@ public sealed interface LogicalPlan {
         }
 
         @Override
+        public int width() {
+            return expressions.size();
+        }
+
+        @Override
         public List<LogicalPlan> children() {
             return List.of(input);
         }
@@ -168,6 +203,11 @@ public sealed interface LogicalPlan {
         }
 
         @Override
+        public int width() {
+            return input.width();
+        }
+
+        @Override
         public List<LogicalPlan> children() {
             return List.of(input);
         }
@@ -182,6 +222,11 @@ public sealed interface LogicalPlan {
         @Override
         public List<ColumnSchema> schema() {
             return input.schema();
+        }
+
+        @Override
+        public int width() {
+            return input.width();
         }
 
         @Override
@@ -221,6 +266,11 @@ public sealed interface LogicalPlan {
         @Override
         public List<ColumnSchema> schema() {
             return input.schema();
+        }
+
+        @Override
+        public int width() {
+            return input.width();
         }
 
         @Override
