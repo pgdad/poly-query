@@ -195,6 +195,7 @@ ENDF agg_par_ok
 //   x25 group table, x26 rs, x27 group index, x28 scratch
 // =============================================================================
 FUNC vagg_aggregate
+    STACK_GUARD                         // CR-6: recursive
     ENTER 5
     sub  sp, sp, #16
     mov  x19, x0
@@ -1029,6 +1030,7 @@ ENDF gt_rehash
 //        [sp+16] key cells, [sp+24] position, [sp+32] slot, [sp+40] hash
 // =============================================================================
 FUNC agg_task
+    STACK_GUARD                         // CR-6: recursive
     ENTER 5
     sub  sp, sp, #64
     mov  x19, x0
@@ -1327,6 +1329,7 @@ ENDF agg_task
 //        [sp+32] distinct records, [sp+40] their count
 // =============================================================================
 LFUNC vagg_distinct
+    STACK_GUARD                         // CR-6: recursive
     ENTER 5
     sub  sp, sp, #48
     mov  x19, x0
@@ -1510,6 +1513,7 @@ ENDF vagg_distinct
 // Stack: [sp] key vectors (Vec* [keys], the argument last), [sp+16] ids
 // =============================================================================
 LFUNC dagg_task
+    STACK_GUARD                         // CR-6: recursive
     ENTER 5
     sub  sp, sp, #32
     mov  x19, x0
@@ -2044,6 +2048,7 @@ ENDF merge_task
 //   x26 window, x27 rows kept
 // =============================================================================
 LFUNC emit_groups
+    STACK_GUARD                         // CR-6: recursive
     ENTER 5
     sub  sp, sp, #32
     mov  x19, x0
@@ -2156,6 +2161,7 @@ ENDF emit_groups
 //   x19 record, x20 ctx, x21 bq, x22 index, x23 group record, x24 rows kept,
 //   x25 node
 LFUNC emit_task
+    STACK_GUARD                         // CR-6: recursive
     ENTER 5
     mov  x19, x0
     ldr  x20, [x19, #ET_CTX]

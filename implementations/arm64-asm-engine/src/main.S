@@ -275,11 +275,13 @@ FUNC main
     b    .Lexit0
 2:  cmp  x22, #3
     b.ne 3f
-    bl   session_loop
+    ADR_L x0, session_loop
+    bl   run_request_thread
     b    .Lexit0
 3:  cmp  x22, #4
     b.ne 4f
-    bl   exec_mode
+    ADR_L x0, exec_mode
+    bl   run_request_thread
     b    .Lexit0
 4:  LDR_G x0, g_srv_port           // serve (http.S): never returns
     tbz  x0, #63, 5f
@@ -302,6 +304,53 @@ FUNC main
     mov  x2, #0
     bl   usage_exit
 ENDF main
+
+// run_request_thread(x0 fn): runs fn() on a new thread with a
+// QUERY_STACK_SIZE stack (CR-6: deep statements need more than the main
+// thread's RLIMIT_STACK) and waits for it. Runs fn on the calling thread if
+// no thread can be created.
+//   x19 fn; stack: pthread_attr_t [sp+0..63], pthread_t [sp+64]
+LFUNC run_request_thread
+    stp  x29, x30, [sp, #-32]!
+    mov  x29, sp
+    str  x19, [sp, #16]
+    sub  sp, sp, #80
+    mov  x19, x0
+    mov  x0, sp
+    bl   big_stack_attr
+    add  x0, sp, #64
+    mov  x1, sp
+    ADR_L x2, request_thread_main
+    mov  x3, x19
+    bl   pthread_create
+    cbz  w0, 1f
+    blr  x19                        // fallback: this thread (8 MiB stack)
+    b    2f
+1:  ldr  x0, [sp, #64]
+    mov  x1, #0
+    bl   pthread_join
+2:  mov  x0, sp
+    bl   pthread_attr_destroy
+    add  sp, sp, #80
+    ldr  x19, [sp, #16]
+    ldp  x29, x30, [sp], #32
+    ret
+ENDF run_request_thread
+
+// request_thread_main(x0 fn) -> x0 0: thread body of run_request_thread
+LFUNC request_thread_main
+    stp  x29, x30, [sp, #-32]!
+    mov  x29, sp
+    str  x19, [sp, #16]
+    mov  x19, x0
+    bl   stack_guard_init
+    bl   thread_boost
+    blr  x19
+    mov  x0, #0
+    ldr  x19, [sp, #16]
+    ldp  x29, x30, [sp], #32
+    ret
+ENDF request_thread_main
 
 // session_loop(): read JSON lines from stdin until EOF.
 LFUNC session_loop

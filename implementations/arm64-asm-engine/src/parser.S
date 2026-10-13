@@ -17,7 +17,8 @@
 //   NUMERIC_OVERFLOW       integer literal > INT64_MAX, non-finite float literal
 //   CONVERSION_ERROR       invalid DATE / TIMESTAMP literal
 //   SEMANTIC_ERROR         unknown CAST type name or invalid type parameters
-//   RESOURCE_LIMIT         nesting deeper than PARSE_MAX_DEPTH
+//   RESOURCE_LIMIT         nesting deeper than PARSE_MAX_DEPTH, more than
+//                          PARSE_MAX_OPERANDS operands
 //
 // Expression precedence (lowest first), one function per level:
 //   p_expr/OR -> AND -> p_not (NOT, right) -> p_pred (comparison, IS, BETWEEN,
@@ -33,7 +34,7 @@
 #define PS_DEPTH   8        // u64 current nesting depth (expressions, FROM)
 #define PS_SIZE    16
 
-#define PARSE_MAX_DEPTH 256
+#define PARSE_MAX_DEPTH 4096        // CR-6: README "Limits"
 
 // Growable array ("vector") living in a caller's stack frame. Elements are
 // zero-initialised; growth copies into a new arena block (doubling).
@@ -131,7 +132,7 @@ s_btree:         .asciz "BTREE"
 msg_syntax:      .asciz "syntax error at or near "
 msg_eoi:         .asciz "syntax error: unexpected end of input"
 msg_unsupported: .asciz "unsupported syntax "
-msg_too_deep:    .asciz "statement nesting too deep"
+msg_too_deep:    .asciz "expression nesting depth exceeds 4096"
 msg_int_range:   .asciz "integer literal out of range "
 msg_num_range:   .asciz "numeric literal out of range "
 msg_bad_date:    .asciz "invalid DATE literal "
@@ -263,6 +264,7 @@ ENDF parse_sql
 // Stack: order-item vector at [sp,#64].
 // -----------------------------------------------------------------------------
 LFUNC p_query
+    STACK_GUARD                         // CR-6: recursive
     stp  x29, x30, [sp, #-96]!
     mov  x29, sp
     stp  x19, x20, [sp, #16]
@@ -362,6 +364,7 @@ ENDF p_query
 // Registers: x19 P, x20 Query*, x21 branch. Stack: branch vector at [sp,#48].
 // -----------------------------------------------------------------------------
 LFUNC p_union
+    STACK_GUARD                         // CR-6: recursive
     stp  x29, x30, [sp, #-80]!
     mov  x29, sp
     stp  x19, x20, [sp, #16]
@@ -419,6 +422,7 @@ ENDF p_union
 // Stack: CTE vector at [sp,#48], column vector at [sp,#80].
 // -----------------------------------------------------------------------------
 LFUNC p_with
+    STACK_GUARD                         // CR-6: recursive
     stp  x29, x30, [sp, #-112]!
     mov  x29, sp
     stp  x19, x20, [sp, #16]
@@ -470,6 +474,7 @@ ENDF p_with
 //            x24 qualifier.  Stack: vector at [sp,#64] (items, then GROUP BY).
 // -----------------------------------------------------------------------------
 LFUNC p_select_core
+    STACK_GUARD                         // CR-6: recursive
     stp  x29, x30, [sp, #-96]!
     mov  x29, sp
     stp  x19, x20, [sp, #16]
@@ -602,6 +607,7 @@ ENDF p_select_core
 //            x24 join token.
 // -----------------------------------------------------------------------------
 LFUNC p_from_item
+    STACK_GUARD                         // CR-6: recursive
     stp  x29, x30, [sp, #-64]!
     mov  x29, sp
     stp  x19, x20, [sp, #16]
@@ -692,6 +698,7 @@ ENDF p_from_item
 // Registers: x19 P, x20 first token, x21 result item.
 // -----------------------------------------------------------------------------
 LFUNC p_table_ref
+    STACK_GUARD                         // CR-6: recursive
     stp  x29, x30, [sp, #-48]!
     mov  x29, sp
     stp  x19, x20, [sp, #16]
@@ -766,6 +773,7 @@ ENDF p_table_ref
 // Registers: x19 P, x20 result.
 // -----------------------------------------------------------------------------
 LFUNC p_expr
+    STACK_GUARD                         // CR-6: recursive
     stp  x29, x30, [sp, #-32]!
     mov  x29, sp
     stp  x19, x20, [sp, #16]
@@ -783,30 +791,35 @@ ENDF p_expr
 // The left-associative binary levels: tail calls into p_binloop with the
 // next-higher level as operand parser and the level's operator table.
 LFUNC p_or                          // or_expr = and_expr { OR and_expr }
+    STACK_GUARD                         // CR-6: recursive
     adr  x1, p_and
     ADR_L x2, optab_or
     b    p_binloop
 ENDF p_or
 
 LFUNC p_and                         // and_expr = not_expr { AND not_expr }
+    STACK_GUARD                         // CR-6: recursive
     adr  x1, p_not
     ADR_L x2, optab_and
     b    p_binloop
 ENDF p_and
 
 LFUNC p_concat                      // concat_expr = additive { || additive }
+    STACK_GUARD                         // CR-6: recursive
     adr  x1, p_add
     ADR_L x2, optab_concat
     b    p_binloop
 ENDF p_concat
 
 LFUNC p_add                         // additive = mult { (+|-) mult }
+    STACK_GUARD                         // CR-6: recursive
     adr  x1, p_mul
     ADR_L x2, optab_add
     b    p_binloop
 ENDF p_add
 
 LFUNC p_mul                         // multiplicative = unary { (*|/|%) unary }
+    STACK_GUARD                         // CR-6: recursive
     adr  x1, p_unary
     ADR_L x2, optab_mul
     b    p_binloop
@@ -864,6 +877,7 @@ ENDF p_binloop
 // Registers: x19 P, x20 NOT token, x21 operand.
 // -----------------------------------------------------------------------------
 LFUNC p_not
+    STACK_GUARD                         // CR-6: recursive
     stp  x29, x30, [sp, #-48]!
     mov  x29, sp
     stp  x19, x20, [sp, #16]
@@ -909,6 +923,7 @@ ENDF p_not
 // Stack: IN-list vector at [sp,#64].
 // -----------------------------------------------------------------------------
 LFUNC p_pred
+    STACK_GUARD                         // CR-6: recursive
     stp  x29, x30, [sp, #-96]!
     mov  x29, sp
     stp  x19, x20, [sp, #16]
@@ -1052,6 +1067,7 @@ ENDF p_pred
 // Registers: x19 P, x20 operator token, w21 OP_NEG/OP_POS, x22 operand.
 // -----------------------------------------------------------------------------
 LFUNC p_unary
+    STACK_GUARD                         // CR-6: recursive
     stp  x29, x30, [sp, #-48]!
     mov  x29, sp
     stp  x19, x20, [sp, #16]
@@ -1125,6 +1141,7 @@ ENDF p_unary
 //            x23 string token.
 // -----------------------------------------------------------------------------
 LFUNC p_primary
+    STACK_GUARD                         // CR-6: recursive
     stp  x29, x30, [sp, #-64]!
     mov  x29, sp
     stp  x19, x20, [sp, #16]
@@ -1353,6 +1370,7 @@ ENDF p_primary
 //            x24 THEN expr.  Stack: vector at [sp,#64].
 // -----------------------------------------------------------------------------
 LFUNC p_case
+    STACK_GUARD                         // CR-6: recursive
     stp  x29, x30, [sp, #-96]!
     mov  x29, sp
     stp  x19, x20, [sp, #16]
@@ -1416,6 +1434,7 @@ ENDF p_case
 // Stack: argument vector at [sp,#48].
 // -----------------------------------------------------------------------------
 LFUNC p_funcall
+    STACK_GUARD                         // CR-6: recursive
     stp  x29, x30, [sp, #-80]!
     mov  x29, sp
     stp  x19, x20, [sp, #16]

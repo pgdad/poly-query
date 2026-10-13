@@ -94,6 +94,27 @@
     .p2align 2
 .endm
 
+// ------------------------------------------------------- stack guard (CR-6) --
+// Every thread that runs request code has a large stack (QUERY_STACK_SIZE)
+// and a thread-local lower bound g_stack_limit (stack_guard_init, rt.S;
+// 0 = unchecked). Every recursive function starts with STACK_GUARD: when
+// sp is below the bound it raises RESOURCE_LIMIT (stack_exhausted) instead
+// of overflowing. STACK_GUARD_MARGIN is left for the non-recursive code
+// (glibc included) a guarded function may still call. Clobbers x16 and
+// the flags only, so it may precede the prologue.
+#define QUERY_STACK_SIZE   (256*1024*1024)
+#define STACK_GUARD_MARGIN (512*1024)
+.macro STACK_GUARD
+    mrs  x16, tpidr_el0
+    add  x16, x16, #:tprel_hi12:g_stack_limit, lsl #12
+    add  x16, x16, #:tprel_lo12_nc:g_stack_limit
+    ldr  x16, [x16]
+    cmp  sp, x16
+    b.hs 8899f
+    bl   stack_exhausted
+8899:
+.endm
+
 // Every object file must carry this (no executable stack).
 .macro NOTE_GNU_STACK
     .section .note.GNU-stack,"",%progbits

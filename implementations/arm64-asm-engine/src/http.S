@@ -2086,6 +2086,7 @@ ENDF send_continue
 LFUNC conn_main
     ENTER 2
     mov  x20, x0
+    bl   stack_guard_init               // CR-6: deep statements fail cleanly
     bl   thread_boost                   // runs queries (parallel.S)
     mov  x0, #1
     mov  x1, #CN_SIZE
@@ -2380,15 +2381,12 @@ FUNC serve_main
     rev16 w20, w20
     ADR_L x9, g_listen_fd
     str  x19, [x9]
-    // connection threads: detached, 16 MiB stacks
+    // connection threads: detached, QUERY_STACK_SIZE stacks (they run queries)
     ADR_L x0, g_thread_attr
-    bl   pthread_attr_init
+    bl   big_stack_attr
     ADR_L x0, g_thread_attr
     mov  w1, #1                         // PTHREAD_CREATE_DETACHED
     bl   pthread_attr_setdetachstate
-    ADR_L x0, g_thread_attr
-    mov  x1, #(16*1024*1024)
-    bl   pthread_attr_setstacksize
     // signals -> self-pipe
     ADR_L x0, g_sig_pipe
     ldr  w1, =(O_NONBLOCK | O_CLOEXEC)

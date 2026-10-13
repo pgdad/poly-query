@@ -147,6 +147,7 @@ ENDF key_records
 //        cells, [sp+24] left key NULL, [sp+32] record size
 // =============================================================================
 FUNC ex_nljoin
+    STACK_GUARD                         // CR-6: recursive
     ENTER 5
     sub  sp, sp, #48
     mov  x19, x0
@@ -309,6 +310,7 @@ ENDF ex_nljoin
 #define MJ_RSTART   136             // first right position
 #define MJ_SIZE     144
 FUNC ex_mergejoin
+    STACK_GUARD                         // CR-6: recursive
     ENTER 5
     sub  sp, sp, #48
     mov  x19, x0
@@ -532,6 +534,7 @@ ENDF ex_mergejoin
 // Stack: [sp] k (right cursor), [sp+8] iteration counter
 // =============================================================================
 LFUNC mj_task
+    STACK_GUARD                         // CR-6: recursive
     ENTER 5
     sub  sp, sp, #16
     mov  x19, x0
@@ -805,6 +808,7 @@ ENDF mj_lower_bound
 //   x25 key bytes
 // =============================================================================
 FUNC mj_side
+    STACK_GUARD                         // CR-6: recursive
     ENTER 5
     sub  sp, sp, #32
     str  xzr, [sp, #24]                 // [sp+24] sorted payloads
@@ -1303,6 +1307,7 @@ ENDF keys_equal
 //   x24 index, x25 scratch
 // =============================================================================
 FUNC ex_hashjoin
+    STACK_GUARD                         // CR-6: recursive
     ENTER 5
     sub  sp, sp, #16
     mov  x19, x0
@@ -1566,6 +1571,7 @@ ENDF hj_table
 //   x26 index
 // =============================================================================
 FUNC join_keys
+    STACK_GUARD                         // CR-6: recursive
     ENTER 5
     mov  x19, x0
     mov  x20, x1

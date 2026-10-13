@@ -110,6 +110,7 @@ ENDF vpool_put
 //   x19 node
 // =============================================================================
 LFUNC is_pure_const
+    STACK_GUARD                         // CR-6: recursive
     ENTER 1
     mov  x19, x0
     ldr  w9, [x19, #N_KIND]
@@ -141,6 +142,7 @@ ENDF is_pure_const
 //        operand types of a comparison
 // =============================================================================
 FUNC veval
+    STACK_GUARD                         // CR-6: recursive
     ENTER 5
     sub  sp, sp, #16
     mov  x19, x0
@@ -950,6 +952,7 @@ ENDF dict_single
 // faster than the memo
 //   x19 node, x20 state, x21 child index, x22 children
 LFUNC ds_walk
+    STACK_GUARD                         // CR-6: recursive
     ENTER 2
     mov  x19, x0
     mov  x20, x1
@@ -1142,6 +1145,7 @@ ENDF dict_truth
 // Positions 0..VB_N-1 for which the predicate is TRUE.
 // =============================================================================
 FUNC vfilter
+    STACK_GUARD                         // CR-6: recursive
     mov  x4, x2
     mov  x2, x1
     mov  x1, x0
@@ -1165,6 +1169,7 @@ ENDF vfilter
 //   x25 positions where the left operand is not FALSE
 // =============================================================================
 FUNC vfilter_sel
+    STACK_GUARD                         // CR-6: recursive
     ENTER 4
     mov  x19, x0
     mov  x20, x1
@@ -1272,6 +1277,7 @@ ENDF vfilter_sel
 //        [sp+32] end of the window
 // =============================================================================
 FUNC vkey_cells
+    STACK_GUARD                         // CR-6: recursive
     ENTER 5
     sub  sp, sp, #48
     ldr  x19, [x0, #VK_TS]

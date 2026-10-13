@@ -31,6 +31,9 @@ g_arena_limit:   .skip 8       // max bytes in g_arena chunks; 0 = unlimited
 g_err_code:      .skip 4
 g_err_line:      .skip 4
 g_err_col:       .skip 4
+    .p2align 3
+    .global g_stack_limit
+g_stack_limit:   .skip 8       // lowest sp allowed (STACK_GUARD); 0 = unchecked
 
     // process-wide settings (written once by main before any thread starts)
     .bss
@@ -82,6 +85,7 @@ s_oom:      .asciz "out of memory"
 s_qmem:     .asciz "query memory budget exceeded"
 s_timeoutm: .asciz "query timeout exceeded"
 s_cancelm:  .asciz "query cancelled"
+s_stackm:   .asciz "expression nesting depth exceeds the thread stack (statement too complex)"
 fmt_g:      .asciz "%.*g"
     .text
 
@@ -856,6 +860,67 @@ FUNC check_deadline
 3:  ldp  x29, x30, [sp], #16
     ret
 ENDF check_deadline
+
+// ------------------------------------------------------- stack guard (CR-6) --
+
+// stack_guard_init() — sets this thread's g_stack_limit to the lowest
+// address of its stack plus STACK_GUARD_MARGIN (pthread_getattr_np; the
+// main thread's stack is reported from RLIMIT_STACK). Called first by every
+// thread that runs request code. Leaves the guard off if the stack is
+// unknown or too small to keep the margin.
+//   stack: pthread_attr_t (64 bytes), [sp+64] addr, [sp+72] size
+FUNC stack_guard_init
+    stp  x29, x30, [sp, #-112]!
+    mov  x29, sp
+    str  x19, [sp, #16]
+    bl   pthread_self
+    add  x1, sp, #32                    // pthread_attr_t at [sp+32]
+    bl   pthread_getattr_np
+    cbnz w0, 9f
+    add  x0, sp, #32
+    add  x1, sp, #96                    // stack address at [sp+96]
+    add  x2, sp, #104                   // stack size at [sp+104]
+    bl   pthread_attr_getstack
+    mov  w19, w0
+    add  x0, sp, #32
+    bl   pthread_attr_destroy
+    cbnz w19, 9f
+    ldp  x9, x10, [sp, #96]
+    ldr  x11, =STACK_GUARD_MARGIN
+    cmp  x10, x11, lsl #1               // at least two margins of stack
+    b.lo 9f
+    add  x9, x9, x11
+    TLS_ADDR x10, g_stack_limit
+    str  x9, [x10]
+9:  ldr  x19, [sp, #16]
+    ldp  x29, x30, [sp], #112
+    ret
+ENDF stack_guard_init
+
+// stack_exhausted() — noreturn: raises RESOURCE_LIMIT (STACK_GUARD fired)
+FUNC stack_exhausted
+    mov  w0, #ERR_RESOURCE_LIMIT
+    ADR_L x1, s_stackm
+    b    pq_raise
+ENDF stack_exhausted
+
+// big_stack_attr(x0 pthread_attr_t*) — initialises attr for a thread that
+// runs request code (QUERY_STACK_SIZE stack; the memory is only reserved,
+// pages are committed when touched)
+FUNC big_stack_attr
+    stp  x29, x30, [sp, #-32]!
+    mov  x29, sp
+    str  x19, [sp, #16]
+    mov  x19, x0
+    bl   pthread_attr_init
+    mov  x0, x19
+    ldr  x1, =QUERY_STACK_SIZE
+    bl   pthread_attr_setstacksize
+    ldr  x19, [sp, #16]
+    ldp  x29, x30, [sp], #32
+    ret
+    .ltorg
+ENDF big_stack_attr
 
 // atomic_fetch_add(x0 u64*, x1 delta) -> x0 previous value        (leaf)
 FUNC atomic_fetch_add

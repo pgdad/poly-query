@@ -557,6 +557,7 @@ ENDF index_stmt
 // rowvec_push(x0 RowVec*, w1 row)
 //   x19 vec, w20 row, x21 new cap
 FUNC rowvec_push
+    STACK_GUARD                         // CR-6: recursive
     ldp  x9, x10, [x0]
     cmp  x9, x10
     b.hs 1f
