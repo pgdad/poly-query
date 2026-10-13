@@ -203,3 +203,34 @@ list entry per mode), or the error codes."
       1 (lambda ()
           (polyquery::run-in-threads (list (lambda () 1) (lambda () (recurse-forever 0)))))))
   "RESOURCE_LIMIT")
+
+;;; Plans of long CTE chains (share keys are computed bottom-up)
+
+(deftest limits.cte-chains
+    (list (first-cell-in-modes
+           (format nil "WITH ~A SELECT count(*) FROM c1999"
+                   (joined ", " (loop for i below 2000
+                                      collect (format nil "c~D AS (SELECT id FROM ~A)" i
+                                                      (if (zerop i) "t" (format nil "c~D" (1- i))))))))
+          (first-cell-in-modes
+           (format nil "WITH c AS (SELECT id FROM t) SELECT count(*) FROM (~A) u"
+                   (joined " UNION ALL " (loop repeat 50 collect "SELECT id FROM c")))))
+  ((4 4 4) (200 200 200)))
+
+(deftest limits.plan-identity
+    ;; Equal EXPLAIN texts <=> equal identities.
+    (let ((session (fixture-session)))
+      (flet ((root (sql)
+               (polyquery::physical-query-root
+                (polyquery::plan-statement session (parse-sql sql)
+                                           (polyquery::make-exec-options)))))
+        (let ((p1 (root "SELECT a.id FROM t a JOIN t b ON a.id = b.id WHERE a.v > 1"))
+              (p2 (root "SELECT a.id FROM t a JOIN t b ON a.id = b.id WHERE a.v > 1"))
+              (p3 (root "SELECT a.id FROM t a JOIN t b ON a.id = b.id WHERE a.v > 2")))
+          (polyquery::with-plan-identities ()
+            (flet ((id (plan) (polyquery::plan-identity-id (polyquery::plan-identity plan))))
+              (list (equal (polyquery::json-to-string (polyquery::explain-plan-json p1))
+                           (polyquery::json-to-string (polyquery::explain-plan-json p2)))
+                    (= (id p1) (id p2))
+                    (= (id p1) (id p3))))))))
+  (t t nil))

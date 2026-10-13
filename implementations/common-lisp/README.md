@@ -807,7 +807,14 @@ linear (or n log n) in its size in every stage:
   #'bexpr-equal` over growing lists;
 * constant folding works bottom-up (each node folded once, with already
   folded operands; the result is the same as folding the largest constant
-  subexpressions).
+  subexpressions);
+* the share keys of CTE reference plans (identical subplans of a statement
+  are computed once) were the EXPLAIN text of every node's subtree, which is
+  quadratic in a chain of CTEs (4,000 chained CTEs took 7 s to plan); a
+  node's key is now an interned id of its own EXPLAIN properties and its
+  children's and subqueries' ids, computed once per node
+  (`plan-identity` in `plan/physical.lisp`): equal ids exactly when the
+  EXPLAIN texts are equal, so the same plans are shared.
 
 **The timeout covers every stage.** The deadline counts from the receipt of
 the request (session mode: when the request line has been read; HTTP: at
@@ -856,6 +863,7 @@ accepts.
 linear helpers), `analyzer/binder.lisp`, `analyzer/query.lisp` (deadline
 checks, hashed grouping rewrite), `plan/rules/constant-folding.lisp`,
 `plan/rules/predicate-simplification.lisp`, `plan/rules/column-pruning.lisp`,
+`plan/physical.lisp` (CTE share keys),
 `exec/context.lisp` (deadline from request receipt), `exec/expressions.lisp`,
 `exec/vexpressions.lisp`, `exec/vectors.lisp`, `exec/voperators.lisp`
 (checkpoints, memory of wide expressions), `protocol/requests.lisp`
@@ -1487,7 +1495,9 @@ copy-free scans for grouped aggregation.
   expression_limits` is the public check; during development about 60
   further statements at and beyond the limits (every construct of the
   depth measure nested 4,090 deep, chains of 124,000–249,000 terms, CASE
-  with 80,000 branches, 20,000 aggregates or GROUP BY keys, 1 MiB comments)
+  with 80,000 branches, 20,000 aggregates or GROUP BY keys, 1 MiB comments,
+  4,000 chained or nested CTEs, 1,000 joins, 10,000 UNION ALL branches,
+  thousands of scalar, correlated and IN subqueries)
   were run in all four modes over session and HTTP, also on a 200,000-row
   table and with timeouts between 50 ms and 30 s.
 * UNION ALL unit tests (`tests/test-union.lisp`): see *Change request
