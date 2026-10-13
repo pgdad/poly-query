@@ -43,7 +43,7 @@ hand-tuned assembly "kernels" for both chips.</td>
 </tr>
 <tr class="even">
 <td><strong>How much code</strong></td>
-<td>About <strong>193,000 lines</strong>, written by AI agents.</td>
+<td>About <strong>198,000 lines</strong>, written by AI agents.</td>
 </tr>
 <tr class="odd">
 <td><strong>Correctness</strong></td>
@@ -54,16 +54,17 @@ hand-tuned assembly "kernels" for both chips.</td>
 <td><strong>Wall-clock time</strong></td>
 <td>Kick-off Saturday 13:46 → all six main engines through all five
 phases by <strong>Saturday 23:21 (under 10 hours)</strong> → everything,
-assembly included, done Monday morning.</td>
+assembly included, done Monday morning → one more round on Monday
+evening fixed every defect the audits found.</td>
 </tr>
 <tr class="odd">
 <td><strong>Agent time</strong></td>
-<td><strong>75 hours</strong> of AI agent work in <strong>108 recorded
+<td><strong>85 hours</strong> of AI agent work in <strong>116 recorded
 sessions</strong>. Up to <strong>12 sessions ran at once</strong>.</td>
 </tr>
 <tr class="even">
 <td><strong>Cost</strong></td>
-<td><strong>$1,256 at API list prices.</strong> It actually ran on a
+<td><strong>$1,375 at API list prices.</strong> It actually ran on a
 Claude subscription: <strong>no overage, no rate-limit rejection,
 ever.</strong></td>
 </tr>
@@ -188,6 +189,13 @@ checks.</strong></p>
 <li>Black-box robustness probes checked what the reviewers
 suspected.</li>
 </ul>
+<p><strong>Monday evening: the fix-up round.</strong> The probes had
+confirmed real defects, and the engines had disagreed about gigantic SQL
+statements. So the spec got a new rule (change request CR-6), and all
+eight agents implemented it in one parallel round: <strong>8 of 8
+succeeded on the first try, in 35–106 minutes each, for $119 in
+total.</strong> Along the way they fixed every defect the audits had
+confirmed, including two the task didn't even ask for.</p>
 <h2 id="what-it-cost">What it cost</h2>
 <p><img src="charts/cost.svg" alt="Model cost per engine" /></p>
 <table>
@@ -202,9 +210,9 @@ suspected.</li>
 <tbody>
 <tr class="odd">
 <td>Six main engines (all phases and later tasks)</td>
-<td>78</td>
-<td>58.6</td>
-<td>$855</td>
+<td>84</td>
+<td>66.7</td>
+<td>$953</td>
 </tr>
 <tr class="even">
 <td>Assembly kernels (both chips)</td>
@@ -214,29 +222,29 @@ suspected.</li>
 </tr>
 <tr class="odd">
 <td>Assembly engines (both chips)</td>
-<td>20</td>
-<td>11.9</td>
-<td>$310 (cap: $600)</td>
+<td>22</td>
+<td>13.4</td>
+<td>$332 (cap: $600)</td>
 </tr>
 <tr class="even">
 <td><strong>Total</strong></td>
-<td><strong>108</strong></td>
-<td><strong>75.4</strong></td>
-<td><strong>$1,256</strong></td>
+<td><strong>116</strong></td>
+<td><strong>85.1</strong></td>
+<td><strong>$1,375</strong></td>
 </tr>
 </tbody>
 </table>
 <p><img src="charts/dev-time.svg"
 alt="Development time per engine" /></p>
 <p>A complete, tested database engine, including five rounds of later
-changes, came to about <strong>$120–180 per language</strong> at list
+changes, came to about <strong>$130–185 per language</strong> at list
 price. Even the "let's write a database in assembly, why not" stretch
 goal came in at about half its cap.</p>
 <p>The costs above are for the agent sessions only. The orchestrating
 session's own usage is not included.</p>
 <h2 id="staying-inside-the-subscription">Staying inside the
 subscription</h2>
-<p>The $1,256 is what these sessions <em>would</em> have cost on the
+<p>The $1,375 is what these sessions <em>would</em> have cost on the
 pay-per-token API. They actually ran on a <strong>Claude
 subscription</strong>, which has two rolling limits: a 5-hour window and
 a 7-day window. Twelve agents working at once can burn through a 5-hour
@@ -261,8 +269,8 @@ queued at the gate and waited <strong>35–95 minutes</strong> for the
 5-hour window to roll forward, then started. Nobody had to babysit
 it.</li>
 <li><strong>The 5-hour window peaked at 89 %. The 7-day window peaked at
-62 %.</strong></li>
-<li><strong>All 108 sessions saw only "allowed" rate-limit status: no
+69 %.</strong></li>
+<li><strong>All 116 sessions saw only "allowed" rate-limit status: no
 rejections, no overage, no surprise bill.</strong></li>
 </ul>
 <p>In short: we let the work slow down rather than let the bill go
@@ -311,8 +319,9 @@ engines;</li>
 chewing on a gigantic statement;</li>
 <li>one assembly engine has a memory-limit leak.</li>
 </ul>
-<p>The same probes <strong>cleared</strong> several suspected
-problems.</p></li>
+<p>The same probes <strong>cleared</strong> several suspected problems.
+And one more round of agent runs then <strong>fixed every confirmed
+defect</strong>; the same probes now pass on all eight engines.</p></li>
 <li><p><strong>Everything recorded.</strong> Every session's transcript,
 cost and outcome is kept, including the 7 that failed or timed out. A
 dashboard of all of it is published at <a
@@ -394,8 +403,9 @@ but one query got 8× <em>slower</em>. Benchmarks keep everyone
 honest.</li>
 <li>One agent finished its work and then just… didn't exit. The
 orchestrator noticed, stopped it and logged the intervention.</li>
-<li>The robustness defects above are real and open. Fixing them is the
-next task: a new round of agent runs to meet CR-6.</li>
+<li>The robustness defects above were real. They took one more round of
+agent runs to fix: $119, Monday evening, all eight engines on the first
+try.</li>
 </ul>
 <h2 id="where-to-look">Where to look</h2>
 <ul>

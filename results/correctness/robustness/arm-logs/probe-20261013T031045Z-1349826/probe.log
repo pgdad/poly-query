@@ -1,0 +1,7 @@
+fd_after_failed_loads: {'query_budget_4mb': 'not_triggered', 'ingest_limit_1mb': 'pass', 'after_failed_query_16mb': 'not_triggered'}
+limit_after_failed_query: pass
+long_or_chain: pass
+session_huge_line: observation
+http_crlf_flood: pass
+parallel_memory_budget: observation
+expression_limits: pass

@@ -30,11 +30,11 @@
     "stderr_tail": ""
    },
    "after_failed_query_16mb": {
-    "verdict": "pass",
+    "verdict": "not_triggered",
     "initial_small_load": "ok",
     "failed_query_first": "RESOURCE_LIMIT",
     "big_load_codes": {
-     "RESOURCE_LIMIT": 100
+     "ok": 100
     },
     "fds_before": 3,
     "fds_after": 3,
@@ -42,25 +42,20 @@
     "exit_code": 0,
     "stderr_tail": ""
    },
-   "seconds": 3.2
+   "seconds": 6.3
   },
   "limit_after_failed_query": {
-   "verdict": "fail",
+   "verdict": "pass",
    "load_before": "ok",
    "query": "RESOURCE_LIMIT",
-   "load_after": "RESOURCE_LIMIT",
+   "load_after": "ok",
    "exit_code": 0,
    "stderr_tail": "",
    "seconds": 0.1
   },
   "long_or_chain": {
-   "verdict": "fail",
-   "crashed": [
-    "OR_100000_parallel",
-    "OR_100000_auto",
-    "AND_100000_parallel",
-    "AND_100000_auto"
-   ],
+   "verdict": "pass",
+   "crashed": [],
    "hung": [],
    "hang_rule": "no response within 180 s although options.timeout_ms = 120000",
    "wrong_result": [],
@@ -72,8 +67,8 @@
      "alive": true
     },
     "OR_10000_vectorized": {
-     "result": "RESOURCE_LIMIT",
-     "count": null,
+     "result": "ok",
+     "count": 10000,
      "alive": true
     },
     "OR_10000_parallel": {
@@ -92,19 +87,19 @@
      "alive": true
     },
     "OR_100000_vectorized": {
-     "result": "RESOURCE_LIMIT",
-     "count": null,
+     "result": "ok",
+     "count": 20000,
      "alive": true
     },
     "OR_100000_parallel": {
-     "result": "NO_RESPONSE",
-     "count": null,
-     "alive": false
+     "result": "ok",
+     "count": 20000,
+     "alive": true
     },
     "OR_100000_auto": {
-     "result": "NO_RESPONSE",
-     "count": null,
-     "alive": false
+     "result": "ok",
+     "count": 20000,
+     "alive": true
     },
     "AND_10000_row": {
      "result": "ok",
@@ -112,8 +107,8 @@
      "alive": true
     },
     "AND_10000_vectorized": {
-     "result": "RESOURCE_LIMIT",
-     "count": null,
+     "result": "ok",
+     "count": 20000,
      "alive": true
     },
     "AND_10000_parallel": {
@@ -132,66 +127,49 @@
      "alive": true
     },
     "AND_100000_vectorized": {
-     "result": "RESOURCE_LIMIT",
-     "count": null,
+     "result": "ok",
+     "count": 20000,
      "alive": true
     },
     "AND_100000_parallel": {
-     "result": "NO_RESPONSE",
-     "count": null,
-     "alive": false
+     "result": "ok",
+     "count": 20000,
+     "alive": true
     },
     "AND_100000_auto": {
-     "result": "NO_RESPONSE",
-     "count": null,
-     "alive": false
+     "result": "ok",
+     "count": 20000,
+     "alive": true
     }
    },
-   "engine_exits": [
-    {
-     "exit_code": -11,
-     "stderr_tail": ""
-    },
-    {
-     "exit_code": -11,
-     "stderr_tail": ""
-    },
-    {
-     "exit_code": -11,
-     "stderr_tail": ""
-    },
-    {
-     "exit_code": -11,
-     "stderr_tail": ""
-    }
-   ],
-   "seconds": 582.9
+   "engine_exits": [],
+   "seconds": 50.1
   },
   "session_huge_line": {
    "verdict": "observation",
    "response": "INVALID_REQUEST",
    "next_request": "ok",
-   "rss_base_mib": 1,
+   "rss_base_mib": 0,
    "rss_peak_mib": 258,
    "exit_code": 0,
    "stderr_tail": "",
    "seconds": 13.2
   },
   "http_crlf_flood": {
-   "verdict": "fail",
+   "verdict": "pass",
    "bytes_sent": 1073741824,
-   "rss_growth_mib": 1024,
+   "rss_growth_mib": 0,
    "rss_growth_by_mib_sent": {
-    "128": 128,
-    "512": 512,
-    "1024": 1024
+    "128": 0,
+    "512": 0,
+    "1024": 0
    },
    "server_closed_connection": false,
    "rss_base_mib": 2,
-   "rss_peak_mib": 1026,
+   "rss_peak_mib": 2,
    "server_alive": true,
    "server_healthy_after": true,
-   "seconds": 4.2
+   "seconds": 4.1
   },
   "parallel_memory_budget": {
    "verdict": "observation",
@@ -210,23 +188,14 @@
    },
    "exit_code": 0,
    "stderr_tail": "",
-   "seconds": 0.4
+   "seconds": 0.5
   },
   "expression_limits": {
-   "verdict": "fail",
-   "informational": true,
+   "verdict": "pass",
+   "informational": false,
    "minimum_failures": [],
-   "beyond_failures": [
-    "parens_100000_row",
-    "parens_100000_vectorized",
-    "parens_100000_parallel",
-    "parens_100000_auto",
-    "or_100000_row",
-    "or_100000_vectorized",
-    "or_100000_parallel",
-    "or_100000_auto"
-   ],
-   "claims_capability": false,
+   "beyond_failures": [],
+   "claims_capability": true,
    "minimum": {
     "parens_998_row": {
      "result": "ok",
@@ -243,7 +212,7 @@
     "parens_998_parallel": {
      "result": "ok",
      "value": 100,
-     "seconds": 0.0,
+     "seconds": 0.01,
      "pass": true
     },
     "parens_998_auto": {
@@ -255,13 +224,13 @@
     "abs_998_row": {
      "result": "ok",
      "value": 100,
-     "seconds": 0.01,
+     "seconds": 0.0,
      "pass": true
     },
     "abs_998_vectorized": {
      "result": "ok",
      "value": 100,
-     "seconds": 0.01,
+     "seconds": 0.0,
      "pass": true
     },
     "abs_998_parallel": {
@@ -285,19 +254,19 @@
     "unary_minus_998_vectorized": {
      "result": "ok",
      "value": 100,
-     "seconds": 0.01,
+     "seconds": 0.0,
      "pass": true
     },
     "unary_minus_998_parallel": {
      "result": "ok",
      "value": 100,
-     "seconds": 0.01,
+     "seconds": 0.0,
      "pass": true
     },
     "unary_minus_998_auto": {
      "result": "ok",
      "value": 100,
-     "seconds": 0.01,
+     "seconds": 0.0,
      "pass": true
     },
     "not_998_row": {
@@ -309,97 +278,97 @@
     "not_998_vectorized": {
      "result": "ok",
      "value": 100,
-     "seconds": 0.01,
+     "seconds": 0.0,
      "pass": true
     },
     "not_998_parallel": {
      "result": "ok",
      "value": 100,
-     "seconds": 0.01,
+     "seconds": 0.0,
      "pass": true
     },
     "not_998_auto": {
      "result": "ok",
      "value": 100,
-     "seconds": 0.01,
+     "seconds": 0.0,
      "pass": true
     },
     "or_10000_row": {
      "result": "ok",
      "value": 100,
-     "seconds": 0.4,
+     "seconds": 0.01,
      "pass": true
     },
     "or_10000_vectorized": {
      "result": "ok",
      "value": 100,
-     "seconds": 0.77,
+     "seconds": 0.01,
      "pass": true
     },
     "or_10000_parallel": {
      "result": "ok",
      "value": 100,
-     "seconds": 0.81,
+     "seconds": 0.01,
      "pass": true
     },
     "or_10000_auto": {
      "result": "ok",
      "value": 100,
-     "seconds": 0.95,
+     "seconds": 0.01,
      "pass": true
     },
     "and_10000_row": {
      "result": "ok",
      "value": 100,
-     "seconds": 0.51,
+     "seconds": 0.02,
      "pass": true
     },
     "and_10000_vectorized": {
      "result": "ok",
      "value": 100,
-     "seconds": 0.74,
+     "seconds": 0.01,
      "pass": true
     },
     "and_10000_parallel": {
      "result": "ok",
      "value": 100,
-     "seconds": 0.8,
+     "seconds": 0.01,
      "pass": true
     },
     "and_10000_auto": {
      "result": "ok",
      "value": 100,
-     "seconds": 0.95,
+     "seconds": 0.01,
      "pass": true
     },
     "sum_10000_row": {
      "result": "ok",
      "value": 10098,
-     "seconds": 0.87,
+     "seconds": 0.01,
      "pass": true
     },
     "sum_10000_vectorized": {
      "result": "ok",
      "value": 10098,
-     "seconds": 1.09,
+     "seconds": 0.0,
      "pass": true
     },
     "sum_10000_parallel": {
      "result": "ok",
      "value": 10098,
-     "seconds": 1.12,
+     "seconds": 0.0,
      "pass": true
     },
     "sum_10000_auto": {
      "result": "ok",
      "value": 10098,
-     "seconds": 1.17,
+     "seconds": 0.0,
      "pass": true
     },
     "in_10000_row": {
      "result": "ok",
      "value": 100,
-     "seconds": 0.05,
+     "seconds": 0.0,
      "pass": true
     },
     "in_10000_vectorized": {
@@ -471,60 +440,60 @@
    },
    "beyond": {
     "parens_100000_row": {
-     "result": "PARSE_ERROR",
+     "result": "RESOURCE_LIMIT",
      "value": null,
      "seconds": 0.0,
      "late_by_s": null,
-     "pass": false
+     "pass": true
     },
     "parens_100000_vectorized": {
-     "result": "PARSE_ERROR",
+     "result": "RESOURCE_LIMIT",
      "value": null,
      "seconds": 0.0,
      "late_by_s": null,
-     "pass": false
+     "pass": true
     },
     "parens_100000_parallel": {
-     "result": "PARSE_ERROR",
+     "result": "RESOURCE_LIMIT",
      "value": null,
      "seconds": 0.0,
      "late_by_s": null,
-     "pass": false
+     "pass": true
     },
     "parens_100000_auto": {
-     "result": "PARSE_ERROR",
+     "result": "RESOURCE_LIMIT",
      "value": null,
      "seconds": 0.0,
      "late_by_s": null,
-     "pass": false
+     "pass": true
     },
     "or_100000_row": {
-     "result": "HANG",
-     "value": null,
-     "seconds": 35.0,
-     "late_by_s": 5.0,
-     "pass": false
+     "result": "ok",
+     "value": 100,
+     "seconds": 0.09,
+     "late_by_s": null,
+     "pass": true
     },
     "or_100000_vectorized": {
-     "result": "HANG",
-     "value": null,
-     "seconds": 35.0,
-     "late_by_s": 5.0,
-     "pass": false
+     "result": "ok",
+     "value": 100,
+     "seconds": 0.06,
+     "late_by_s": null,
+     "pass": true
     },
     "or_100000_parallel": {
-     "result": "HANG",
-     "value": null,
-     "seconds": 35.0,
-     "late_by_s": 5.0,
-     "pass": false
+     "result": "ok",
+     "value": 100,
+     "seconds": 0.05,
+     "late_by_s": null,
+     "pass": true
     },
     "or_100000_auto": {
-     "result": "HANG",
-     "value": null,
-     "seconds": 35.0,
-     "late_by_s": 5.0,
-     "pass": false
+     "result": "ok",
+     "value": 100,
+     "seconds": 0.07,
+     "late_by_s": null,
+     "pass": true
     },
     "in_100000_row": {
      "result": "ok",
@@ -556,7 +525,7 @@
     }
    },
    "engine_exits": [],
-   "seconds": 150.5
+   "seconds": 0.5
   }
  },
  "reruns": [
@@ -577,6 +546,18 @@
     "expression_limits"
    ],
    "started": "2026-10-12T21:05:32Z"
+  },
+  {
+   "probes": [
+    "fd_after_failed_loads",
+    "limit_after_failed_query",
+    "long_or_chain",
+    "session_huge_line",
+    "http_crlf_flood",
+    "parallel_memory_budget",
+    "expression_limits"
+   ],
+   "started": "2026-10-13T03:10:44Z"
   }
  ]
 }

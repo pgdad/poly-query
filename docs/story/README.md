@@ -11,11 +11,11 @@ software.*
 | | |
 |---|---|
 | **What was built** | A complete analytical SQL database (SQL, storage format, HTTP server, parallel execution), built independently **six times**: Java, Clojure, Rust, Python, Go and Common Lisp. Then **twice more in assembly language** (x86-64 and ARM), plus hand-tuned assembly "kernels" for both chips. |
-| **How much code** | About **193,000 lines**, written by AI agents. |
+| **How much code** | About **198,000 lines**, written by AI agents. |
 | **Correctness** | Every engine passes **100 %** of its conformance suite: 746 test cases, a share of them hidden from the agents. |
-| **Wall-clock time** | Kick-off Saturday 13:46 → all six main engines through all five phases by **Saturday 23:21 (under 10 hours)** → everything, assembly included, done Monday morning. |
-| **Agent time** | **75 hours** of AI agent work in **108 recorded sessions**. Up to **12 sessions ran at once**. |
-| **Cost** | **$1,256 at API list prices.** It actually ran on a Claude subscription: **no overage, no rate-limit rejection, ever.** |
+| **Wall-clock time** | Kick-off Saturday 13:46 → all six main engines through all five phases by **Saturday 23:21 (under 10 hours)** → everything, assembly included, done Monday morning → one more round on Monday evening fixed every defect the audits found. |
+| **Agent time** | **85 hours** of AI agent work in **116 recorded sessions**. Up to **12 sessions ran at once**. |
+| **Cost** | **$1,375 at API list prices.** It actually ran on a Claude subscription: **no overage, no rate-limit rejection, ever.** |
 | **People** | One owner giving direction. **Two** hands-on interventions in the whole project, both logged. |
 
 ---
@@ -94,21 +94,28 @@ goal with its own budget cap.
 * Benchmarks ran on both chips.
 * Black-box robustness probes checked what the reviewers suspected.
 
+**Monday evening: the fix-up round.** The probes had confirmed real defects,
+and the engines had disagreed about gigantic SQL statements. So the spec got a
+new rule (change request CR-6), and all eight agents implemented it in one
+parallel round: **8 of 8 succeeded on the first try, in 35–106 minutes each,
+for $119 in total.** Along the way they fixed every defect the audits had
+confirmed, including two the task didn't even ask for.
+
 ## What it cost
 
 ![Model cost per engine](charts/cost.svg)
 
 | group | sessions | agent hours | list-price cost |
 |---|---|---|---|
-| Six main engines (all phases and later tasks) | 78 | 58.6 | $855 |
+| Six main engines (all phases and later tasks) | 84 | 66.7 | $953 |
 | Assembly kernels (both chips) | 10 | 5.0 | $90 |
-| Assembly engines (both chips) | 20 | 11.9 | $310 (cap: $600) |
-| **Total** | **108** | **75.4** | **$1,256** |
+| Assembly engines (both chips) | 22 | 13.4 | $332 (cap: $600) |
+| **Total** | **116** | **85.1** | **$1,375** |
 
 ![Development time per engine](charts/dev-time.svg)
 
 A complete, tested database engine, including five rounds of later changes,
-came to about **$120–180 per language** at list price. Even the
+came to about **$130–185 per language** at list price. Even the
 "let's write a database in assembly, why not" stretch goal came in at about
 half its cap.
 
@@ -117,7 +124,7 @@ own usage is not included.
 
 ## Staying inside the subscription
 
-The $1,256 is what these sessions *would* have cost on the pay-per-token API.
+The $1,375 is what these sessions *would* have cost on the pay-per-token API.
 They actually ran on a **Claude subscription**, which has two rolling limits:
 a 5-hour window and a 7-day window. Twelve agents working at once can burn
 through a 5-hour window quickly. Our first wave of 8 agents used about 22 % of
@@ -138,8 +145,8 @@ How it played out:
   timeline). During the busiest stretch six runs queued at the gate and waited
   **35–95 minutes** for the 5-hour window to roll forward, then started.
   Nobody had to babysit it.
-* **The 5-hour window peaked at 89 %. The 7-day window peaked at 62 %.**
-* **All 108 sessions saw only "allowed" rate-limit status: no rejections, no
+* **The 5-hour window peaked at 89 %. The 7-day window peaked at 69 %.**
+* **All 116 sessions saw only "allowed" rate-limit status: no rejections, no
   overage, no surprise bill.**
 
 In short: we let the work slow down rather than let the bill go up.
@@ -190,7 +197,9 @@ Fast is nice. Trustworthy matters more. The safeguards:
     chewing on a gigantic statement;
   * one assembly engine has a memory-limit leak.
 
-  The same probes **cleared** several suspected problems.
+  The same probes **cleared** several suspected problems. And one more round
+  of agent runs then **fixed every confirmed defect**; the same probes now pass
+  on all eight engines.
 * **Everything recorded.** Every session's transcript, cost and outcome is
   kept, including the 7 that failed or timed out. A dashboard of all of it is
   published at <https://pgdad.github.io/poly-query/>.
@@ -264,8 +273,8 @@ Two practical notes:
   query got 8× *slower*. Benchmarks keep everyone honest.
 * One agent finished its work and then just… didn't exit. The orchestrator
   noticed, stopped it and logged the intervention.
-* The robustness defects above are real and open. Fixing them is the next
-  task: a new round of agent runs to meet CR-6.
+* The robustness defects above were real. They took one more round of agent
+  runs to fix: $119, Monday evening, all eight engines on the first try.
 
 ## Where to look
 

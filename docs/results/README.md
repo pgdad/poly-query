@@ -126,9 +126,10 @@ The rubric-based review is summarized under "Code-quality review" below.
 
 * Go: single-client HTTP latency is bimodal (p50 1.2 ms, p95 ~40 ms), consistent
   with a Nagle/delayed-ACK interaction.
-* Python: a negative HTTP chunk size makes the server read the request body to
+* Python: a negative HTTP chunk size made the server read the request body to
   end-of-stream, bypassing `--max-request-bytes` (found in code review, confirmed by
-  the `malformed_chunked_body` HTTP check).
+  the `malformed_chunked_body` HTTP check). Fixed by the Python CR-6 run, whose
+  acceptance required a clean HTTP suite: 19/19 since 2026-10-13.
 * Clojure: on a failing vectorized/parallel execution the engine re-runs the
   query row-at-a-time (documented; results verified identical).
 * Valid but very large expressions (20,001-term sum, 2,000-deep parentheses):
@@ -153,6 +154,17 @@ limits are an open spec question (SPEC-Q-002).
 | `session_huge_line`: a 256 MB malformed session line (observation) | none | all eight answer `INVALID_REQUEST` and stay usable; peak RSS 258 MB (x86 asm) to 3.1 GB (Common Lisp) |
 | `parallel_memory_budget`: 1M-row `GROUP BY` with a 64 MB budget, 1 versus 8 threads (observation) | none (all return `RESOURCE_LIMIT`) | RSS growth with 8 threads: AArch64 asm 153 MB (1 thread: 0), which fits the reviewers' per-task-budget finding. Python 3,050 MB: process-tree RSS, which also counts the worker pool's start-up |
 
+**After the CR-6 task (2026-10-13): every probe passes on all eight engines.**
+The table above is the state before it. The re-run used the same probe on the
+merged engines (records: the same files, `reruns`):
+
+* `long_or_chain`: no crash and no hang on any engine.
+* `limit_after_failed_query` and `http_crlf_flood`: both pass on the x86-64
+  asm engine. Its CR-6 agent fixed both on its own: it now clears the request
+  memory budget at the start of each request, and drops CR/LF bytes before a
+  request line.
+* `expression_limits`: passes on all eight.
+
 ### CR-6 expression size limits (resolves SPEC-Q-002)
 
 [`spec/changes/expression-limits.md`](../../spec/changes/expression-limits.md)
@@ -164,9 +176,33 @@ large statements:
 * Beyond its own limits it must answer `RESOURCE_LIMIT`.
 * `TIMEOUT` must arrive within 1 s of expiry in every query stage.
 
-No engine claims the capability yet, because they were built against spec
-1.0.0. The results below are informational: probe `expression_limits`, 10
-minimum cases × 4 modes and 3 larger cases × 4 modes, with `timeout_ms` 30,000.
+**Result: all eight engines implement CR-6** (change task
+`change-expression-limits`, 2026-10-13). Each succeeded on the first attempt,
+for \$119.43 in total (\$9.02–21.52 per engine). Each claims
+`change.expression_limits`, and validation passed for each:
+
+* the full conformance suite (public and hidden) in every mode and over HTTP;
+* the HTTP suite;
+* the CR-6 probe with its withheld cases (19 minimum cases × 4 modes and
+  7 larger cases × 4 modes).
+
+The independent re-run of the public probe gives 40/40 minimum and 12/12
+larger cases on every engine.
+
+| engine | cost (USD) | agent time | commits | approach (from the engine's README and commits) |
+|---|---|---|---|---|
+| Clojure | 9.02 | 58 min | 3 | statement limits and a deadline in every stage |
+| x86-64 asm engine | 10.74 | 58 min | 5 | linear lexing of literals, statement limits; also fixed its stale memory budget and CR/LF handling |
+| AArch64 asm engine | 10.89 | 35 min | 9 | statement limits, large worker-thread stacks with a fallback when refused |
+| Java | 12.96 | 69 min | 4 | size limits in the parser, timeout in every stage and inside deep expressions |
+| Common Lisp | 14.97 | 89 min | 5 | statement limits, deadlines, stack-exhaustion handling with unit tests |
+| Go | 18.36 | 71 min | 12 | statement limits, linear handling of long statements in grouping, concatenation and CTE checks |
+| Python | 20.99 | 106 min | 10 | large-stack query threads, linear `LIKE`, hashed lookups, deadline checks in planning; also fixed the malformed chunked-body defect, so its HTTP suite now passes 19/19 |
+| Rust | 21.52 | 95 min | 8 | statement limits, stack-guarded threads, interruptible evaluation of long chains |
+
+**Before the CR-6 task** (informational, engines built against spec 1.0.0):
+probe `expression_limits`, 10 minimum cases × 4 modes and 3 larger cases × 4
+modes, with `timeout_ms` 30,000.
 
 | engine | minimums | larger statements (100k nesting / 100k-term `OR` / 100k `IN`) |
 |---|---|---|
@@ -179,7 +215,7 @@ minimum cases × 4 modes and 3 larger cases × 4 modes, with `timeout_ms` 30,000
 | x86-64 asm engine | 40/40 | `PARSE_ERROR` / no answer (`TIMEOUT` after 37 s) / ok |
 | AArch64 asm engine | 24/40: `RESOURCE_LIMIT` at nesting depth 999 | `RESOURCE_LIMIT` / row ok, vectorized no answer, parallel and auto crash / ok |
 
-* **No engine meets CR-6 in full.**
+* **No engine met CR-6 in full before the task.**
 * **Two common gaps:**
   * Valid SQL rejected with `PARSE_ERROR` or a depth limit below 1,000.
   * The timeout not enforced while a large statement is parsed or planned.
@@ -201,6 +237,7 @@ Per-attempt data (outcome, cost, turns, time, diff size) is in the report-7 tabl
 | CR-1 `UNION ALL` (change) | 6/6 success, first attempt | 3.48–4.92 | 14–21 files, 312–595 lines added |
 | CR-3 plan separation (refactoring) | 6/6 success | 3.67–6.37 | behaviour and capabilities unchanged; named optimizer rules with unit tests |
 | CR-2 `DECIMAL(38)` + PQCF v2 (change) | 6/6 success | 6.25–16.50 | the most expensive change; Go (16.50) and Java (13.92) needed a new wide-decimal value representation |
+| CR-6 expression size limits (change; all eight engines) | 8/8 success, first attempt | 9.02–21.52 | 3–12 commits; see the CR-6 section above |
 | debugging (one injected defect each) | 6/6 success | 0.21–0.39 | one-line fixes in 36–87 s: too easy, because the defect report names the failing cases |
 | latency optimization | 5/6 success; Go timed out twice | 10.22–18.61 (successes) | agents optimized self-written stand-in workloads (HI-007); see below |
 | latency optimization, re-run on the real workload (record-only) | 5/6 success; Python tests_failed (HTTP `malformed_chunked_body`, pre-existing) | 10.48–31.19 | not merged; see below |
@@ -401,7 +438,7 @@ Agreement is high (92 % exact, κ = 0.84) but the scale is compressed (almost al
 4–5), so the scores barely separate the engines. The useful output is the list of
 concrete findings; one was verified by a new black-box check: the Python HTTP
 server accepts a negative chunk size and then reads the body past
-`--max-request-bytes` (HTTP suite 18/19; all others 19/19).
+`--max-request-bytes` (HTTP suite 18/19 until the Python CR-6 run fixed it; 19/19 for all engines since 2026-10-13).
 
 The assembly kernel libraries were reviewed the same way after the optimize merge
 (a separate cohort, not comparable with the engine scores): x86-64 5/5, 4/4, 5/5,

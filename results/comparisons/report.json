@@ -1,5 +1,5 @@
 {
- "generated": "2026-10-12T21:52:17.895755+00:00",
+ "generated": "2026-10-13T03:31:10.848111+00:00",
  "weights": {
   "correctness": 0.35,
   "development_effort": 0.2,
@@ -7,7 +7,7 @@
   "resources": 0.1,
   "maintainability": 0.15
  },
- "git_commit": "3831cdef1b2396e788d4513458aa754f7ff181b8",
+ "git_commit": "3216d97bf70570d923a14ca1aaef2b7f28ec640b",
  "runs": [
   {
    "run_id": "a-change-decimal38-arm64-asm-engine-a1-20261012T093930Z",
@@ -80,6 +80,78 @@
    "attempt": 1,
    "outcome": "success",
    "manifest": "experiments/runs/a-change-decimal38-x86_64-asm-engine-a1-20261012T093746Z/manifest.json"
+  },
+  {
+   "run_id": "a-change-expression-limits-arm64-asm-engine-a1-20261012T235433Z",
+   "language": "arm64-asm-engine",
+   "task": "change-expression-limits",
+   "track": "A",
+   "attempt": 1,
+   "outcome": "success",
+   "manifest": "experiments/runs/a-change-expression-limits-arm64-asm-engine-a1-20261012T235433Z/manifest.json"
+  },
+  {
+   "run_id": "a-change-expression-limits-clojure-a1-20261012T235413Z",
+   "language": "clojure",
+   "task": "change-expression-limits",
+   "track": "A",
+   "attempt": 1,
+   "outcome": "success",
+   "manifest": "experiments/runs/a-change-expression-limits-clojure-a1-20261012T235413Z/manifest.json"
+  },
+  {
+   "run_id": "a-change-expression-limits-common-lisp-a1-20261012T235412Z",
+   "language": "common-lisp",
+   "task": "change-expression-limits",
+   "track": "A",
+   "attempt": 1,
+   "outcome": "success",
+   "manifest": "experiments/runs/a-change-expression-limits-common-lisp-a1-20261012T235412Z/manifest.json"
+  },
+  {
+   "run_id": "a-change-expression-limits-go-a1-20261012T235417Z",
+   "language": "go",
+   "task": "change-expression-limits",
+   "track": "A",
+   "attempt": 1,
+   "outcome": "success",
+   "manifest": "experiments/runs/a-change-expression-limits-go-a1-20261012T235417Z/manifest.json"
+  },
+  {
+   "run_id": "a-change-expression-limits-java-a1-20261012T235415Z",
+   "language": "java",
+   "task": "change-expression-limits",
+   "track": "A",
+   "attempt": 1,
+   "outcome": "success",
+   "manifest": "experiments/runs/a-change-expression-limits-java-a1-20261012T235415Z/manifest.json"
+  },
+  {
+   "run_id": "a-change-expression-limits-python-a1-20261012T235414Z",
+   "language": "python",
+   "task": "change-expression-limits",
+   "track": "A",
+   "attempt": 1,
+   "outcome": "success",
+   "manifest": "experiments/runs/a-change-expression-limits-python-a1-20261012T235414Z/manifest.json"
+  },
+  {
+   "run_id": "a-change-expression-limits-rust-a1-20261012T235411Z",
+   "language": "rust",
+   "task": "change-expression-limits",
+   "track": "A",
+   "attempt": 1,
+   "outcome": "success",
+   "manifest": "experiments/runs/a-change-expression-limits-rust-a1-20261012T235411Z/manifest.json"
+  },
+  {
+   "run_id": "a-change-expression-limits-x86_64-asm-engine-a1-20261012T235412Z",
+   "language": "x86_64-asm-engine",
+   "task": "change-expression-limits",
+   "track": "A",
+   "attempt": 1,
+   "outcome": "success",
+   "manifest": "experiments/runs/a-change-expression-limits-x86_64-asm-engine-a1-20261012T235412Z/manifest.json"
   },
   {
    "run_id": "a-change-union-all-arm64-asm-engine-a1-20261012T090423Z",
@@ -985,6 +1057,7 @@
  "capability_matrix": {
   "java": [
    "change.decimal38",
+   "change.expression_limits",
    "change.union_all",
    "exec.parallel",
    "exec.row",
@@ -1017,6 +1090,7 @@
   ],
   "clojure": [
    "change.decimal38",
+   "change.expression_limits",
    "change.union_all",
    "exec.parallel",
    "exec.row",
@@ -1049,6 +1123,7 @@
   ],
   "rust": [
    "change.decimal38",
+   "change.expression_limits",
    "change.union_all",
    "exec.parallel",
    "exec.row",
@@ -1081,6 +1156,7 @@
   ],
   "python": [
    "change.decimal38",
+   "change.expression_limits",
    "change.union_all",
    "exec.parallel",
    "exec.row",
@@ -1113,6 +1189,7 @@
   ],
   "go": [
    "change.decimal38",
+   "change.expression_limits",
    "change.union_all",
    "exec.parallel",
    "exec.row",
@@ -1145,6 +1222,7 @@
   ],
   "common-lisp": [
    "change.decimal38",
+   "change.expression_limits",
    "change.union_all",
    "exec.parallel",
    "exec.row",
@@ -1177,6 +1255,7 @@
   ],
   "x86_64-asm-engine": [
    "change.decimal38",
+   "change.expression_limits",
    "change.union_all",
    "exec.parallel",
    "exec.row",
@@ -1208,6 +1287,7 @@
   ],
   "arm64-asm-engine": [
    "change.decimal38",
+   "change.expression_limits",
    "change.union_all",
    "exec.parallel",
    "exec.row",
@@ -1288,6 +1368,7 @@
     },
     "capabilities": [
      "change.decimal38",
+     "change.expression_limits",
      "change.union_all",
      "exec.parallel",
      "exec.row",
@@ -1318,7 +1399,7 @@
      "storage.pqcf",
      "test.functions"
     ],
-    "started": "2026-10-11T16:37:29.702081+00:00",
+    "started": "2026-10-13T03:10:21.622946+00:00",
     "source": "results/correctness/java.json"
    },
    "clojure": {
@@ -1369,6 +1450,7 @@
     },
     "capabilities": [
      "change.decimal38",
+     "change.expression_limits",
      "change.union_all",
      "exec.parallel",
      "exec.row",
@@ -1399,7 +1481,7 @@
      "storage.pqcf",
      "test.functions"
     ],
-    "started": "2026-10-11T16:37:46.472671+00:00",
+    "started": "2026-10-13T03:09:56.016937+00:00",
     "source": "results/correctness/clojure.json"
    },
    "rust": {
@@ -1450,6 +1532,7 @@
     },
     "capabilities": [
      "change.decimal38",
+     "change.expression_limits",
      "change.union_all",
      "exec.parallel",
      "exec.row",
@@ -1480,7 +1563,7 @@
      "storage.pqcf",
      "test.functions"
     ],
-    "started": "2026-10-11T16:38:04.947376+00:00",
+    "started": "2026-10-13T03:10:11.362320+00:00",
     "source": "results/correctness/rust.json"
    },
    "python": {
@@ -1531,6 +1614,7 @@
     },
     "capabilities": [
      "change.decimal38",
+     "change.expression_limits",
      "change.union_all",
      "exec.parallel",
      "exec.row",
@@ -1561,7 +1645,7 @@
      "storage.pqcf",
      "test.functions"
     ],
-    "started": "2026-10-11T16:37:53.242675+00:00",
+    "started": "2026-10-13T03:10:23.786955+00:00",
     "source": "results/correctness/python.json"
    },
    "go": {
@@ -1612,6 +1696,7 @@
     },
     "capabilities": [
      "change.decimal38",
+     "change.expression_limits",
      "change.union_all",
      "exec.parallel",
      "exec.row",
@@ -1642,7 +1727,7 @@
      "storage.pqcf",
      "test.functions"
     ],
-    "started": "2026-10-11T16:37:51.912432+00:00",
+    "started": "2026-10-13T03:10:26.689360+00:00",
     "source": "results/correctness/go.json"
    },
    "common-lisp": {
@@ -1693,6 +1778,7 @@
     },
     "capabilities": [
      "change.decimal38",
+     "change.expression_limits",
      "change.union_all",
      "exec.parallel",
      "exec.row",
@@ -1723,7 +1809,7 @@
      "storage.pqcf",
      "test.functions"
     ],
-    "started": "2026-10-11T16:38:08.267756+00:00",
+    "started": "2026-10-13T03:10:00.923998+00:00",
     "source": "results/correctness/common-lisp.json"
    },
    "kernel_cohort": {
@@ -1900,6 +1986,7 @@
      },
      "capabilities": [
       "change.decimal38",
+      "change.expression_limits",
       "change.union_all",
       "exec.parallel",
       "exec.row",
@@ -1929,7 +2016,7 @@
       "storage.pqcf",
       "test.functions"
      ],
-     "started": "2026-10-12T10:59:41.713692+00:00",
+     "started": "2026-10-13T01:20:46.168249+00:00",
      "source": "results/correctness/x86_64-asm-engine.json"
     },
     "arm64-asm-engine": {
@@ -1980,6 +2067,7 @@
      },
      "capabilities": [
       "change.decimal38",
+      "change.expression_limits",
       "change.union_all",
       "exec.parallel",
       "exec.row",
@@ -2009,7 +2097,7 @@
       "storage.pqcf",
       "test.functions"
      ],
-     "started": "2026-10-12T12:47:06.307331+00:00",
+     "started": "2026-10-13T00:57:58.278921+00:00",
      "source": "results/correctness/arm64-asm-engine.json"
     }
    }
@@ -2035,6 +2123,34 @@
       "lines_added": 1552,
       "lines_removed": 280,
       "files_changed": 44,
+      "conformance": {
+       "total": 731,
+       "pass": 731,
+       "fail": 0,
+       "error": 0,
+       "not_implemented": 0
+      }
+     }
+    ],
+    "change-expression-limits": [
+     {
+      "run_id": "a-change-expression-limits-java-a1-20261012T235415Z",
+      "attempt": 1,
+      "outcome": "success",
+      "manifest": "experiments/runs/a-change-expression-limits-java-a1-20261012T235415Z/manifest.json",
+      "cost_usd": 12.958079399999997,
+      "tokens_output": 160544,
+      "tokens_input_total": 34015359,
+      "turns": 149,
+      "wall_seconds": 4114.2,
+      "tool_calls": 147,
+      "tool_failures": 0,
+      "build_failures": 2,
+      "repair_iterations": 0,
+      "commits": 4,
+      "lines_added": 1529,
+      "lines_removed": 373,
+      "files_changed": 28,
       "conformance": {
        "total": 731,
        "pass": 731,
@@ -2460,6 +2576,34 @@
       }
      }
     ],
+    "change-expression-limits": [
+     {
+      "run_id": "a-change-expression-limits-clojure-a1-20261012T235413Z",
+      "attempt": 1,
+      "outcome": "success",
+      "manifest": "experiments/runs/a-change-expression-limits-clojure-a1-20261012T235413Z/manifest.json",
+      "cost_usd": 9.0152788,
+      "tokens_output": 106978,
+      "tokens_input_total": 23419293,
+      "turns": 132,
+      "wall_seconds": 3473.8,
+      "tool_calls": 130,
+      "tool_failures": 3,
+      "build_failures": 3,
+      "repair_iterations": 0,
+      "commits": 3,
+      "lines_added": 833,
+      "lines_removed": 218,
+      "files_changed": 23,
+      "conformance": {
+       "total": 731,
+       "pass": 731,
+       "fail": 0,
+       "error": 0,
+       "not_implemented": 0
+      }
+     }
+    ],
     "change-union-all": [
      {
       "run_id": "a-change-union-all-clojure-a1-20261011T053530Z",
@@ -2824,6 +2968,34 @@
       }
      }
     ],
+    "change-expression-limits": [
+     {
+      "run_id": "a-change-expression-limits-rust-a1-20261012T235411Z",
+      "attempt": 1,
+      "outcome": "success",
+      "manifest": "experiments/runs/a-change-expression-limits-rust-a1-20261012T235411Z/manifest.json",
+      "cost_usd": 21.517409000000008,
+      "tokens_output": 258437,
+      "tokens_input_total": 62932344,
+      "turns": 224,
+      "wall_seconds": 5713.2,
+      "tool_calls": 223,
+      "tool_failures": 3,
+      "build_failures": 6,
+      "repair_iterations": 0,
+      "commits": 8,
+      "lines_added": 2527,
+      "lines_removed": 377,
+      "files_changed": 33,
+      "conformance": {
+       "total": 731,
+       "pass": 731,
+       "fail": 0,
+       "error": 0,
+       "not_implemented": 0
+      }
+     }
+    ],
     "change-union-all": [
      {
       "run_id": "a-change-union-all-rust-a1-20261011T053528Z",
@@ -3151,6 +3323,34 @@
       "lines_added": 505,
       "lines_removed": 110,
       "files_changed": 22,
+      "conformance": {
+       "total": 731,
+       "pass": 731,
+       "fail": 0,
+       "error": 0,
+       "not_implemented": 0
+      }
+     }
+    ],
+    "change-expression-limits": [
+     {
+      "run_id": "a-change-expression-limits-python-a1-20261012T235414Z",
+      "attempt": 1,
+      "outcome": "success",
+      "manifest": "experiments/runs/a-change-expression-limits-python-a1-20261012T235414Z/manifest.json",
+      "cost_usd": 20.985685800000006,
+      "tokens_output": 225341,
+      "tokens_input_total": 64421294,
+      "turns": 235,
+      "wall_seconds": 6376.4,
+      "tool_calls": 234,
+      "tool_failures": 4,
+      "build_failures": 3,
+      "repair_iterations": 0,
+      "commits": 10,
+      "lines_added": 1642,
+      "lines_removed": 321,
+      "files_changed": 29,
       "conformance": {
        "total": 731,
        "pass": 731,
@@ -3522,6 +3722,34 @@
       }
      }
     ],
+    "change-expression-limits": [
+     {
+      "run_id": "a-change-expression-limits-go-a1-20261012T235417Z",
+      "attempt": 1,
+      "outcome": "success",
+      "manifest": "experiments/runs/a-change-expression-limits-go-a1-20261012T235417Z/manifest.json",
+      "cost_usd": 18.359255999999988,
+      "tokens_output": 203528,
+      "tokens_input_total": 55795168,
+      "turns": 246,
+      "wall_seconds": 4274.5,
+      "tool_calls": 245,
+      "tool_failures": 2,
+      "build_failures": 4,
+      "repair_iterations": 0,
+      "commits": 12,
+      "lines_added": 2135,
+      "lines_removed": 450,
+      "files_changed": 42,
+      "conformance": {
+       "total": 731,
+       "pass": 731,
+       "fail": 0,
+       "error": 0,
+       "not_implemented": 0
+      }
+     }
+    ],
     "change-union-all": [
      {
       "run_id": "a-change-union-all-go-a1-20261011T053524Z",
@@ -3875,6 +4103,34 @@
       "lines_added": 526,
       "lines_removed": 132,
       "files_changed": 26,
+      "conformance": {
+       "total": 731,
+       "pass": 731,
+       "fail": 0,
+       "error": 0,
+       "not_implemented": 0
+      }
+     }
+    ],
+    "change-expression-limits": [
+     {
+      "run_id": "a-change-expression-limits-common-lisp-a1-20261012T235412Z",
+      "attempt": 1,
+      "outcome": "success",
+      "manifest": "experiments/runs/a-change-expression-limits-common-lisp-a1-20261012T235412Z/manifest.json",
+      "cost_usd": 14.967314799999997,
+      "tokens_output": 167347,
+      "tokens_input_total": 41772659,
+      "turns": 166,
+      "wall_seconds": 5338.3,
+      "tool_calls": 165,
+      "tool_failures": 4,
+      "build_failures": 4,
+      "repair_iterations": 0,
+      "commits": 5,
+      "lines_added": 1080,
+      "lines_removed": 244,
+      "files_changed": 22,
       "conformance": {
        "total": 731,
        "pass": 731,
@@ -4444,6 +4700,34 @@
       }
      }
     ],
+    "change-expression-limits": [
+     {
+      "run_id": "a-change-expression-limits-x86_64-asm-engine-a1-20261012T235412Z",
+      "attempt": 1,
+      "outcome": "success",
+      "manifest": "experiments/runs/a-change-expression-limits-x86_64-asm-engine-a1-20261012T235412Z/manifest.json",
+      "cost_usd": 10.737601600000007,
+      "tokens_output": 135808,
+      "tokens_input_total": 28038653,
+      "turns": 155,
+      "wall_seconds": 3492.3,
+      "tool_calls": 151,
+      "tool_failures": 4,
+      "build_failures": 1,
+      "repair_iterations": 0,
+      "commits": 5,
+      "lines_added": 769,
+      "lines_removed": 63,
+      "files_changed": 25,
+      "conformance": {
+       "total": 731,
+       "pass": 731,
+       "fail": 0,
+       "error": 0,
+       "not_implemented": 0
+      }
+     }
+    ],
     "change-union-all": [
      {
       "run_id": "a-change-union-all-x86_64-asm-engine-a1-20261012T090413Z",
@@ -4717,6 +5001,34 @@
       "lines_added": 2144,
       "lines_removed": 127,
       "files_changed": 25,
+      "conformance": {
+       "total": 731,
+       "pass": 731,
+       "fail": 0,
+       "error": 0,
+       "not_implemented": 0
+      }
+     }
+    ],
+    "change-expression-limits": [
+     {
+      "run_id": "a-change-expression-limits-arm64-asm-engine-a1-20261012T235433Z",
+      "attempt": 1,
+      "outcome": "success",
+      "manifest": "experiments/runs/a-change-expression-limits-arm64-asm-engine-a1-20261012T235433Z/manifest.json",
+      "cost_usd": 10.889416799999998,
+      "tokens_output": 139316,
+      "tokens_input_total": 28350053,
+      "turns": 153,
+      "wall_seconds": 2100.5,
+      "tool_calls": 152,
+      "tool_failures": 1,
+      "build_failures": 1,
+      "repair_iterations": 0,
+      "commits": 9,
+      "lines_added": 1034,
+      "lines_removed": 70,
+      "files_changed": 33,
       "conformance": {
        "total": 731,
        "pass": 731,
@@ -31030,12 +31342,12 @@
      "ok": true
     },
     "robustness_probes": {
-     "value": "fail: long_or_chain",
-     "ok": false
+     "value": "no failures (6 probes)",
+     "ok": true
     },
     "expression_limits": {
-     "value": "minimums 40/40, beyond 4/12 (informational)",
-     "ok": false
+     "value": "minimums 40/40, beyond 12/12",
+     "ok": true
     }
    },
    "clojure": {
@@ -31064,12 +31376,12 @@
      "ok": true
     },
     "robustness_probes": {
-     "value": "fail: long_or_chain",
-     "ok": false
+     "value": "no failures (6 probes)",
+     "ok": true
     },
     "expression_limits": {
-     "value": "minimums 28/40, beyond 8/12 (informational)",
-     "ok": false
+     "value": "minimums 40/40, beyond 12/12",
+     "ok": true
     }
    },
    "rust": {
@@ -31102,8 +31414,8 @@
      "ok": true
     },
     "expression_limits": {
-     "value": "minimums 28/40, beyond 4/12 (informational)",
-     "ok": false
+     "value": "minimums 40/40, beyond 12/12",
+     "ok": true
     }
    },
    "python": {
@@ -31136,8 +31448,8 @@
      "ok": true
     },
     "expression_limits": {
-     "value": "minimums 28/40, beyond 4/12 (informational)",
-     "ok": false
+     "value": "minimums 40/40, beyond 12/12",
+     "ok": true
     }
    },
    "go": {
@@ -31166,12 +31478,12 @@
      "ok": true
     },
     "robustness_probes": {
-     "value": "fail: long_or_chain",
-     "ok": false
+     "value": "no failures (6 probes)",
+     "ok": true
     },
     "expression_limits": {
-     "value": "minimums 40/40, beyond 8/12 (informational)",
-     "ok": false
+     "value": "minimums 40/40, beyond 12/12",
+     "ok": true
     }
    },
    "common-lisp": {
@@ -31204,8 +31516,8 @@
      "ok": true
     },
     "expression_limits": {
-     "value": "minimums 24/40, beyond 4/12 (informational)",
-     "ok": false
+     "value": "minimums 40/40, beyond 12/12",
+     "ok": true
     }
    },
    "x86_64-asm-engine": {
@@ -31231,12 +31543,12 @@
      "missing": "not applicable: the assembly engines do not load the kernel library"
     },
     "robustness_probes": {
-     "value": "fail: http_crlf_flood, limit_after_failed_query, long_or_chain",
-     "ok": false
+     "value": "no failures (6 probes)",
+     "ok": true
     },
     "expression_limits": {
-     "value": "minimums 40/40, beyond 4/12 (informational)",
-     "ok": false
+     "value": "minimums 40/40, beyond 12/12",
+     "ok": true
     }
    },
    "arm64-asm-engine": {
@@ -31261,23 +31573,23 @@
      "missing": "not applicable: the assembly engines do not load the kernel library"
     },
     "robustness_probes": {
-     "value": "fail: long_or_chain",
-     "ok": false
+     "value": "no failures (6 probes)",
+     "ok": true
     },
     "expression_limits": {
-     "value": "minimums 24/40, beyond 9/12 (informational)",
-     "ok": false
+     "value": "minimums 40/40, beyond 12/12",
+     "ok": true
     }
    }
   },
   "5_code_quality": {
    "java": {
-    "source_loc": 23767,
-    "test_loc": 2903,
-    "files": 166,
-    "comment_lines": 2385,
-    "comment_density": 0.1,
-    "largest_file_loc": 1180,
+    "source_loc": 24306,
+    "test_loc": 3080,
+    "files": 169,
+    "comment_lines": 2554,
+    "comment_density": 0.105,
+    "largest_file_loc": 1213,
     "rubric_review": {
      "reviewers": {
       "A": {
@@ -31302,12 +31614,12 @@
     }
    },
    "clojure": {
-    "source_loc": 12344,
-    "test_loc": 2008,
-    "files": 63,
-    "comment_lines": 391,
-    "comment_density": 0.032,
-    "largest_file_loc": 847,
+    "source_loc": 12696,
+    "test_loc": 2073,
+    "files": 66,
+    "comment_lines": 414,
+    "comment_density": 0.033,
+    "largest_file_loc": 860,
     "rubric_review": {
      "reviewers": {
       "A": {
@@ -31332,11 +31644,11 @@
     }
    },
    "rust": {
-    "source_loc": 24704,
-    "test_loc": 4370,
-    "files": 85,
-    "comment_lines": 2336,
-    "comment_density": 0.095,
+    "source_loc": 25744,
+    "test_loc": 4612,
+    "files": 89,
+    "comment_lines": 2561,
+    "comment_density": 0.099,
     "largest_file_loc": 1185,
     "rubric_review": {
      "reviewers": {
@@ -31362,11 +31674,11 @@
     }
    },
    "python": {
-    "source_loc": 13884,
-    "test_loc": 2184,
-    "files": 79,
-    "comment_lines": 895,
-    "comment_density": 0.064,
+    "source_loc": 14550,
+    "test_loc": 2423,
+    "files": 80,
+    "comment_lines": 1008,
+    "comment_density": 0.069,
     "largest_file_loc": 988,
     "rubric_review": {
      "reviewers": {
@@ -31392,11 +31704,11 @@
     }
    },
    "go": {
-    "source_loc": 25162,
-    "test_loc": 4111,
-    "files": 94,
-    "comment_lines": 2503,
-    "comment_density": 0.099,
+    "source_loc": 25827,
+    "test_loc": 4589,
+    "files": 97,
+    "comment_lines": 2756,
+    "comment_density": 0.107,
     "largest_file_loc": 1253,
     "rubric_review": {
      "reviewers": {
@@ -31422,12 +31734,12 @@
     }
    },
    "common-lisp": {
-    "source_loc": 14196,
-    "test_loc": 1670,
-    "files": 64,
-    "comment_lines": 1289,
-    "comment_density": 0.091,
-    "largest_file_loc": 856,
+    "source_loc": 14554,
+    "test_loc": 1853,
+    "files": 65,
+    "comment_lines": 1337,
+    "comment_density": 0.092,
+    "largest_file_loc": 869,
     "rubric_review": {
      "reviewers": {
       "A": {
@@ -31512,12 +31824,12 @@
     }
    },
    "x86_64-asm-engine": {
-    "source_loc": 34713,
+    "source_loc": 35108,
     "test_loc": 5215,
     "files": 38,
-    "comment_lines": 2592,
-    "comment_density": 0.075,
-    "largest_file_loc": 3560,
+    "comment_lines": 2651,
+    "comment_density": 0.076,
+    "largest_file_loc": 3562,
     "rubric_review": {
      "reviewers": {
       "A": {
@@ -31542,10 +31854,10 @@
     }
    },
    "arm64-asm-engine": {
-    "source_loc": 35673,
-    "test_loc": 7516,
+    "source_loc": 36233,
+    "test_loc": 7604,
     "files": 44,
-    "comment_lines": 5165,
+    "comment_lines": 5248,
     "comment_density": 0.145,
     "largest_file_loc": 2610,
     "rubric_review": {
@@ -52461,6 +52773,34 @@
       }
      }
     ],
+    "change-expression-limits": [
+     {
+      "run_id": "a-change-expression-limits-java-a1-20261012T235415Z",
+      "attempt": 1,
+      "outcome": "success",
+      "manifest": "experiments/runs/a-change-expression-limits-java-a1-20261012T235415Z/manifest.json",
+      "cost_usd": 12.958079399999997,
+      "tokens_output": 160544,
+      "tokens_input_total": 34015359,
+      "turns": 149,
+      "wall_seconds": 4114.2,
+      "tool_calls": 147,
+      "tool_failures": 0,
+      "build_failures": 2,
+      "repair_iterations": 0,
+      "commits": 4,
+      "lines_added": 1529,
+      "lines_removed": 373,
+      "files_changed": 28,
+      "conformance": {
+       "total": 731,
+       "pass": 731,
+       "fail": 0,
+       "error": 0,
+       "not_implemented": 0
+      }
+     }
+    ],
     "change-union-all": [
      {
       "run_id": "a-change-union-all-java-a1-20261011T053525Z",
@@ -52655,6 +52995,34 @@
       }
      }
     ],
+    "change-expression-limits": [
+     {
+      "run_id": "a-change-expression-limits-clojure-a1-20261012T235413Z",
+      "attempt": 1,
+      "outcome": "success",
+      "manifest": "experiments/runs/a-change-expression-limits-clojure-a1-20261012T235413Z/manifest.json",
+      "cost_usd": 9.0152788,
+      "tokens_output": 106978,
+      "tokens_input_total": 23419293,
+      "turns": 132,
+      "wall_seconds": 3473.8,
+      "tool_calls": 130,
+      "tool_failures": 3,
+      "build_failures": 3,
+      "repair_iterations": 0,
+      "commits": 3,
+      "lines_added": 833,
+      "lines_removed": 218,
+      "files_changed": 23,
+      "conformance": {
+       "total": 731,
+       "pass": 731,
+       "fail": 0,
+       "error": 0,
+       "not_implemented": 0
+      }
+     }
+    ],
     "change-union-all": [
      {
       "run_id": "a-change-union-all-clojure-a1-20261011T053530Z",
@@ -52823,6 +53191,34 @@
       }
      }
     ],
+    "change-expression-limits": [
+     {
+      "run_id": "a-change-expression-limits-rust-a1-20261012T235411Z",
+      "attempt": 1,
+      "outcome": "success",
+      "manifest": "experiments/runs/a-change-expression-limits-rust-a1-20261012T235411Z/manifest.json",
+      "cost_usd": 21.517409000000008,
+      "tokens_output": 258437,
+      "tokens_input_total": 62932344,
+      "turns": 224,
+      "wall_seconds": 5713.2,
+      "tool_calls": 223,
+      "tool_failures": 3,
+      "build_failures": 6,
+      "repair_iterations": 0,
+      "commits": 8,
+      "lines_added": 2527,
+      "lines_removed": 377,
+      "files_changed": 33,
+      "conformance": {
+       "total": 731,
+       "pass": 731,
+       "fail": 0,
+       "error": 0,
+       "not_implemented": 0
+      }
+     }
+    ],
     "change-union-all": [
      {
       "run_id": "a-change-union-all-rust-a1-20261011T053528Z",
@@ -52982,6 +53378,34 @@
       "lines_added": 505,
       "lines_removed": 110,
       "files_changed": 22,
+      "conformance": {
+       "total": 731,
+       "pass": 731,
+       "fail": 0,
+       "error": 0,
+       "not_implemented": 0
+      }
+     }
+    ],
+    "change-expression-limits": [
+     {
+      "run_id": "a-change-expression-limits-python-a1-20261012T235414Z",
+      "attempt": 1,
+      "outcome": "success",
+      "manifest": "experiments/runs/a-change-expression-limits-python-a1-20261012T235414Z/manifest.json",
+      "cost_usd": 20.985685800000006,
+      "tokens_output": 225341,
+      "tokens_input_total": 64421294,
+      "turns": 235,
+      "wall_seconds": 6376.4,
+      "tool_calls": 234,
+      "tool_failures": 4,
+      "build_failures": 3,
+      "repair_iterations": 0,
+      "commits": 10,
+      "lines_added": 1642,
+      "lines_removed": 321,
+      "files_changed": 29,
       "conformance": {
        "total": 731,
        "pass": 731,
@@ -53185,6 +53609,34 @@
       }
      }
     ],
+    "change-expression-limits": [
+     {
+      "run_id": "a-change-expression-limits-go-a1-20261012T235417Z",
+      "attempt": 1,
+      "outcome": "success",
+      "manifest": "experiments/runs/a-change-expression-limits-go-a1-20261012T235417Z/manifest.json",
+      "cost_usd": 18.359255999999988,
+      "tokens_output": 203528,
+      "tokens_input_total": 55795168,
+      "turns": 246,
+      "wall_seconds": 4274.5,
+      "tool_calls": 245,
+      "tool_failures": 2,
+      "build_failures": 4,
+      "repair_iterations": 0,
+      "commits": 12,
+      "lines_added": 2135,
+      "lines_removed": 450,
+      "files_changed": 42,
+      "conformance": {
+       "total": 731,
+       "pass": 731,
+       "fail": 0,
+       "error": 0,
+       "not_implemented": 0
+      }
+     }
+    ],
     "change-union-all": [
      {
       "run_id": "a-change-union-all-go-a1-20261011T053524Z",
@@ -53370,6 +53822,34 @@
       "lines_added": 526,
       "lines_removed": 132,
       "files_changed": 26,
+      "conformance": {
+       "total": 731,
+       "pass": 731,
+       "fail": 0,
+       "error": 0,
+       "not_implemented": 0
+      }
+     }
+    ],
+    "change-expression-limits": [
+     {
+      "run_id": "a-change-expression-limits-common-lisp-a1-20261012T235412Z",
+      "attempt": 1,
+      "outcome": "success",
+      "manifest": "experiments/runs/a-change-expression-limits-common-lisp-a1-20261012T235412Z/manifest.json",
+      "cost_usd": 14.967314799999997,
+      "tokens_output": 167347,
+      "tokens_input_total": 41772659,
+      "turns": 166,
+      "wall_seconds": 5338.3,
+      "tool_calls": 165,
+      "tool_failures": 4,
+      "build_failures": 4,
+      "repair_iterations": 0,
+      "commits": 5,
+      "lines_added": 1080,
+      "lines_removed": 244,
+      "files_changed": 22,
       "conformance": {
        "total": 731,
        "pass": 731,
@@ -53727,6 +54207,34 @@
       }
      }
     ],
+    "change-expression-limits": [
+     {
+      "run_id": "a-change-expression-limits-x86_64-asm-engine-a1-20261012T235412Z",
+      "attempt": 1,
+      "outcome": "success",
+      "manifest": "experiments/runs/a-change-expression-limits-x86_64-asm-engine-a1-20261012T235412Z/manifest.json",
+      "cost_usd": 10.737601600000007,
+      "tokens_output": 135808,
+      "tokens_input_total": 28038653,
+      "turns": 155,
+      "wall_seconds": 3492.3,
+      "tool_calls": 151,
+      "tool_failures": 4,
+      "build_failures": 1,
+      "repair_iterations": 0,
+      "commits": 5,
+      "lines_added": 769,
+      "lines_removed": 63,
+      "files_changed": 25,
+      "conformance": {
+       "total": 731,
+       "pass": 731,
+       "fail": 0,
+       "error": 0,
+       "not_implemented": 0
+      }
+     }
+    ],
     "change-union-all": [
      {
       "run_id": "a-change-union-all-x86_64-asm-engine-a1-20261012T090413Z",
@@ -53869,6 +54377,34 @@
       }
      }
     ],
+    "change-expression-limits": [
+     {
+      "run_id": "a-change-expression-limits-arm64-asm-engine-a1-20261012T235433Z",
+      "attempt": 1,
+      "outcome": "success",
+      "manifest": "experiments/runs/a-change-expression-limits-arm64-asm-engine-a1-20261012T235433Z/manifest.json",
+      "cost_usd": 10.889416799999998,
+      "tokens_output": 139316,
+      "tokens_input_total": 28350053,
+      "turns": 153,
+      "wall_seconds": 2100.5,
+      "tool_calls": 152,
+      "tool_failures": 1,
+      "build_failures": 1,
+      "repair_iterations": 0,
+      "commits": 9,
+      "lines_added": 1034,
+      "lines_removed": 70,
+      "files_changed": 33,
+      "conformance": {
+       "total": 731,
+       "pass": 731,
+       "fail": 0,
+       "error": 0,
+       "not_implemented": 0
+      }
+     }
+    ],
     "change-union-all": [
      {
       "run_id": "a-change-union-all-arm64-asm-engine-a1-20261012T090423Z",
@@ -53987,37 +54523,37 @@
    "per_language": {
     "java": {
      "pass_rate": 1.0,
-     "dev_cost_usd": 170.5955398,
+     "dev_cost_usd": 183.5536192,
      "correctness_gate": true,
      "geomean_latency_s": 0.0034143504507136123
     },
     "clojure": {
      "pass_rate": 1.0,
-     "dev_cost_usd": 122.0794172,
+     "dev_cost_usd": 131.094696,
      "correctness_gate": true,
      "geomean_latency_s": 0.005472937455825296
     },
     "rust": {
      "pass_rate": 1.0,
-     "dev_cost_usd": 147.00508480000002,
+     "dev_cost_usd": 168.5224938,
      "correctness_gate": true,
      "geomean_latency_s": 0.0020370021629688116
     },
     "python": {
      "pass_rate": 1.0,
-     "dev_cost_usd": 123.55074080000001,
+     "dev_cost_usd": 144.53642660000003,
      "correctness_gate": true,
      "geomean_latency_s": 0.02467086519360499
     },
     "go": {
      "pass_rate": 1.0,
-     "dev_cost_usd": 123.97761260000003,
+     "dev_cost_usd": 142.3368686,
      "correctness_gate": true,
      "geomean_latency_s": 0.0018772734209315197
     },
     "common-lisp": {
      "pass_rate": 1.0,
-     "dev_cost_usd": 167.9400722000001,
+     "dev_cost_usd": 182.90738700000009,
      "correctness_gate": true,
      "geomean_latency_s": 0.00691226970599081
     }
@@ -54048,7 +54584,7 @@
    "asm_engine_cohort": {
     "x86_64-asm-engine": {
      "correctness_gate": true,
-     "dev_cost_usd": 132.68215659999998,
+     "dev_cost_usd": 143.4197582,
      "geomean_latency_s": 0.002853905123034435,
      "bench_id": "20261012T115848Z-1m-main-and-asm-x86",
      "host_cpu": "AMD Ryzen 9 9950X3D 16-Core Processor",
@@ -54056,7 +54592,7 @@
     },
     "arm64-asm-engine": {
      "correctness_gate": true,
-     "dev_cost_usd": 177.7841184,
+     "dev_cost_usd": 188.6735352,
      "geomean_latency_s": 0.0026803952097897545,
      "bench_id": "20261012T124929Z-1m-asm-arm",
      "host_cpu": "spark (Cortex-A725/Cortex-X925)",

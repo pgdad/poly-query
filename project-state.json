@@ -55,14 +55,11 @@
   "Option B complete: both assembly engines finished Phases 1-5 and all later families (one session each), reviewed and benchmarked; spend $310.48 of the $600 cap",
   "Debugging family remains too easy for both engines and kernels (kernel variant with symptom-only report and hidden-only failures: fixed in ~1 min)",
   "AArch64 kernel review findings: verification harnesses not committed, no BTI/GNU property note, block-size test constants not overridable",
-  "Python HTTP defect: negative chunk size bypasses --max-request-bytes (HTTP suite malformed_chunked_body fails 18/19) \u2014 fix via a sandboxed agent run (e.g. a regression/robustness task), not by hand",
   "Go optimize-latency: two timeouts (88 min, 120 min); committed a2 work passes all checks (1.74x speedup) but is unmerged \u2014 decide on attempt 3 or accept timeout as the result",
   "Repeated attempts (n>1) per language/task for statistics (docs/methodology/statistics.md)",
   "10m-scale benchmark",
   "AArch64 assembly optimize-latency: 1.82x geomean but q01_filter_selective 8x slower (plus q16, q17 significantly slower)",
-  "Robustness probe defects (results/correctness/robustness/): x86-64 asm engine SIGSEGV on 100k-term AND/OR chains (parallel/auto), query memory limit left set after a failed query, unbounded HTTP header buffering; AArch64 asm engine SIGSEGV on 100k-term chains (vectorized/parallel/auto); Go, Java (100k terms) and Clojure (10k terms) do not answer within 180 s despite timeout_ms 120000. Fixing them needs engine runs via the orchestrator (or a debug-family task), not hand edits",
-  "Remaining unverified review findings: cross-thread longjmp via global jmp_buf (x86-64 asm), Go worker goroutines without recover (both need an internal fault), symlink-following data paths",
-  "CR-6 expression limits (SPEC-Q-002 resolved, ADR-0017): no engine meets it yet (informational, results/correctness/robustness/*.json probe expression_limits); include change.expression_limits in any engine task that fixes the robustness defects"
+  "Remaining unverified review findings: cross-thread longjmp via global jmp_buf (x86-64 asm), Go worker goroutines without recover (both need an internal fault), symlink-following data paths"
  ],
  "known_defects": [
   "See experiments/telemetry/harness-incidents.jsonl (HI-001..008 fixed; SPEC-Q-001 resolved for CR-2 engines)",
@@ -92,10 +89,10 @@
   "conformance_public_all_engines": "660/660 (go, rust, java, clojure, python, common-lisp)",
   "conformance_public_plus_hidden_arm64": "746/746 all six engines, with and without native kernels (results/correctness/arm64)",
   "interop": "6x6 + reference clean, incl. PQCF v2 wide-decimal files (results/correctness/interop.json)",
-  "http_suite": "19/19 all engines except python 18/19 (malformed_chunked_body)"
+  "http_suite": "19/19 all engines (python fixed by its CR-6 run, 2026-10-13)"
  },
- "last_successful_commit": "3831cde",
- "next_recommended_action": "SPEC-Q-002 resolved as CR-6 (spec/changes/expression-limits.md). Next candidates: a CR-6 change task for all engines via the orchestrator (fixes the long-chain crashes/hangs as a by-product), the remaining robustness defects, repeated attempts (n>1), 10m-scale benchmark.",
+ "last_successful_commit": "3216d97bf70570d923a14ca1aaef2b7f28ec640b",
+ "next_recommended_action": "CR-6 implemented by all eight engines (first attempt each, $119.43); every robustness probe and the HTTP suite pass on all engines. Next candidates: re-run the 1m benchmark on the CR-6 engines (latency numbers predate CR-6), decide on Go optimize-latency (unmerged 1.74x), the AArch64 q01 regression, repeated attempts (n>1), 10m-scale benchmark.",
  "findings": [
   "go phase5 HTTP: single-client p95 ~40 ms vs median 1.2 ms (bimodal; consistent with Nagle/delayed-ACK interaction) \u2014 report as engine quality finding; clojure p95 16 ms",
   "CR-2 DECIMAL(38) was the most expensive change (6.25-16.50 USD); Go and Java needed a new wide-decimal representation",
@@ -112,8 +109,8 @@
   "HI-009: before/after trees kept stray files; clean re-measurement within the ~20% between-session spread"
  ],
  "totals": {
-  "track_a_runs": 108,
-  "track_a_cost_usd_list": 1255.62,
-  "note": "from results/comparisons/development.csv; excludes 5 runs with no reported cost (timeouts); includes kernel family, record-only re-runs and the assembly engines ($310.48); Track B jvm-tuning runs are separate"
+  "track_a_runs": 116,
+  "track_a_cost_usd_list": 1375.05,
+  "note": "from results/comparisons/development.csv; excludes 5 runs with no reported cost (timeouts); includes kernel family, record-only re-runs and the assembly engines ($332.11 incl. CR-6); Track B jvm-tuning runs are separate; CR-6 wave 2026-10-13: 8 runs, $119.43"
  }
 }

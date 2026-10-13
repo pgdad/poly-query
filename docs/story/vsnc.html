@@ -63,7 +63,7 @@ suite they all answer to. The name says the same thing:
 language, and it beat Java.</strong> On the same 1-million-row
 benchmark, on the same machine, the x86-64 assembly engine answers in
 2.85 ms against Java's 3.41 ms, using half the memory. Both assembly
-engines together cost $310.</td>
+engines together cost $332, every later change included.</td>
 </tr>
 <tr class="even">
 <td><strong>Salient point</strong></td>
@@ -151,8 +151,8 @@ Instead the run waits for the window to roll forward. On Saturday six
 runs waited 35–95 minutes this way.</li>
 <li>A watchdog stops a running agent at 95 %, or instantly on any paid
 overage.</li>
-<li>Usage peaked at 89 % of the 5-hour window and 62 % of the weekly
-window. All 108 sessions saw "allowed": no rejections, no overage.</li>
+<li>Usage peaked at 89 % of the 5-hour window and 69 % of the weekly
+window. All 116 sessions saw "allowed": no rejections, no overage.</li>
 </ul>
 <p><strong>Step 6: change it, like real software.</strong> On Sunday the
 agents got the jobs that come after version 1:</p>
@@ -171,10 +171,10 @@ task the others did.</li>
 <li>Each engine got two independent AI code reviews.</li>
 <li>Black-box probes then tested what the reviewers suspected.</li>
 </ul>
-<p><strong>The bill.</strong> 108 agent sessions and 75 agent-hours.
-That is <strong>$1,256 at API list prices</strong>, run on a Claude
+<p><strong>The bill.</strong> 116 agent sessions and 85 agent-hours.
+That is <strong>$1,375 at API list prices</strong>, run on a Claude
 subscription. A complete, tested engine with all its later changes came
-to about <strong>$120–180 per language</strong>.</p>
+to about <strong>$130–185 per language</strong>.</p>
 <p><img src="charts/cost.svg" alt="Cost per engine" /></p>
 <h2 id="n--news">N — News</h2>
 <h3 id="six-strangers-one-answer">Six strangers, one answer</h3>
@@ -201,16 +201,18 @@ and the agents implemented it in every engine.</li>
 </ul></li>
 <li><strong>The opening hook, in numbers.</strong> The AI-written x86-64
 assembly engine answers in 2.85 ms against Java's 3.41 ms, at 1,612 MiB
-peak memory against 3,219 MiB. Both assembly engines together cost
-$310.</li>
+peak memory against 3,219 MiB. Both assembly engines together cost $332,
+every later change included.</li>
 <li><strong>Eight engines in one weekend, for the price of a
 laptop.</strong> Six engines went through all five phases in under 10
-hours. Everything cost $1,256 at API list prices.</li>
-<li><strong>75 hours of AI work, zero overage.</strong> A usage gate
+hours. Everything cost $1,375 at API list prices.</li>
+<li><strong>85 hours of AI work, zero overage.</strong> A usage gate
 paused work instead of raising the bill.</li>
 <li><strong>The AI auditors caught real bugs.</strong> Independent AI
 code reviews flagged suspected defects; black-box probes confirmed some
-and cleared others. Everything is published, failures included.</li>
+and cleared others. One more parallel round of agent runs then fixed
+every confirmed defect, on the first try in all eight engines.
+Everything is published, failures included.</li>
 <li><strong>Next: twin implementations for the numbers that
 matter.</strong> The same recipe applies to pricing, billing or interest
 calculations, with two independent implementations checking each other
@@ -243,7 +245,7 @@ validation);</li>
 <li>the test harness;</li>
 <li>the reporting dashboard.</li>
 </ul></li>
-<li><strong>Open evidence:</strong> every one of the 108 agent sessions
+<li><strong>Open evidence:</strong> every one of the 116 agent sessions
 is recorded, with its transcript, cost, time and outcome, failures
 included. Live dashboard: <a
 href="https://pgdad.github.io/poly-query/">https://pgdad.github.io/poly-query/</a>.
@@ -258,8 +260,8 @@ stretch goal and its $600 cap, choosing the ARM machine.</li>
 <li><strong>The conductor</strong> (one Claude Code session) wrote the
 spec, the tests and the tooling. It ran the waves, refereed, and wrote
 the reports, and it never touched engine code.</li>
-<li><strong>The agents</strong> (108 Claude sessions) wrote about
-193,000 lines across eight engines and the assembly kernels.</li>
+<li><strong>The agents</strong> (116 Claude sessions) wrote about
+198,000 lines across eight engines and the assembly kernels.</li>
 <li><strong>Two hands-on interventions</strong> in the whole project,
 both logged.</li>
 </ul>

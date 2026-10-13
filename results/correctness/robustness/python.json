@@ -55,28 +55,30 @@
   },
   "long_or_chain": {
    "verdict": "pass",
-   "crashed_or_hung": [],
+   "crashed": [],
+   "hung": [],
+   "hang_rule": "no response within 180 s although options.timeout_ms = 120000",
    "wrong_result": [],
    "cases": {
     "load": "ok",
     "OR_10000_row": {
-     "result": "RESOURCE_LIMIT",
-     "count": null,
+     "result": "ok",
+     "count": 10000,
      "alive": true
     },
     "OR_10000_vectorized": {
-     "result": "RESOURCE_LIMIT",
-     "count": null,
+     "result": "ok",
+     "count": 10000,
      "alive": true
     },
     "OR_10000_parallel": {
-     "result": "RESOURCE_LIMIT",
-     "count": null,
+     "result": "ok",
+     "count": 10000,
      "alive": true
     },
     "OR_10000_auto": {
-     "result": "RESOURCE_LIMIT",
-     "count": null,
+     "result": "ok",
+     "count": 10000,
      "alive": true
     },
     "OR_100000_row": {
@@ -100,23 +102,23 @@
      "alive": true
     },
     "AND_10000_row": {
-     "result": "RESOURCE_LIMIT",
-     "count": null,
+     "result": "ok",
+     "count": 20000,
      "alive": true
     },
     "AND_10000_vectorized": {
-     "result": "RESOURCE_LIMIT",
-     "count": null,
+     "result": "ok",
+     "count": 20000,
      "alive": true
     },
     "AND_10000_parallel": {
-     "result": "RESOURCE_LIMIT",
-     "count": null,
+     "result": "ok",
+     "count": 20000,
      "alive": true
     },
     "AND_10000_auto": {
-     "result": "RESOURCE_LIMIT",
-     "count": null,
+     "result": "ok",
+     "count": 20000,
      "alive": true
     },
     "AND_100000_row": {
@@ -141,26 +143,26 @@
     }
    },
    "engine_exits": [],
-   "seconds": 5.1
+   "seconds": 102.4
   },
   "session_huge_line": {
    "verdict": "observation",
    "response": "INVALID_REQUEST",
    "next_request": "ok",
    "rss_base_mib": 1,
-   "rss_peak_mib": 499,
+   "rss_peak_mib": 708,
    "exit_code": 0,
    "stderr_tail": "",
    "seconds": 0.6
   },
   "http_crlf_flood": {
    "verdict": "pass",
-   "bytes_sent": 2097152,
+   "bytes_sent": 3145728,
    "rss_growth_mib": 0,
    "rss_growth_by_mib_sent": {},
    "server_closed_connection": true,
-   "rss_base_mib": 29,
-   "rss_peak_mib": 30,
+   "rss_base_mib": 31,
+   "rss_peak_mib": 31,
    "server_alive": true,
    "server_healthy_after": true,
    "seconds": 1.4
@@ -170,48 +172,26 @@
    "load": "ok",
    "threads_1": {
     "result": "RESOURCE_LIMIT",
-    "rss_before_mib": 371,
-    "rss_peak_mib": 403,
-    "growth_mib": 32
+    "rss_before_mib": 365,
+    "rss_peak_mib": 413,
+    "growth_mib": 48
    },
    "threads_8": {
     "result": "RESOURCE_LIMIT",
-    "rss_before_mib": 384,
-    "rss_peak_mib": 3433,
-    "growth_mib": 3050
+    "rss_before_mib": 403,
+    "rss_peak_mib": 3429,
+    "growth_mib": 3025
    },
    "exit_code": 0,
    "stderr_tail": "",
    "seconds": 4.4
   },
   "expression_limits": {
-   "verdict": "fail",
-   "informational": true,
-   "minimum_failures": [
-    "or_10000_row",
-    "or_10000_vectorized",
-    "or_10000_parallel",
-    "or_10000_auto",
-    "and_10000_row",
-    "and_10000_vectorized",
-    "and_10000_parallel",
-    "and_10000_auto",
-    "sum_10000_row",
-    "sum_10000_vectorized",
-    "sum_10000_parallel",
-    "sum_10000_auto"
-   ],
-   "beyond_failures": [
-    "parens_100000_row",
-    "parens_100000_vectorized",
-    "parens_100000_parallel",
-    "parens_100000_auto",
-    "in_100000_row",
-    "in_100000_vectorized",
-    "in_100000_parallel",
-    "in_100000_auto"
-   ],
-   "claims_capability": false,
+   "verdict": "pass",
+   "informational": false,
+   "minimum_failures": [],
+   "beyond_failures": [],
+   "claims_capability": true,
    "minimum": {
     "parens_998_row": {
      "result": "ok",
@@ -240,308 +220,308 @@
     "abs_998_row": {
      "result": "ok",
      "value": 100,
-     "seconds": 1.02,
+     "seconds": 0.02,
      "pass": true
     },
     "abs_998_vectorized": {
      "result": "ok",
      "value": 100,
-     "seconds": 4.44,
+     "seconds": 0.02,
      "pass": true
     },
     "abs_998_parallel": {
      "result": "ok",
      "value": 100,
-     "seconds": 4.42,
+     "seconds": 0.03,
      "pass": true
     },
     "abs_998_auto": {
      "result": "ok",
      "value": 100,
-     "seconds": 4.42,
+     "seconds": 0.02,
      "pass": true
     },
     "unary_minus_998_row": {
      "result": "ok",
      "value": 100,
-     "seconds": 0.97,
+     "seconds": 0.01,
      "pass": true
     },
     "unary_minus_998_vectorized": {
      "result": "ok",
      "value": 100,
-     "seconds": 1.93,
+     "seconds": 0.01,
      "pass": true
     },
     "unary_minus_998_parallel": {
      "result": "ok",
      "value": 100,
-     "seconds": 1.91,
+     "seconds": 0.01,
      "pass": true
     },
     "unary_minus_998_auto": {
      "result": "ok",
      "value": 100,
-     "seconds": 1.91,
+     "seconds": 0.01,
      "pass": true
     },
     "not_998_row": {
      "result": "ok",
      "value": 100,
-     "seconds": 0.01,
+     "seconds": 0.0,
      "pass": true
     },
     "not_998_vectorized": {
      "result": "ok",
      "value": 100,
-     "seconds": 0.01,
+     "seconds": 0.0,
      "pass": true
     },
     "not_998_parallel": {
      "result": "ok",
      "value": 100,
-     "seconds": 0.01,
+     "seconds": 0.0,
      "pass": true
     },
     "not_998_auto": {
      "result": "ok",
      "value": 100,
-     "seconds": 0.01,
+     "seconds": 0.0,
      "pass": true
     },
     "or_10000_row": {
-     "result": "RESOURCE_LIMIT",
-     "value": null,
-     "seconds": 0.06,
-     "pass": false
+     "result": "ok",
+     "value": 100,
+     "seconds": 0.29,
+     "pass": true
     },
     "or_10000_vectorized": {
-     "result": "RESOURCE_LIMIT",
-     "value": null,
-     "seconds": 0.06,
-     "pass": false
+     "result": "ok",
+     "value": 100,
+     "seconds": 0.32,
+     "pass": true
     },
     "or_10000_parallel": {
-     "result": "RESOURCE_LIMIT",
-     "value": null,
-     "seconds": 0.06,
-     "pass": false
+     "result": "ok",
+     "value": 100,
+     "seconds": 0.4,
+     "pass": true
     },
     "or_10000_auto": {
-     "result": "RESOURCE_LIMIT",
-     "value": null,
-     "seconds": 0.05,
-     "pass": false
+     "result": "ok",
+     "value": 100,
+     "seconds": 0.36,
+     "pass": true
     },
     "and_10000_row": {
-     "result": "RESOURCE_LIMIT",
-     "value": null,
-     "seconds": 0.06,
-     "pass": false
+     "result": "ok",
+     "value": 100,
+     "seconds": 0.44,
+     "pass": true
     },
     "and_10000_vectorized": {
-     "result": "RESOURCE_LIMIT",
-     "value": null,
-     "seconds": 0.06,
-     "pass": false
+     "result": "ok",
+     "value": 100,
+     "seconds": 0.32,
+     "pass": true
     },
     "and_10000_parallel": {
-     "result": "RESOURCE_LIMIT",
-     "value": null,
-     "seconds": 0.06,
-     "pass": false
+     "result": "ok",
+     "value": 100,
+     "seconds": 0.38,
+     "pass": true
     },
     "and_10000_auto": {
-     "result": "RESOURCE_LIMIT",
-     "value": null,
-     "seconds": 0.06,
-     "pass": false
+     "result": "ok",
+     "value": 100,
+     "seconds": 0.33,
+     "pass": true
     },
     "sum_10000_row": {
-     "result": "RESOURCE_LIMIT",
-     "value": null,
-     "seconds": 0.02,
-     "pass": false
+     "result": "ok",
+     "value": 10098,
+     "seconds": 0.27,
+     "pass": true
     },
     "sum_10000_vectorized": {
-     "result": "RESOURCE_LIMIT",
-     "value": null,
-     "seconds": 0.02,
-     "pass": false
+     "result": "ok",
+     "value": 10098,
+     "seconds": 0.15,
+     "pass": true
     },
     "sum_10000_parallel": {
-     "result": "RESOURCE_LIMIT",
-     "value": null,
-     "seconds": 0.02,
-     "pass": false
+     "result": "ok",
+     "value": 10098,
+     "seconds": 0.19,
+     "pass": true
     },
     "sum_10000_auto": {
-     "result": "RESOURCE_LIMIT",
-     "value": null,
-     "seconds": 0.03,
-     "pass": false
+     "result": "ok",
+     "value": 10098,
+     "seconds": 0.16,
+     "pass": true
     },
     "in_10000_row": {
      "result": "ok",
      "value": 100,
-     "seconds": 6.38,
+     "seconds": 0.09,
      "pass": true
     },
     "in_10000_vectorized": {
      "result": "ok",
      "value": 100,
-     "seconds": 6.4,
+     "seconds": 0.07,
      "pass": true
     },
     "in_10000_parallel": {
      "result": "ok",
      "value": 100,
-     "seconds": 6.39,
+     "seconds": 0.07,
      "pass": true
     },
     "in_10000_auto": {
      "result": "ok",
      "value": 100,
-     "seconds": 6.4,
+     "seconds": 0.07,
      "pass": true
     },
     "case_5000_row": {
      "result": "ok",
      "value": 4950,
-     "seconds": 0.08,
+     "seconds": 0.11,
      "pass": true
     },
     "case_5000_vectorized": {
      "result": "ok",
      "value": 4950,
-     "seconds": 0.1,
+     "seconds": 0.12,
      "pass": true
     },
     "case_5000_parallel": {
      "result": "ok",
      "value": 4950,
-     "seconds": 0.1,
+     "seconds": 0.12,
      "pass": true
     },
     "case_5000_auto": {
      "result": "ok",
      "value": 4950,
-     "seconds": 0.1,
+     "seconds": 0.12,
      "pass": true
     },
     "text_1mib_row": {
      "result": "ok",
      "value": 100,
-     "seconds": 0.02,
+     "seconds": 0.01,
      "pass": true
     },
     "text_1mib_vectorized": {
      "result": "ok",
      "value": 100,
-     "seconds": 0.02,
+     "seconds": 0.0,
      "pass": true
     },
     "text_1mib_parallel": {
      "result": "ok",
      "value": 100,
-     "seconds": 0.02,
+     "seconds": 0.0,
      "pass": true
     },
     "text_1mib_auto": {
      "result": "ok",
      "value": 100,
-     "seconds": 0.02,
+     "seconds": 0.0,
      "pass": true
     }
    },
    "beyond": {
     "parens_100000_row": {
-     "result": "PARSE_ERROR",
+     "result": "RESOURCE_LIMIT",
      "value": null,
-     "seconds": 0.11,
+     "seconds": 0.01,
      "late_by_s": null,
-     "pass": false
+     "pass": true
     },
     "parens_100000_vectorized": {
-     "result": "PARSE_ERROR",
+     "result": "RESOURCE_LIMIT",
      "value": null,
-     "seconds": 0.11,
+     "seconds": 0.02,
      "late_by_s": null,
-     "pass": false
+     "pass": true
     },
     "parens_100000_parallel": {
-     "result": "PARSE_ERROR",
+     "result": "RESOURCE_LIMIT",
      "value": null,
-     "seconds": 0.11,
+     "seconds": 0.02,
      "late_by_s": null,
-     "pass": false
+     "pass": true
     },
     "parens_100000_auto": {
-     "result": "PARSE_ERROR",
+     "result": "RESOURCE_LIMIT",
      "value": null,
-     "seconds": 0.11,
+     "seconds": 0.02,
      "late_by_s": null,
-     "pass": false
+     "pass": true
     },
     "or_100000_row": {
      "result": "RESOURCE_LIMIT",
      "value": null,
-     "seconds": 0.51,
+     "seconds": 0.59,
      "late_by_s": null,
      "pass": true
     },
     "or_100000_vectorized": {
      "result": "RESOURCE_LIMIT",
      "value": null,
-     "seconds": 0.51,
+     "seconds": 0.65,
      "late_by_s": null,
      "pass": true
     },
     "or_100000_parallel": {
      "result": "RESOURCE_LIMIT",
      "value": null,
-     "seconds": 0.51,
+     "seconds": 0.63,
      "late_by_s": null,
      "pass": true
     },
     "or_100000_auto": {
      "result": "RESOURCE_LIMIT",
      "value": null,
-     "seconds": 0.51,
+     "seconds": 0.65,
      "late_by_s": null,
      "pass": true
     },
     "in_100000_row": {
-     "result": "HANG",
-     "value": null,
-     "seconds": 35.0,
-     "late_by_s": 5.0,
-     "pass": false
+     "result": "ok",
+     "value": 100,
+     "seconds": 0.78,
+     "late_by_s": null,
+     "pass": true
     },
     "in_100000_vectorized": {
-     "result": "HANG",
-     "value": null,
-     "seconds": 35.0,
-     "late_by_s": 5.0,
-     "pass": false
+     "result": "ok",
+     "value": 100,
+     "seconds": 0.74,
+     "late_by_s": null,
+     "pass": true
     },
     "in_100000_parallel": {
-     "result": "HANG",
-     "value": null,
-     "seconds": 35.0,
-     "late_by_s": 5.0,
-     "pass": false
+     "result": "ok",
+     "value": 100,
+     "seconds": 0.73,
+     "late_by_s": null,
+     "pass": true
     },
     "in_100000_auto": {
-     "result": "HANG",
-     "value": null,
-     "seconds": 35.0,
-     "late_by_s": 5.0,
-     "pass": false
+     "result": "ok",
+     "value": 100,
+     "seconds": 0.72,
+     "late_by_s": null,
+     "pass": true
     }
    },
    "engine_exits": [],
-   "seconds": 191.0
+   "seconds": 10.4
   }
  },
  "reruns": [
@@ -556,6 +536,18 @@
     "expression_limits"
    ],
    "started": "2026-10-12T20:55:24Z"
+  },
+  {
+   "probes": [
+    "fd_after_failed_loads",
+    "limit_after_failed_query",
+    "long_or_chain",
+    "session_huge_line",
+    "http_crlf_flood",
+    "parallel_memory_budget",
+    "expression_limits"
+   ],
+   "started": "2026-10-13T03:15:54Z"
   }
  ]
 }

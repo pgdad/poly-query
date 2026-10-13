@@ -15,7 +15,7 @@ story is how it got there, and why we can trust the answer.
 |---|---|
 | **Symbol** | **The polygon.** Eight corners are eight independently built database engines. The middle is the one specification and test suite they all answer to. The name says the same thing: *Poly*-gon, *Poly*-glot, *PolyQuery*. |
 | **Slogan** | **One spec. Eight languages. One answer.** |
-| **Surprise** | **An AI wrote a complete SQL database in raw assembly language, and it beat Java.** On the same 1-million-row benchmark, on the same machine, the x86-64 assembly engine answers in 2.85 ms against Java's 3.41 ms, using half the memory. Both assembly engines together cost $310. |
+| **Surprise** | **An AI wrote a complete SQL database in raw assembly language, and it beat Java.** On the same 1-million-row benchmark, on the same machine, the x86-64 assembly engine answers in 2.85 ms against Java's 3.41 ms, using half the memory. Both assembly engines together cost $332, every later change included. |
 | **Salient point** | **It started with a spec, not with code.** Language-agnostic tests checked every implementation against the same expected answers, so eight engines could be verified against each other. |
 | **Story** | **How it was made:** one weekend, one conductor, up to twelve AI agents at a time, a subscription that never went into overage. Read on. |
 
@@ -88,8 +88,8 @@ hidden** tests.
   run waits for the window to roll forward. On Saturday six runs waited 35–95
   minutes this way.
 * A watchdog stops a running agent at 95 %, or instantly on any paid overage.
-* Usage peaked at 89 % of the 5-hour window and 62 % of the weekly window.
-  All 108 sessions saw "allowed": no rejections, no overage.
+* Usage peaked at 89 % of the 5-hour window and 69 % of the weekly window.
+  All 116 sessions saw "allowed": no rejections, no overage.
 
 **Step 6: change it, like real software.** On Sunday the agents got the jobs
 that come after version 1:
@@ -108,9 +108,9 @@ that come after version 1:
 * Each engine got two independent AI code reviews.
 * Black-box probes then tested what the reviewers suspected.
 
-**The bill.** 108 agent sessions and 75 agent-hours. That is **\$1,256 at API
+**The bill.** 116 agent sessions and 85 agent-hours. That is **\$1,375 at API
 list prices**, run on a Claude subscription. A complete, tested engine with
-all its later changes came to about **\$120–180 per language**.
+all its later changes came to about **\$130–185 per language**.
 
 ![Cost per engine](charts/cost.svg)
 
@@ -141,15 +141,16 @@ evidence.
     and the agents implemented it in every engine.
 * **The opening hook, in numbers.** The AI-written x86-64 assembly engine
   answers in 2.85 ms against Java's 3.41 ms, at 1,612 MiB peak memory against
-  3,219 MiB. Both assembly engines together cost \$310.
+  3,219 MiB. Both assembly engines together cost \$332, every later change included.
 * **Eight engines in one weekend, for the price of a laptop.** Six engines
-  went through all five phases in under 10 hours. Everything cost \$1,256 at
+  went through all five phases in under 10 hours. Everything cost \$1,375 at
   API list prices.
-* **75 hours of AI work, zero overage.** A usage gate paused work instead of
+* **85 hours of AI work, zero overage.** A usage gate paused work instead of
   raising the bill.
 * **The AI auditors caught real bugs.** Independent AI code reviews flagged
-  suspected defects; black-box probes confirmed some and cleared others.
-  Everything is published, failures included.
+  suspected defects; black-box probes confirmed some and cleared others. One
+  more parallel round of agent runs then fixed every confirmed defect, on the
+  first try in all eight engines. Everything is published, failures included.
 * **Next: twin implementations for the numbers that matter.** The same recipe
   applies to pricing, billing or interest calculations, with two independent
   implementations checking each other on every input.
@@ -176,7 +177,7 @@ evidence.
   * the orchestrator (waves, sandboxes, usage gate, watchdog, validation);
   * the test harness;
   * the reporting dashboard.
-* **Open evidence:** every one of the 108 agent sessions is recorded, with its
+* **Open evidence:** every one of the 116 agent sessions is recorded, with its
   transcript, cost, time and outcome, failures included. Live dashboard:
   <https://pgdad.github.io/poly-query/>. Code and data:
   <https://github.com/pgdad/poly-query>.
@@ -189,7 +190,7 @@ evidence.
 * **The conductor** (one Claude Code session) wrote the spec, the tests and
   the tooling. It ran the waves, refereed, and wrote the reports, and it never
   touched engine code.
-* **The agents** (108 Claude sessions) wrote about 193,000 lines across eight
+* **The agents** (116 Claude sessions) wrote about 198,000 lines across eight
   engines and the assembly kernels.
 * **Two hands-on interventions** in the whole project, both logged.
 
