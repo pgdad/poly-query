@@ -9,6 +9,8 @@
 #include "pq.inc"
 
 #define ARENA_CHUNK   (256*1024)       // default chunk payload size
+#define ARENA_MIN_CHUNK (32*1024)      // first chunk of an arena (CR-6: many
+                                       // small task arenas in deep queries)
 #define ERRMSG_MAX    1024
 
 // ------------------------------------------------------------------ data -----
@@ -299,14 +301,22 @@ FUNC arena_alloc_in
     str  x4, [x0, #AR_CUR]
     mov  x0, x2
     ret
-1:  // slow path: new chunk of max(size, ARENA_CHUNK) + 16 header bytes
+1:  // slow path: new chunk of max(size, the arena's total clamped to
+    // [ARENA_MIN_CHUNK, ARENA_CHUNK]) + 16 header bytes: chunk sizes double
+    // from ARENA_MIN_CHUNK up to ARENA_CHUNK
     stp  x29, x30, [sp, #-48]!
     mov  x29, sp
     stp  x19, x20, [sp, #16]
     stp  x21, x22, [sp, #32]
     mov  x19, x0
     mov  x20, x1
-    mov  x21, #ARENA_CHUNK
+    ldr  x21, [x0, #AR_TOTAL]
+    mov  x9, #ARENA_MIN_CHUNK
+    cmp  x21, x9
+    csel x21, x21, x9, hi
+    mov  x9, #ARENA_CHUNK
+    cmp  x21, x9
+    csel x21, x21, x9, lo
     cmp  x1, x21
     csel x21, x1, x21, hi
     add  x21, x21, #16                  // chunk bytes incl. header
