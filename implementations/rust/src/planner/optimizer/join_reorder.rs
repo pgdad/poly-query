@@ -32,6 +32,38 @@ impl Rule for JoinReorder {
     }
 }
 
+/// Inner-join trees with more inputs than this keep their shape (the
+/// binder builds long ones balanced, see `binder::joins`); only their
+/// subtrees are reordered.
+const MAX_REORDERED_INPUTS: usize = 64;
+
+/// Number of inputs of the inner-join tree rooted at `plan`, counting at
+/// most up to `limit + 1`.
+fn inner_join_inputs(plan: &LogicalPlan, limit: usize) -> usize {
+    let mut count = 0;
+    let mut stack = vec![plan];
+    while let Some(p) = stack.pop() {
+        match p {
+            LogicalPlan::Join {
+                left,
+                right,
+                join_type: JoinType::Inner | JoinType::Cross,
+                ..
+            } => {
+                stack.push(right);
+                stack.push(left);
+            }
+            _ => {
+                count += 1;
+                if count > limit {
+                    break;
+                }
+            }
+        }
+    }
+    count
+}
+
 /// Reorders every inner-join chain of `plan` (bottom-up).
 fn reorder_joins(plan: LogicalPlan) -> LogicalPlan {
     let b = |p: Box<LogicalPlan>| Box::new(reorder_joins(*p));
@@ -39,7 +71,9 @@ fn reorder_joins(plan: LogicalPlan) -> LogicalPlan {
         LogicalPlan::Join {
             join_type: JoinType::Inner | JoinType::Cross,
             ..
-        } => reorder_chain(plan),
+        } if inner_join_inputs(&plan, MAX_REORDERED_INPUTS) <= MAX_REORDERED_INPUTS => {
+            reorder_chain(plan)
+        }
         LogicalPlan::Join {
             left,
             right,

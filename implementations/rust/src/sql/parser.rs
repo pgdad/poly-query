@@ -19,6 +19,7 @@ pub fn parse_statement(sql: &str) -> Result<Statement> {
         depth: 0,
         peak: 0,
         operands: 0,
+        tables: 0,
     };
     let stmt = p.statement()?;
     p.eat_symbol(Symbol::Semicolon);
@@ -37,6 +38,8 @@ struct Parser {
     peak: usize,
     /// Operands (literals, column references, `*`) seen so far.
     operands: usize,
+    /// FROM items (tables, CTE references, derived tables) seen so far.
+    tables: usize,
 }
 
 impl Parser {
@@ -175,6 +178,12 @@ impl Parser {
     /// Ends the subtree started by [`Parser::begin_operand`].
     fn end_operand(&mut self, outer_peak: usize) {
         self.peak = self.peak.max(outer_peak);
+    }
+
+    /// Counts one FROM item.
+    fn table(&mut self) -> Result<()> {
+        self.tables += 1;
+        limits::check_table_references(self.tables)
     }
 
     /// Counts one operand (literal, column reference or `*` argument).
@@ -470,6 +479,7 @@ impl Parser {
     fn table_ref(&mut self) -> Result<FromItem> {
         if self.eat_symbol(Symbol::LParen) {
             if self.is_keyword(Keyword::SELECT) || self.is_keyword(Keyword::WITH) {
+                self.table()?;
                 let query = Box::new(self.subquery()?);
                 self.expect_symbol(Symbol::RParen)?;
                 self.eat_keyword(Keyword::AS);
@@ -483,6 +493,7 @@ impl Parser {
             self.expect_symbol(Symbol::RParen)?;
             return Ok(inner);
         }
+        self.table()?;
         let name = self.ident()?;
         let alias = self.optional_alias()?;
         Ok(FromItem::Table { name, alias })
@@ -1101,6 +1112,7 @@ mod tests {
             depth: 0,
             peak: 0,
             operands: 0,
+            tables: 0,
         };
         p.statement().unwrap();
         p.peak

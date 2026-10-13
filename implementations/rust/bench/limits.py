@@ -147,6 +147,12 @@ def beyond_cases() -> list:
         ("join_chain_300", "SELECT count(*) FROM n t0 " + " ".join(f"JOIN n t{i} ON t{i - 1}.x = t{i}.x"
                                                                   for i in range(1, 300)), 100),
         ("text_10mib", where(f"'{big}' = '{big}'"), 100),
+        ("left_join_chain_12000", "SELECT count(*) FROM n t0 " + " ".join(
+            f"LEFT JOIN n t{i} ON t{i - 1}.x = t{i}.x" for i in range(1, 12000)), 100),
+        ("cte_doubling_30", "WITH c0 AS (SELECT x FROM n), " + ", ".join(
+            f"c{i} AS (SELECT a.x FROM c{i - 1} a, c{i - 1} b WHERE a.x = b.x)" for i in range(1, 30))
+         + " SELECT count(*) FROM c29", 100),
+        ("comma_100000", "SELECT count(*) FROM " + ", ".join(f"n t{i}" for i in range(100_000)), None),
         ("select_list_100000", "SELECT " + ", ".join("x" for _ in range(100_000)) + " FROM n LIMIT 1", 0),
     ]
 
@@ -189,6 +195,21 @@ def edge_cases() -> list:
             f"c{i} AS (SELECT x FROM c{i - 1})" for i in range(1, 20000)) + " SELECT count(*) FROM c19999", 100),
         ("select_list_99999", "SELECT " + ", ".join("x" for _ in range(99_998)) + " FROM n LIMIT 1", 0),
         ("text_16mib", where("'" + "a" * 8_300_000 + "' = '" + "a" * 8_300_000 + "'"), 100),
+        ("join_chain_12000", "SELECT count(*) FROM n t0 " + " ".join(f"JOIN n t{i} ON t{i - 1}.x = t{i}.x"
+                                                                    for i in range(1, 12000)), 100),
+        ("cross_chain_20000", "SELECT count(*) FROM (SELECT * FROM n LIMIT 1) t0, "
+         + ", ".join(f"(SELECT 1 AS y) t{i}" for i in range(1, 20000)), 1),
+        ("comma_where_5000", "SELECT count(*) FROM " + ", ".join(f"n t{i}" for i in range(5000)) + " WHERE "
+         + " AND ".join(f"t{i - 1}.x = t{i}.x" for i in range(1, 5000)), 100),
+        ("left_join_chain_3000", "SELECT count(*) FROM n t0 " + " ".join(
+            f"LEFT JOIN n t{i} ON t{i - 1}.x = t{i}.x" for i in range(1, 3000)), 100),
+        ("mixed_join_chain_6000", "SELECT count(*) FROM n t0 " + " ".join(
+            (f"LEFT JOIN n t{i} ON t{i - 1}.x = t{i}.x" if i % 100 == 0 else f"JOIN n t{i} ON t{i - 1}.x = t{i}.x")
+            for i in range(1, 6000)), 100),
+        ("cte_star_chain_20000", "WITH c0 AS (SELECT * FROM n), " + ", ".join(
+            f"c{i} AS (SELECT * FROM c{i - 1})" for i in range(1, 20000)) + " SELECT count(*) FROM c19999", 100),
+        ("union_star_20000", "SELECT count(*) FROM (" + " UNION ALL ".join("SELECT * FROM n" for _ in range(20_000))
+         + ") t", 2_000_000),
         ("aggs_25000", "SELECT " + ", ".join(f"sum(x + {i})" for i in range(25_000)) + " FROM n", 4950),
         ("aggs_same_25000", "SELECT " + ", ".join("sum(x)" for _ in range(25_000)) + " FROM n", 4950),
         ("group_by_20000", "SELECT count(*) FROM (SELECT x FROM n GROUP BY x, "

@@ -4,6 +4,7 @@
 //! * [`scope`]     — range variables, CTE environments, correlation
 //! * [`exprs`]     — expression binding and typing
 //! * [`functions`] — scalar and aggregate function signatures
+//! * [`joins`]     — join chains (balanced trees for long ones)
 //!
 //! This module binds whole queries: WITH, FROM (joins, derived tables),
 //! WHERE, GROUP BY / HAVING (with the grouping rule of semantics.md §5),
@@ -13,18 +14,19 @@
 
 mod exprs;
 mod functions;
+mod joins;
 mod scope;
 
 use std::cell::Cell;
 use std::collections::HashMap;
 
 use super::expr::{AggregateCall, Expr};
-use super::logical::{JoinType, LogicalPlan, SortKey};
+use super::logical::{LogicalPlan, SortKey};
 use crate::catalog::Catalog;
 use crate::error::{Error, Result};
 use crate::exec::eval::eval_constant;
 use crate::planner::typing::{coerce, common_type};
-use crate::sql::ast::{self, ExprKind, FromItem, JoinKind, Literal, SelectItem};
+use crate::sql::ast::{self, ExprKind, FromItem, Literal, SelectItem};
 use crate::sql::lexer::Pos;
 use crate::storage::Field;
 use crate::types::{DataType, Value};
@@ -44,6 +46,7 @@ pub fn plan_query(q: &ast::Query, ctx: &BindContext<'_>) -> Result<LogicalPlan> 
     let binder = Binder {
         ctx,
         next_subquery: Cell::new(0),
+        plan_units: Cell::new(0),
     };
     binder.query(q, None, &CteEnv::default())
 }
@@ -62,6 +65,9 @@ pub(super) enum AggMode<'m> {
 pub(super) struct Binder<'a> {
     ctx: &'a BindContext<'a>,
     next_subquery: Cell<usize>,
+    /// Plan size (`LogicalPlan::size` units) added by expanding CTE
+    /// references and building joins.
+    plan_units: Cell<usize>,
 }
 
 /// One output column of a SELECT list.
@@ -197,13 +203,58 @@ fn rewrite_grouped(e: &mut Expr, groups: &[Expr]) -> Result<()> {
 }
 
 /// Positive integer literal text (`ORDER BY 2`, `GROUP BY 1`).
-/// Counts the base-table / CTE references in the FROM clauses of `q` and
-/// of every query nested in it, by ASCII-lowercased name. The count of a
-/// CTE's name bounds the number of references that resolve to it.
-fn count_table_refs(q: &ast::Query, counts: &mut HashMap<String, usize>) -> Result<()> {
+/// Counts the table / CTE references in the FROM clauses of `q` and of
+/// every query nested in it, by ASCII-lowercased name, except references
+/// to names defined by a nested `WITH` where they are visible (`shadowed`,
+/// with multiplicities). For the CTEs of `q`'s own `WITH` the count bounds
+/// the number of references that resolve to them.
+fn count_table_refs(
+    q: &ast::Query,
+    counts: &mut HashMap<String, usize>,
+    shadowed: &mut HashMap<String, usize>,
+) -> Result<()> {
+    count_refs(q, counts, shadowed, false)
+}
+
+/// [`count_table_refs`]; `nested` tells whether `q`'s own CTE names shadow
+/// (they do for queries nested in the one whose CTEs are counted).
+fn count_refs(
+    q: &ast::Query,
+    counts: &mut HashMap<String, usize>,
+    shadowed: &mut HashMap<String, usize>,
+    nested: bool,
+) -> Result<()> {
     crate::stack::check()?;
+    let mut defined = Vec::new();
+    let result = count_query_refs(q, counts, shadowed, nested, &mut defined);
+    for name in defined {
+        if let Some(n) = shadowed.get_mut(&name) {
+            *n -= 1;
+            if *n == 0 {
+                shadowed.remove(&name);
+            }
+        }
+    }
+    result
+}
+
+/// [`count_refs`] for one query; the CTE names it adds to `shadowed` are
+/// recorded in `defined` (and removed again by the caller).
+fn count_query_refs(
+    q: &ast::Query,
+    counts: &mut HashMap<String, usize>,
+    shadowed: &mut HashMap<String, usize>,
+    nested: bool,
+    defined: &mut Vec<String>,
+) -> Result<()> {
     for cte in &q.with {
-        count_table_refs(&cte.query, counts)?;
+        // A CTE's body sees the earlier CTEs of its WITH, not itself.
+        count_refs(&cte.query, counts, shadowed, true)?;
+        if nested {
+            let name = cte.name.value.to_ascii_lowercase();
+            *shadowed.entry(name.clone()).or_default() += 1;
+            defined.push(name);
+        }
     }
     let mut exprs: Vec<&ast::Expr> = Vec::new();
     for core in q.branches() {
@@ -213,7 +264,7 @@ fn count_table_refs(q: &ast::Query, counts: &mut HashMap<String, usize>) -> Resu
             }
         }
         if let Some(from) = &core.from {
-            count_from_refs(from, counts, &mut exprs)?;
+            count_from_refs(from, counts, shadowed, &mut exprs)?;
         }
         exprs.extend(&core.where_clause);
         exprs.extend(&core.group_by);
@@ -227,8 +278,10 @@ fn count_table_refs(q: &ast::Query, counts: &mut HashMap<String, usize>) -> Resu
     while let Some(e) = exprs.pop() {
         crate::interrupt::poll()?;
         match &e.kind {
-            ExprKind::Subquery(sub) | ExprKind::Exists(sub) => count_table_refs(sub, counts)?,
-            ExprKind::InSubquery { query, .. } => count_table_refs(query, counts)?,
+            ExprKind::Subquery(sub) | ExprKind::Exists(sub) => {
+                count_refs(sub, counts, shadowed, true)?
+            }
+            ExprKind::InSubquery { query, .. } => count_refs(query, counts, shadowed, true)?,
             _ => {}
         }
         exprs.extend(exprs::ast_children(e));
@@ -239,22 +292,30 @@ fn count_table_refs(q: &ast::Query, counts: &mut HashMap<String, usize>) -> Resu
 fn count_from_refs<'q>(
     item: &'q FromItem,
     counts: &mut HashMap<String, usize>,
+    shadowed: &mut HashMap<String, usize>,
     exprs: &mut Vec<&'q ast::Expr>,
 ) -> Result<()> {
-    match item {
-        FromItem::Table { name, .. } => {
-            *counts.entry(name.value.to_ascii_lowercase()).or_default() += 1;
-        }
-        FromItem::Derived { query, .. } => count_table_refs(query, counts)?,
-        FromItem::Join {
-            left, right, on, ..
-        } => {
-            count_from_refs(left, counts, exprs)?;
-            count_from_refs(right, counts, exprs)?;
-            exprs.extend(on);
+    // Join chains are left-deep: walk the left spine iteratively.
+    let mut item = item;
+    loop {
+        match item {
+            FromItem::Table { name, .. } => {
+                let key = name.value.to_ascii_lowercase();
+                if !shadowed.contains_key(&key) {
+                    *counts.entry(key).or_default() += 1;
+                }
+                return Ok(());
+            }
+            FromItem::Derived { query, .. } => return count_refs(query, counts, shadowed, true),
+            FromItem::Join {
+                left, right, on, ..
+            } => {
+                count_from_refs(right, counts, shadowed, exprs)?;
+                exprs.extend(on);
+                item = left;
+            }
         }
     }
-    Ok(())
 }
 
 fn ordinal(e: &ast::Expr) -> Option<&str> {
@@ -267,6 +328,13 @@ fn ordinal(e: &ast::Expr) -> Option<&str> {
 }
 
 impl Binder<'_> {
+    /// Accounts `units` of plan size (see `sql::limits::MAX_PLAN_SIZE`).
+    fn grow_plan(&self, units: usize) -> Result<()> {
+        let total = self.plan_units.get().saturating_add(units);
+        self.plan_units.set(total);
+        crate::sql::limits::check_plan_size(total)
+    }
+
     fn next_subquery_id(&self) -> usize {
         let id = self.next_subquery.get();
         self.next_subquery.set(id + 1);
@@ -288,7 +356,7 @@ impl Binder<'_> {
         }
         let mut local = CteEnv::new(Some(env));
         let mut uses = HashMap::new();
-        count_table_refs(q, &mut uses)?;
+        count_table_refs(q, &mut uses, &mut HashMap::new())?;
         for cte in &q.with {
             if local.defines(&cte.name.value) {
                 return Err(cte.name.pos.error(Error::semantic(format!(
@@ -478,7 +546,9 @@ impl Binder<'_> {
                             "a correlated CTE referenced from a nested subquery is not supported",
                         )));
                     }
-                    let plan = def.instantiate().map_err(|e| name.pos.error(e))?;
+                    let plan = def
+                        .instantiate(|size| self.grow_plan(size))
+                        .map_err(|e| name.pos.error(e))?;
                     return Ok((plan, Scope::single(var, def.fields.clone())));
                 }
                 let table = self.ctx.catalog.get(&name.value).ok_or_else(|| {
@@ -498,37 +568,7 @@ impl Binder<'_> {
                 let fields = plan.schema().to_vec();
                 Ok((plan, Scope::single(&alias.value, fields)))
             }
-            FromItem::Join {
-                left,
-                right,
-                kind,
-                on,
-                pos,
-            } => {
-                let (lp, ls) = self.bind_from(left, corr, env)?;
-                let (rp, rs) = self.bind_from(right, corr, env)?;
-                let scope = Scope::merge(ls, rs).map_err(|e| pos.error(e))?;
-                let on = match on {
-                    Some(cond) => {
-                        let sc = ExprScope {
-                            scope: &scope,
-                            corr,
-                            env,
-                        };
-                        let bound = self.expr(cond, &sc, &mut AggMode::Forbidden("ON"))?;
-                        crate::planner::typing::check_boolean(bound.data_type(), "ON condition")
-                            .map_err(|e| cond.pos.error(e))?;
-                        Some(bound)
-                    }
-                    None => None,
-                };
-                let join_type = match kind {
-                    JoinKind::Inner => JoinType::Inner,
-                    JoinKind::Left => JoinType::Left,
-                    JoinKind::Cross => JoinType::Cross,
-                };
-                Ok((LogicalPlan::join(lp, rp, join_type, on), scope))
-            }
+            FromItem::Join { .. } => self.bind_join_chain(item, corr, env),
         }
     }
 

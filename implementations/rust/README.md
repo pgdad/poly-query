@@ -11,7 +11,11 @@ and change request **CR-2 `DECIMAL` precision 38**
 [Change CR-2](#change-cr-2-decimal-precision-38)),
 restructured by the refactoring **CR-3 logical/physical plan separation**
 (`spec/changes/refactor-plan-separation.md`, see
-[Change CR-3](#change-cr-3-logicalphysical-plan-separation)).
+[Change CR-3](#change-cr-3-logicalphysical-plan-separation)),
+plus change request **CR-6 expression size limits**
+(`spec/changes/expression-limits.md`, see
+[Change CR-6](#change-cr-6-expression-size-limits); the engine's limits are
+listed [there](#limits)).
 The analytics benchmark workload was then optimized for latency (7.8×
 lower total, up to 16× per query; see
 [Latency optimization](#latency-optimization-analytics-workload)).
@@ -22,7 +26,7 @@ Capabilities claimed:
 `storage.pqcf`, `storage.mmap`, `index.hash`, `index.btree`, `phase4`,
 `http.streaming`, `phase5`, `exec.row`, `exec.vectorized`, `exec.parallel`,
 `join.hash`, `join.merge`, `join.nested_loop`, `native.kernels`,
-`change.union_all`, `change.decimal38`.
+`change.union_all`, `change.decimal38`, `change.expression_limits`.
 
 ## Build and run
 
@@ -68,7 +72,7 @@ Layers, bottom-up:
 | `storage` | immutable tables in row layout, column layout (typed vectors + validity bitmap, dictionary-encoded STRING) or PQCF-file-backed (lazily decoded row groups); `stats` (per-column statistics), `index` (hash and ordered indexes), `pqcf` (CRC-32, mmap, reader, writer) |
 | `catalog` | case-insensitive table map of `Arc<Table>` (queries hold snapshots) |
 | `ingest` | CSV (RFC 4180 + spec rules), JSON array and JSON Lines readers, type inference, explicit schemas |
-| `sql` | lexer (positions for `PARSE_ERROR` details), AST, recursive-descent parser for the **full** v1 grammar |
+| `sql` | lexer (positions for `PARSE_ERROR` details), AST, recursive-descent parser for the **full** v1 grammar; `limits`: statement size limits (CR-6) |
 | `planner::binder` | semantic analysis: name resolution (`scope`: range variables, CTE environments, correlation), expression typing (`exprs`), function signatures (`functions`), the grouping rule, ORDER BY/GROUP BY ordinal and alias resolution; produces a `LogicalPlan` of bound, typed `Expr`s |
 | `planner::typing` | numeric promotion, comparability, common types (CASE/COALESCE) |
 | `planner::logical` | logical algebra: Scan, Filter, Project, Aggregate, Join (INNER/LEFT/CROSS), Distinct, Sort, Limit, UnionAll; subqueries are expressions owning a logical plan; `Display` prints the plan tree |
@@ -88,6 +92,8 @@ Layers, bottom-up:
 | `protocol` | request validation, response building, `session` (JSON lines) and `exec` modes |
 | `server` | `serve`: HTTP/1.1 (`http`), routing (`conn`), admission control (`admission`), query registry (`registry`), query threads and NDJSON streaming (`query`), Prometheus metrics (`metrics`), SIGTERM/SIGINT (`signal`) |
 | `cli` | argument parsing (unknown options ⇒ exit 2) |
+| `stack` | threads with large, guarded stacks: recursion fails with `RESOURCE_LIMIT` instead of overflowing (CR-6) |
+| `interrupt` | the statement's deadline / cancellation while it is parsed, bound and planned (CR-6) |
 | `alloc` | global allocator: the system allocator with an arena-local `realloc` (see [Latency optimization](#latency-optimization-analytics-workload)) |
 
 Processing of a statement: `lex → parse (AST) → bind/type (LogicalPlan) →
@@ -178,10 +184,11 @@ in (no LATERAL).
 * **Hash keys** of joins and IN-subquery sets are normalized to the
   comparison domain (INT64 vs DECIMAL ⇒ decimal, any FLOAT64 ⇒ float, DATE
   vs TIMESTAMP ⇒ timestamp) so hashing agrees with SQL comparison.
-* **Robustness**: requests are processed on a thread with a 256 MiB stack;
-  the parser limits nesting depth and operator-chain length (10,000) and the
-  JSON parser depth (512);
-  panics are caught and reported as `INTERNAL_ERROR` (logged to stderr).
+* **Robustness**: requests are processed on threads with large guarded
+  stacks; statement sizes are limited as described in
+  [Change CR-6](#change-cr-6-expression-size-limits), the JSON parser depth
+  to 512; panics are caught and reported as `INTERNAL_ERROR` (logged to
+  stderr).
 * **Defaults**: `--max-query-memory-mb 4096`, `--max-ingest-bytes 4 GiB`,
   `--max-table-rows 500,000,000`; memory accounting is approximate and covers
   materializing operators (sort, aggregation state, result rows).
@@ -1192,7 +1199,7 @@ allocator contention) and from dense-key hashing.
   281 → 18 ms for the full string sort (q14), 83 → 11 ms for the
   three-key sort (q15).
 * **Worker thread pool** (`exec/pool.rs`): parallel operators used to
-  start fresh OS threads (64 MB stacks) for every operator and phase,
+  start fresh OS threads (64 MB stacks at the time) for every operator and phase,
   0.2–0.4 ms per query on 16 threads. Workers now come from a process-wide
   pool of parked threads. The pool never queues: if no thread is idle a new
   one is started, so blocked jobs (gather workers waiting for a slow
@@ -1341,6 +1348,187 @@ python3 implementations/rust/bench/workload.py --engine OLD/bin/polyquery \
 python3 implementations/rust/bench/ordercheck.py implementations/rust/bin/polyquery /tmp/pqdata/1m
 ```
 
+## Change CR-6: expression size limits
+
+`spec/changes/expression-limits.md` (capability `change.expression_limits`):
+every statement within 1 MiB of text, nesting depth 1,000 and 25,000
+operands executes in every mode; a statement beyond the engine's limits
+fails with `RESOURCE_LIMIT` naming the measure; running out of stack never
+terminates the process; the timeout covers parsing, binding, planning and
+execution.
+
+### Limits
+
+| measure | engine limit | CR-6 minimum | error message |
+|---|---|---|---|
+| SQL text length | 16 MiB (16,777,216 bytes) | 1 MiB | `statement text length (N bytes) exceeds 16777216 bytes` |
+| nesting depth | 4,096 | 1,000 | `expression nesting depth exceeds 4096` |
+| operand count | 100,000 | 25,000 | `operand count exceeds 100000` |
+| table references | 262,144 | – | `table reference count exceeds 262144` |
+| plan size | 4,000,000 units | – | `statement plan size (expanded CTE references and joins) exceeds 4000000` |
+
+The limits are constants in `src/sql/limits.rs`.
+
+* **Nesting depth** is counted as CR-6 §1 defines it: a parenthesized
+  expression, unary `+`/`-`, `NOT`, a function call, `CAST`, `CASE`,
+  `IN (…)`, `BETWEEN`, `LIKE`, `IS [NOT] NULL`, a comparison, a
+  subquery (scalar, `EXISTS`, `IN`, derived table, CTE) and a parenthesized
+  FROM item add one level each; a chain of binary operators of one
+  precedence level adds one level whatever its length. `x IN (SELECT …)`
+  counts two levels (the `IN` and the subquery); the top-level query none.
+  The depth is computed bottom-up (an operand that turns out to be the
+  first operand of a chain or comparison moves one level down), so
+  `((x + 1) + 1) + 1` has depth 5.
+* **Operands** are literals (including `NULL`, `TRUE`, `DATE '…'`), column
+  references and the `*` of `COUNT(*)`.
+* **Table references** (FROM items: tables, CTE references, derived tables)
+  and **plan size** are not CR-6 measures; they bound statements whose
+  short text describes a huge plan. Every CTE reference is bound as a copy
+  of the CTE's plan, so a few CTEs that each reference the previous one
+  twice describe an exponentially large plan; and every join stores the
+  columns of both inputs, so a chain of *n* LEFT joins (which cannot be
+  reassociated) stores *n²/2* columns. The plan size counts, as the binder
+  builds the plan, the size of every copied CTE plan (plan nodes, their
+  stored columns and expression nodes) and the columns of every join; it
+  is reached by about 2,800 chained LEFT joins and by CTE expansion, never
+  by inner-join chains (see below). Neither limit can be reached by a
+  statement within the CR-6 minimums except by such expansion.
+* All limits are checked while parsing / binding, as soon as they are
+  crossed, so `RESOURCE_LIMIT` is reported in preference to a later
+  `PARSE_ERROR` (CR-6 §3) and a statement far beyond a limit is rejected
+  in milliseconds. In HTTP mode a request larger than
+  `--max-request-bytes` is still answered `413` first.
+* There is no limit on the number of UNION ALL branches, select items,
+  CASE branches, IN-list items or CTEs other than the ones above (and
+  memory and time).
+
+### Stack safety
+
+* **Guarded threads** (`src/stack.rs`): every thread that processes
+  statements is started by `stack::spawn`, which records where its stack
+  ends: session/exec and HTTP query/connection threads (512 MiB stacks)
+  and parallel workers (256 MiB). Only touched pages are committed.
+  Recursive functions (parser, binder, optimizer driver, row and
+  vectorized evaluators, CTE reference counting) call `stack::check()`,
+  which fails with `RESOURCE_LIMIT` ("expression nesting depth exceeds
+  the engine's stack") when less than 8 MiB remain. Within the limits
+  above the guard is never reached (verified at nesting depth 4,000 with
+  every construct, 100,000-operand chains and 250,000-deep CTE chains, in
+  every mode, with parallel workers forced by
+  `POLYQUERY_MORSEL_ROWS=1`); before the change a 100,000-term sum crashed
+  a parallel worker with a stack overflow.
+* **Operator chains** are the only way to build an expression tree deeper
+  than the nesting depth (the parser builds `a + b + c` as a left-deep
+  tree). The parser reads chains in a loop. The row and the vectorized
+  evaluators evaluate chains of 16 or more `AND`/`OR`, arithmetic or `||`
+  links iteratively, link by link with the exact semantics of the
+  recursive evaluation (short-circuiting, error masking of `AND`/`OR`,
+  NULL propagation), so evaluation recursion — in particular in parallel
+  workers — is bounded by the nesting depth. `||` chains append into one
+  buffer instead of copying the growing string at every link.
+* **Join chains** are bound iteratively (`planner/binder/joins.rs`); a run
+  of more than 64 INNER/CROSS joins becomes a balanced join tree (same
+  inputs and column order; each ON conjunct attached to the lowest join
+  covering its tables) instead of a left-deep one, whose schemas would
+  repeat the columns of all tables below every join (12,000 joined tables
+  took 13 GB and 58 s; now 0.6 s). Join reordering keeps the shape of
+  inner-join trees with more than 64 inputs (it reorders their subtrees).
+
+### The timeout covers every stage
+
+* The deadline counts from receipt of the request: when the session line
+  was read, when the HTTP request was read (queue time counts, as
+  before), or when an exec request starts. `QueryControl::deadline` is
+  computed by `Engine::deadline` and passed to `start_query` / `explain`.
+* While a statement is parsed, bound, optimized and planned, its
+  `Interrupt` (deadline + cancellation flag) is installed for the thread
+  (`src/interrupt.rs`). The lexer (per token), parser (per operand), binder
+  (per expression and query), CTE reference counting and the optimizer
+  (between rules and subquery plans) poll it, and it is checked between
+  the stages. `poll` reads the clock every 256th call.
+* Execution observes the deadline through the `ExecContext` as before;
+  long operator chains additionally check it every 4,096 links (row
+  mode) / 64 links (vectorized, per batch). A result completed after the
+  deadline is reported as `TIMEOUT`.
+* Every stage is now (near) linear in the statement size, so even
+  statements at the engine's limits answer within a fraction of a second
+  of the deadline (measured: at most 0.5 s late with `timeout_ms` 200 and
+  500, on 100 and 200,000 rows, for every case of `bench/limits.py`).
+  The `explain` op observes `timeout_ms` too.
+
+### Superlinear work removed
+
+| statement (100-row table) | before | after |
+|---|---|---|
+| 10,000-term `OR` / `AND` / sum | `PARSE_ERROR` (chain length limit) | 0.01–0.05 s |
+| 100,000 nested parentheses / 100,000-term `OR` | `PARSE_ERROR` | `RESOURCE_LIMIT` in 0.01–0.05 s |
+| 99,998-item `IN` list | 9–19 s (quadratic de-duplication in access-path analysis) | 0.09 s |
+| 10,000-term `\|\|` chain, vectorized | 0.5–108 s (deep copy of the subtree per node for the element-wise template) | 0.05 s |
+| chain of 20,000 CTEs | 84 s, `TIMEOUT` 8 s late (every reference cloned the CTE's plan) | 0.09 s |
+| 2,000 / 12,000 joined tables | 3.3 s / 58 s | 0.1 s / 0.6 s |
+| 20,000 cross-joined derived tables | 18 s | 0.1 s |
+
+* Element-wise vectorized evaluation builds a shallow template
+  (`Expr::template`) instead of cloning the node's subtree.
+* Access-path analysis deduplicates `IN` values with a hash set.
+* The binder looks CTEs up by hash, moves a CTE's plan into its last
+  reference (references are counted by name in the query text, an upper
+  bound that respects shadowing by nested `WITH`s) instead of cloning it,
+  and resolves range variables and columns through hash indexes.
+* Join reordering re-estimates only the frontier of the greedy order and
+  attaches conjuncts by the step at which they become available (was
+  cubic).
+* Found on the way: a parallel global aggregation (no `GROUP BY`) over
+  tiny morsels returned one row per partition; it is merged serially now.
+
+### Modules touched
+
+* new: `src/sql/limits.rs`, `src/stack.rs`, `src/interrupt.rs`,
+  `src/planner/binder/joins.rs`, `bench/limits.py`
+* `sql/parser.rs` (depth/operand/table counting, iterative chains),
+  `sql/lexer.rs` (poll)
+* `engine.rs` (deadline from receipt, interrupt installation, stage
+  checks, final check), `protocol/{mod,session}.rs`,
+  `server/{conn,query,mod}.rs`, `main.rs`, `exec/pool.rs` (guarded
+  threads)
+* `planner/binder/{mod,scope,exprs}.rs`, `planner/optimizer/{mod,join_reorder}.rs`,
+  `planner/access.rs`, `planner/expr.rs` (`template`), `planner/logical.rs`
+  (`size`)
+* `exec/eval.rs`, `exec/vector/eval.rs` (iterative chains),
+  `exec/parallel.rs` (global aggregation fix)
+
+### Decisions
+
+* `spec_version` stays `1.0.0`: the public conformance case
+  `phase1/catalog.pqt` expects it (as for CR-1 and CR-2).
+* Limits well above the minimums (4× depth, 4× operands, 16× text), with
+  the stacks dimensioned for them, rather than "no limit": recursion over
+  expression trees is the engine's natural structure, and a bounded,
+  documented limit with an early `RESOURCE_LIMIT` is cheaper than making
+  every pass iterative.
+* The interrupt is ambient (thread-local) during parsing and planning
+  instead of a parameter of every planner function; it is installed and
+  removed by `start_query` / `explain` only.
+
+### Verification
+
+* `tests/regression/robustness_probe.py --only expression_limits
+  --require-pass`: pass (all minimum cases in row, vectorized, parallel and
+  auto mode; beyond cases answer `RESOURCE_LIMIT` in < 0.1 s).
+* `bench/limits.py` (`--groups min,edge,beyond,timeout`, also with
+  `POLYQUERY_MORSEL_ROWS=1` and `--rows 200000`): ~120 statements at and
+  beyond the minimums and at the engine's limits built from every
+  construct (nested parentheses, functions, unary operators, `NOT`, `CAST`,
+  `CASE`, comparisons, `BETWEEN`/`LIKE`/`IN`, scalar/`EXISTS`/`IN`
+  subqueries, derived tables, nested and chained CTEs, operator chains in
+  every clause, `IN` lists, `CASE` branches, `COALESCE`/`CONCAT` arguments,
+  wide select lists, `GROUP BY`/`ORDER BY` lists, aggregates, join chains,
+  `UNION ALL`, 1–16 MiB texts, comments, whitespace) in every mode.
+* Conformance suite (default, `--modes`, `--transport http`), the HTTP
+  concurrency suite and `make test` (including new unit tests for the
+  depth rules, limits, the stack guard, the interrupt and balanced join
+  trees).
+
 ## Known limitations
 
 * The HTTP server uses a thread per connection and per running query
@@ -1360,3 +1548,10 @@ python3 implementations/rust/bench/ordercheck.py implementations/rust/bin/polyqu
   (memoized), i.e. nested-loop cost.
 * Filters are pushed through projections only for conjuncts over
   pass-through columns (not through aggregations, DISTINCT or LIMIT).
+* CR-6: statements are limited as listed in [Limits](#limits). A chain of
+  more than about 2,800 LEFT joins, or CTE references whose copies exceed
+  the plan size limit, fail with `RESOURCE_LIMIT` even though such a
+  statement can be within the CR-6 minimums (CTEs are bound by copying,
+  not materialized). Binding repeated aggregates and matching ORDER BY
+  items against the select list compare expressions pairwise (about 2 s
+  for 25,000 distinct aggregates; the deadline is observed).
