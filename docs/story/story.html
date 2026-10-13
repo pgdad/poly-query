@@ -396,8 +396,9 @@ and even in production shadow mode.</li>
 <h2 id="what-didnt-go-perfectly-because-it-never-does">What didn't go
 perfectly (because it never does)</h2>
 <ul>
-<li>Go's "make it faster" task ran out of time twice. Its unmerged work
-is 1.74× faster but is parked for a decision.</li>
+<li>Go's "make it faster" task ran out of time twice. On the third try,
+this time with the real benchmark queries in hand, it finished: 2.63×
+faster.</li>
 <li>The ARM assembly engine's optimization made it 1.82× faster overall,
 but one query got 8× <em>slower</em>. Benchmarks keep everyone
 honest.</li>

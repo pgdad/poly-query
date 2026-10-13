@@ -267,8 +267,8 @@ Two practical notes:
 
 ## What didn't go perfectly (because it never does)
 
-* Go's "make it faster" task ran out of time twice. Its unmerged work is
-  1.74× faster but is parked for a decision.
+* Go's "make it faster" task ran out of time twice. On the third try,
+  this time with the real benchmark queries in hand, it finished: 2.63× faster.
 * The ARM assembly engine's optimization made it 1.82× faster overall, but one
   query got 8× *slower*. Benchmarks keep everyone honest.
 * One agent finished its work and then just… didn't exit. The orchestrator

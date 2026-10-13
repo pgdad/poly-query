@@ -240,7 +240,7 @@ Per-attempt data (outcome, cost, turns, time, diff size) is in the report-7 tabl
 | CR-6 expression size limits (change; all eight engines) | 8/8 success, first attempt | 9.02–21.52 | 3–12 commits; see the CR-6 section above |
 | debugging (one injected defect each) | 6/6 success | 0.21–0.39 | one-line fixes in 36–87 s: too easy, because the defect report names the failing cases |
 | latency optimization | 5/6 success; Go timed out twice | 10.22–18.61 (successes) | agents optimized self-written stand-in workloads (HI-007); see below |
-| latency optimization, re-run on the real workload (record-only) | 5/6 success; Python tests_failed (HTTP `malformed_chunked_body`, pre-existing) | 10.48–31.19 | not merged; see below |
+| latency optimization, re-run on the real workload (record-only) | 5/6 success; Python tests_failed (HTTP `malformed_chunked_body`, pre-existing) | 10.48–31.19 | merged, replacing the first round (INT-001); Go succeeded on attempt 3; see below |
 
 All merged engines pass 660/660 public cases (746 with hidden) after the chain,
 and the 6 × 6 PQCF interop matrix — now including v2 files with 128-bit decimals —
