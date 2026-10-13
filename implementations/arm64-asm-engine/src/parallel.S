@@ -64,6 +64,8 @@ g_pool_done:    .skip 64            // pthread_cond_t: a job's last task ended
 g_pool_head:    .skip 8             // Job* queue (FIFO)
 g_pool_tail:    .skip 8
 g_pool_threads: .skip 8             // pool threads started
+g_pool_attr:    .skip 64            // pthread_attr_t of pool threads (big stack)
+g_pool_attr_ok: .skip 8             // g_pool_attr initialised (under g_pool_lock)
 
     .data
     .p2align 3
@@ -308,12 +310,26 @@ LFUNC pool_grow
     ldr  x10, [x9]
     cmp  x10, x19
     b.hs 8f
-    mov  x0, sp
-    mov  x1, #0
+    ADR_L x9, g_pool_attr_ok            // pool threads get QUERY_STACK_SIZE stacks
+    ldr  x10, [x9]
+    cbnz x10, 2f
+    mov  x10, #1
+    str  x10, [x9]
+    ADR_L x0, g_pool_attr
+    bl   big_stack_attr
+2:  mov  x0, sp
+    ADR_L x1, g_pool_attr
+    ADR_L x2, pool_main
+    mov  x3, #0
+    bl   pthread_create
+    cbz  w0, 3f
+    mov  x0, sp                         // big stack refused: default stack
+    mov  x1, #0                         // (the guard adapts to its size)
     ADR_L x2, pool_main
     mov  x3, #0
     bl   pthread_create
     cbnz w0, 8f
+3:
     ldr  x0, [sp]
     bl   pthread_detach
     ADR_L x9, g_pool_threads
@@ -394,6 +410,7 @@ ENDF pool_wake
 // =============================================================================
 LFUNC pool_main
     ENTER 2
+    bl   stack_guard_init
     bl   thread_boost
     ADR_L x0, g_pool_lock
     bl   pthread_mutex_lock
@@ -594,6 +611,7 @@ ENDF wk_inline
 //   x19 node, x20 index, x21 count
 // =============================================================================
 FUNC expr_par_safe
+    GUARD_TICK                          // CR-6: recursive
     cbnz x0, 1f
     mov  w0, #1
     ret

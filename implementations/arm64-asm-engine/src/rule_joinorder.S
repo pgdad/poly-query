@@ -30,6 +30,7 @@
 //   x19 node, x20 index
 // =============================================================================
 FUNC rule_reorder_joins
+    GUARD_TICK                          // CR-6: recursive
     cbz  x0, 9f
     ldr  w9, [x0, #LN_OP]
     cmp  w9, #LO_JOIN
@@ -60,6 +61,7 @@ ENDF rule_reorder_joins
 //   x19 node; [sp] inputs Vec, [sp+32] conditions Vec
 // =============================================================================
 LFUNC jo_order
+    GUARD_TICK                          // CR-6: recursive
     ENTER 2
     sub  sp, sp, #64
     mov  x19, x0
@@ -101,6 +103,7 @@ ENDF jo_order
 // conditions of the inner-join region below node
 //   x19 node, x20 inputs, x21 conditions
 LFUNC jo_collect
+    GUARD_TICK                          // CR-6: recursive
     ENTER 3
     mov  x19, x0
     mov  x20, x1

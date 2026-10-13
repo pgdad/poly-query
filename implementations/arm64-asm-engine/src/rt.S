@@ -9,6 +9,8 @@
 #include "pq.inc"
 
 #define ARENA_CHUNK   (256*1024)       // default chunk payload size
+#define ARENA_MIN_CHUNK (32*1024)      // first chunk of an arena (CR-6: many
+                                       // small task arenas in deep queries)
 #define ERRMSG_MAX    1024
 
 // ------------------------------------------------------------------ data -----
@@ -31,6 +33,12 @@ g_arena_limit:   .skip 8       // max bytes in g_arena chunks; 0 = unlimited
 g_err_code:      .skip 4
 g_err_line:      .skip 4
 g_err_col:       .skip 4
+    .p2align 3
+    .global g_stack_limit
+g_stack_limit:   .skip 8       // lowest sp allowed (STACK_GUARD); 0 = unchecked
+    .global g_tick
+g_tick:          .skip 8       // DEADLINE_TICK countdown (u32); must follow
+                               // g_stack_limit (GUARD_TICK, pq.inc)
 
     // process-wide settings (written once by main before any thread starts)
     .bss
@@ -82,6 +90,7 @@ s_oom:      .asciz "out of memory"
 s_qmem:     .asciz "query memory budget exceeded"
 s_timeoutm: .asciz "query timeout exceeded"
 s_cancelm:  .asciz "query cancelled"
+s_stackm:   .asciz "expression nesting depth exceeds the thread stack (statement too complex)"
 fmt_g:      .asciz "%.*g"
     .text
 
@@ -293,14 +302,22 @@ FUNC arena_alloc_in
     str  x4, [x0, #AR_CUR]
     mov  x0, x2
     ret
-1:  // slow path: new chunk of max(size, ARENA_CHUNK) + 16 header bytes
+1:  // slow path: new chunk of max(size, the arena's total clamped to
+    // [ARENA_MIN_CHUNK, ARENA_CHUNK]) + 16 header bytes: chunk sizes double
+    // from ARENA_MIN_CHUNK up to ARENA_CHUNK
     stp  x29, x30, [sp, #-48]!
     mov  x29, sp
     stp  x19, x20, [sp, #16]
     stp  x21, x22, [sp, #32]
     mov  x19, x0
     mov  x20, x1
-    mov  x21, #ARENA_CHUNK
+    ldr  x21, [x0, #AR_TOTAL]
+    mov  x9, #ARENA_MIN_CHUNK
+    cmp  x21, x9
+    csel x21, x21, x9, hi
+    mov  x9, #ARENA_CHUNK
+    cmp  x21, x9
+    csel x21, x21, x9, lo
     cmp  x1, x21
     csel x21, x1, x21, hi
     add  x21, x21, #16                  // chunk bytes incl. header
@@ -856,6 +873,107 @@ FUNC check_deadline
 3:  ldp  x29, x30, [sp], #16
     ret
 ENDF check_deadline
+
+// ------------------------------------------------------- stack guard (CR-6) --
+
+// stack_guard_init() — sets this thread's g_stack_limit to the lowest
+// address of its stack plus STACK_GUARD_MARGIN (pthread_getattr_np; the
+// main thread's stack is reported from RLIMIT_STACK). Called first by every
+// thread that runs request code. Leaves the guard off if the stack is
+// unknown or too small to keep the margin.
+//   stack: pthread_attr_t (64 bytes), [sp+64] addr, [sp+72] size
+FUNC stack_guard_init
+    stp  x29, x30, [sp, #-112]!
+    mov  x29, sp
+    str  x19, [sp, #16]
+    bl   pthread_self
+    add  x1, sp, #32                    // pthread_attr_t at [sp+32]
+    bl   pthread_getattr_np
+    cbnz w0, 9f
+    add  x0, sp, #32
+    add  x1, sp, #96                    // stack address at [sp+96]
+    add  x2, sp, #104                   // stack size at [sp+104]
+    bl   pthread_attr_getstack
+    mov  w19, w0
+    add  x0, sp, #32
+    bl   pthread_attr_destroy
+    cbnz w19, 9f
+    ldp  x9, x10, [sp, #96]
+    ldr  x11, =STACK_GUARD_MARGIN
+    cmp  x10, x11, lsl #1               // at least two margins of stack
+    b.lo 9f
+    add  x9, x9, x11
+    TLS_ADDR x10, g_stack_limit
+    str  x9, [x10]
+9:  ldr  x19, [sp, #16]
+    ldp  x29, x30, [sp], #112
+    ret
+ENDF stack_guard_init
+
+// deadline_tick() — DEADLINE_TICK's slow path: restarts the countdown and
+// calls check_deadline; preserves every register but x16, x17 (x0-x15,
+// x18 and q0-q7 are saved around the call).
+FUNC deadline_tick
+    stp  x29, x30, [sp, #-288]!
+    mov  x29, sp
+    stp  x0, x1, [sp, #16]
+    stp  x2, x3, [sp, #32]
+    stp  x4, x5, [sp, #48]
+    stp  x6, x7, [sp, #64]
+    stp  x8, x9, [sp, #80]
+    stp  x10, x11, [sp, #96]
+    stp  x12, x13, [sp, #112]
+    stp  x14, x15, [sp, #128]
+    str  x18, [sp, #144]
+    stp  q0, q1, [sp, #160]
+    stp  q2, q3, [sp, #192]
+    stp  q4, q5, [sp, #224]
+    stp  q6, q7, [sp, #256]
+    mov  w9, #DEADLINE_TICKS
+    TLS_ADDR x10, g_tick
+    str  w9, [x10]
+    bl   check_deadline
+    ldp  q6, q7, [sp, #256]
+    ldp  q4, q5, [sp, #224]
+    ldp  q2, q3, [sp, #192]
+    ldp  q0, q1, [sp, #160]
+    ldr  x18, [sp, #144]
+    ldp  x14, x15, [sp, #128]
+    ldp  x12, x13, [sp, #112]
+    ldp  x10, x11, [sp, #96]
+    ldp  x8, x9, [sp, #80]
+    ldp  x6, x7, [sp, #64]
+    ldp  x4, x5, [sp, #48]
+    ldp  x2, x3, [sp, #32]
+    ldp  x0, x1, [sp, #16]
+    ldp  x29, x30, [sp], #288
+    ret
+ENDF deadline_tick
+
+// stack_exhausted() — noreturn: raises RESOURCE_LIMIT (STACK_GUARD fired)
+FUNC stack_exhausted
+    mov  w0, #ERR_RESOURCE_LIMIT
+    ADR_L x1, s_stackm
+    b    pq_raise
+ENDF stack_exhausted
+
+// big_stack_attr(x0 pthread_attr_t*) — initialises attr for a thread that
+// runs request code (QUERY_STACK_SIZE stack; the memory is only reserved,
+// pages are committed when touched)
+FUNC big_stack_attr
+    stp  x29, x30, [sp, #-32]!
+    mov  x29, sp
+    str  x19, [sp, #16]
+    mov  x19, x0
+    bl   pthread_attr_init
+    mov  x0, x19
+    ldr  x1, =QUERY_STACK_SIZE
+    bl   pthread_attr_setstacksize
+    ldr  x19, [sp, #16]
+    ldp  x29, x30, [sp], #32
+    ret
+    .ltorg
+ENDF big_stack_attr
 
 // atomic_fetch_add(x0 u64*, x1 delta) -> x0 previous value        (leaf)
 FUNC atomic_fetch_add

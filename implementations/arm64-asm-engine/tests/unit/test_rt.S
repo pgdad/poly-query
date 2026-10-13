@@ -1,4 +1,5 @@
-// Unit tests for rt.S: buffers, number/JSON formatting, string compare, arenas.
+// Unit tests for rt.S: buffers, number/JSON formatting, string compare, arenas,
+// the CR-6 stack guard and deadline ticks.
 #include "pq.inc"
 
     .bss
@@ -174,6 +175,21 @@ FUNC main
     mov  x2, #0
     bl   expect_eq
 
+    // arena chunks start at 32 KiB (+16 header) and grow (CR-6)
+    ADR_L x0, tarena
+    mov  x1, #16
+    bl   arena_alloc_in
+    ADR_L x0, tarena
+    ldr  x1, [x0, #AR_TOTAL]
+    adr  x0, n_chunk
+    mov  x2, #(32 * 1024 + 16)
+    bl   expect_eq
+    ADR_L x0, tarena
+    bl   arena_free
+
+    bl   test_stack_guard
+    bl   test_deadline_tick
+
     ADR_L x0, failures
     ldr  x19, [x0]
     ADR_L x0, fmt_sum
@@ -195,7 +211,90 @@ n_cicmp: .asciz "ci_cmp longer"
 n_bcmp: .asciz "bytes_cmp case"
 n_align: .asciz "arena align"
 n_free: .asciz "arena free"
+n_chunk: .asciz "arena first chunk"
     .p2align 2
 ENDF main
+
+// test_stack_guard: stack_guard_init leaves 0 < limit < sp; with the limit
+// above sp, STACK_GUARD raises RESOURCE_LIMIT through g_jmpbuf
+LFUNC test_stack_guard
+    stp  x29, x30, [sp, #-32]!
+    mov  x29, sp
+    str  x19, [sp, #16]
+    bl   stack_guard_init
+    TLS_LDR x19, g_stack_limit
+    cmp  x19, #0
+    cset x1, ne
+    mov  x9, sp
+    cmp  x19, x9
+    cset x9, lo
+    and  x1, x1, x9
+    adr  x0, n_glimit
+    mov  x2, #1
+    bl   expect_eq
+    TLS_ADDR x0, g_jmpbuf
+    bl   setjmp
+    cbnz w0, 1f
+    mov  x9, sp                         // every sp is now "too deep"
+    add  x9, x9, #4096
+    TLS_ADDR x10, g_stack_limit
+    str  x9, [x10]
+    STACK_GUARD
+    mov  x1, #0                         // not raised
+    b    2f
+1:  TLS_ADDR x9, g_err_code
+    ldr  w1, [x9]
+2:  TLS_ADDR x10, g_stack_limit
+    str  x19, [x10]
+    adr  x0, n_guard
+    mov  x2, #ERR_RESOURCE_LIMIT
+    bl   expect_eq
+    ldr  x19, [sp, #16]
+    ldp  x29, x30, [sp], #32
+    ret
+n_glimit: .asciz "stack limit below sp"
+n_guard:  .asciz "STACK_GUARD raises"
+    .p2align 2
+ENDF test_stack_guard
+
+// test_deadline_tick: with an expired deadline, DEADLINE_TICK raises TIMEOUT
+// within DEADLINE_TICKS executions and preserves the registers it does not
+// document as clobbered
+LFUNC test_deadline_tick
+    stp  x29, x30, [sp, #-32]!
+    mov  x29, sp
+    str  x19, [sp, #16]
+    TLS_ADDR x0, g_jmpbuf
+    bl   setjmp
+    cbnz w0, 1f
+    mov  x9, #1                         // 1 us after the epoch: expired
+    TLS_ADDR x10, g_deadline
+    str  x9, [x10]
+    mov  x19, #0
+    mov  x0, #77
+    mov  x15, #99
+3:  DEADLINE_TICK
+    cmp  x0, #77
+    b.ne 4f
+    cmp  x15, #99
+    b.ne 4f
+    add  x19, x19, #1
+    cmp  x19, #(2 * DEADLINE_TICKS)
+    b.lo 3b
+4:  mov  x1, #0                         // not raised (or registers lost)
+    b    2f
+1:  TLS_ADDR x9, g_err_code
+    ldr  w1, [x9]
+2:  TLS_ADDR x10, g_deadline
+    str  xzr, [x10]
+    adr  x0, n_tick
+    mov  x2, #ERR_TIMEOUT
+    bl   expect_eq
+    ldr  x19, [sp, #16]
+    ldp  x29, x30, [sp], #32
+    ret
+n_tick:   .asciz "DEADLINE_TICK raises TIMEOUT"
+    .p2align 2
+ENDF test_deadline_tick
 
     NOTE_GNU_STACK

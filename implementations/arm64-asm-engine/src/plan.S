@@ -75,6 +75,7 @@ ENDF plan_query
 //   x19 vec, x20 node
 // =============================================================================
 FUNC split_conj
+    GUARD_TICK                          // CR-6: recursive
     ENTER 2
     mov  x19, x0
     mov  x20, x1
@@ -156,6 +157,7 @@ ENDF pvec_push
 //   x19 node, x20 mask, x21 index, x22 count
 // =============================================================================
 FUNC expr_rvmask
+    GUARD_TICK                          // CR-6: recursive
     ENTER 3
     mov  x19, x0
     mov  x20, #0
@@ -208,6 +210,7 @@ ENDF expr_rvmask
 //   x19 buf, x20 node, x21 bq, x22 index / scratch, x23 RV*
 // =============================================================================
 FUNC plan_explain
+    GUARD_TICK                          // CR-6: recursive
     ENTER 4
     mov  x19, x0
     mov  x20, x1
@@ -496,6 +499,7 @@ ENDF plan_explain
 //   x19 buf, x20 node, x21 count, x22 bq, x23 index
 // =============================================================================
 LFUNC pe_subplans
+    GUARD_TICK                          // CR-6: recursive
     ENTER 4
     mov  x19, x0
     mov  x20, x1
@@ -585,6 +589,7 @@ ENDF pe_subplans
 // pe_expr(x0 Buf*, x1 Node* or 0, x2 children written) -> x0 children
 //   x19 buf, x20 node, x21 count, x22 index, x23 child count
 LFUNC pe_expr
+    GUARD_TICK                          // CR-6: recursive
     ENTER 4
     mov  x19, x0
     mov  x20, x1

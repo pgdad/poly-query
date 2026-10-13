@@ -121,6 +121,7 @@ ENDF ot_exec
 //   x19 node, x20 ctx, x21 records, x22 count; [sp] template
 // =============================================================================
 FUNC ex_filter
+    GUARD_TICK                          // CR-6: recursive
     ENTER 3
     sub  sp, sp, #OT_SIZE
     mov  x19, x0
@@ -160,6 +161,7 @@ ENDF ex_filter
 //   x25 vb, x26 selection, x27 batch size
 // =============================================================================
 FUNC filter_task
+    GUARD_TICK                          // CR-6: recursive
     ENTER 5
     mov  x19, x0
     ldr  x20, [x19, #OT_CTX]
@@ -257,6 +259,7 @@ ENDF filter_task
 //   x19 records, x20 count, x21 bq; [sp] template
 // =============================================================================
 FUNC project_rows
+    GUARD_TICK                          // CR-6: recursive
     ENTER 3
     sub  sp, sp, #OT_SIZE
     str  x0, [sp, #OT_NODE]
@@ -321,6 +324,7 @@ ENDF bq_out_par_safe
 //   x25 vector, x26 batch size, x27 column, x28 expression
 // =============================================================================
 FUNC project_task
+    GUARD_TICK                          // CR-6: recursive
     ENTER 5
     mov  x19, x0
     ldr  x20, [x19, #OT_CTX]

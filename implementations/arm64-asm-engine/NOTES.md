@@ -1,5 +1,35 @@
 # Working notes (arm64-asm-engine)
 
+## Status (change CR-6 expression size limits, session 1)
+- Done: `robustness_probe.py --only expression_limits --require-pass` passes;
+  conformance 660/660, `--modes` 3870/3870, `--transport http` 660/660,
+  http_suite 19/19, `make build test lint` pass. Capability
+  `change.expression_limits` claimed. Design + limits: README "Change CR-6".
+- Limits: nesting depth 4096 (parser PS_DEPTH), operands 1,000,000
+  (`p_count_operand` via node_new), 256 MiB stacks for every thread running
+  request code, `GUARD_TICK` (stack guard + deadline tick) in 115 recursive
+  functions. To find recursive functions after adding code: a call-graph
+  SCC script (tokens naming functions inside FUNC..ENDF bodies, incl.
+  `adr`/`b.cond`/tail calls) — every cycle must contain a guarded function.
+- Stress harnesses used (throw-away, /tmp/cr6, not in the repo): ~70
+  constructs (nesting 999 / 4000 / 100k of parens, ABS, NOT, -, CASE, CAST,
+  COALESCE, scalar / EXISTS / IN subqueries, derived tables, CTE chains,
+  comparisons, LIKE, BETWEEN, IN; 10k..1M-term OR / AND / + / * / - / ||
+  chains, IN lists, CASE branches, select lists, GROUP BY / ORDER BY lists,
+  HAVING / ON chains, EXPLAIN) x (row, vectorized, threads 8 with
+  PQ_PARALLEL_MIN_ROWS=1, auto, optimize false), session and HTTP; timeouts
+  of 300 ms on 2M-term statements answered within 0.5 s.
+- Gotchas: GUARD_TICK / STACK_GUARD clobber x16, x17 and flags (placed
+  before the prologue; check a function does not take arguments in x16/x17).
+  `try_eval` (constant folding) must not swallow TIMEOUT. Vectorized kernels
+  may write the output vector at position p only after reading p of the
+  operands (left operand is evaluated into the output vector).
+- Known gaps: a WITH list of ~100k CTEs each referencing a base table binds
+  in O(n^2) (linear CTE name scan, deadline-checked, ~17 s at 100k);
+  row mode ~10-15% slower on expression-heavy filters (guard + tick per
+  operator node). Possible next steps: hash index for CTE names; a
+  "deep only" guard in eval.
+
 ## Status (task: optimize latency, analytics workload @1m, session 1)
 - Final check (session 1, clean build): conformance 660/660, --modes
   3870/3870 (also PQ_PARALLEL_MIN_ROWS=1), --transport http 660/660 (also

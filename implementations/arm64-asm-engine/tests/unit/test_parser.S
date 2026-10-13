@@ -361,7 +361,7 @@ m_summary:    .asciz "test_parser: %u cases, %u failures\n"
 g_outbuf:   .skip OUTMAX
 g_outpos:   .skip 8
 g_dumppos:  .skip 8
-g_deepbuf:  .skip 4096
+g_deepbuf:  .skip 16384
 
     .text
 
@@ -478,12 +478,12 @@ FUNC main
     add  x19, x19, #TE_SIZE
     b    .Lm_loop
 
-.Lm_deep:                           // nesting: 200 levels ok, 300 too deep
-    mov  w0, #200
+.Lm_deep:                           // nesting (CR-6): 1000 levels ok (the
+    mov  w0, #1000                  // minimum), 5000 beyond PARSE_MAX_DEPTH
     mov  w1, #0
     bl   check_depth
     add  w20, w20, w0
-    mov  w0, #300
+    mov  w0, #5000
     mov  w1, #ERR_RESOURCE_LIMIT
     bl   check_depth
     add  w20, w20, w0

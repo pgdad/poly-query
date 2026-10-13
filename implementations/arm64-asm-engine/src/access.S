@@ -45,6 +45,7 @@ k_small:    .double 16.0
 //   x19 node, w20 target type
 // =============================================================================
 LFUNC const_value
+    GUARD_TICK                          // CR-6: recursive
     ENTER 2
     mov  x19, x0
     ldr  w9, [x19, #N_KIND]

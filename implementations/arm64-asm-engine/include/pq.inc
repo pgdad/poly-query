@@ -94,6 +94,69 @@
     .p2align 2
 .endm
 
+// ------------------------------------------------------- stack guard (CR-6) --
+// Every thread that runs request code has a large stack (QUERY_STACK_SIZE)
+// and a thread-local lower bound g_stack_limit (stack_guard_init, rt.S;
+// 0 = unchecked). Every recursive function starts with STACK_GUARD: when
+// sp is below the bound it raises RESOURCE_LIMIT (stack_exhausted) instead
+// of overflowing. STACK_GUARD_MARGIN is left for the non-recursive code
+// (glibc included) a guarded function may still call. Clobbers x16 and
+// the flags only, so it may precede the prologue.
+#define QUERY_STACK_SIZE   (256*1024*1024)
+#define STACK_GUARD_MARGIN (512*1024)
+.macro STACK_GUARD
+    mrs  x16, tpidr_el0
+    add  x16, x16, #:tprel_hi12:g_stack_limit, lsl #12
+    add  x16, x16, #:tprel_lo12_nc:g_stack_limit
+    ldr  x16, [x16]
+    cmp  sp, x16
+    b.hs 8899f
+    bl   stack_exhausted
+8899:
+.endm
+
+// DEADLINE_TICK: every DEADLINE_TICKS-th execution calls check_deadline
+// (deadline_tick, rt.S: raises TIMEOUT / CANCELLED). Placed at the entry of
+// the recursive passes over statements (parser, binder, optimizer, planner,
+// expression evaluators) so the timeout covers every stage (CR-6 §4).
+// Clobbers x16, x17 and the flags only (every other register is preserved),
+// so it may precede the prologue.
+#define DEADLINE_TICKS 1024
+.macro DEADLINE_TICK
+    mrs  x16, tpidr_el0
+    add  x16, x16, #:tprel_hi12:g_tick, lsl #12
+    add  x16, x16, #:tprel_lo12_nc:g_tick
+    ldr  w17, [x16]
+    subs w17, w17, #1
+    str  w17, [x16]
+    b.hi 8898f
+    stp  x29, x30, [sp, #-16]!
+    bl   deadline_tick
+    ldp  x29, x30, [sp], #16
+8898:
+.endm
+
+// GUARD_TICK: STACK_GUARD and DEADLINE_TICK sharing one TLS address
+// (g_tick is the word after g_stack_limit, rt.S). Same clobbers.
+.macro GUARD_TICK
+    mrs  x16, tpidr_el0
+    add  x16, x16, #:tprel_hi12:g_stack_limit, lsl #12
+    add  x16, x16, #:tprel_lo12_nc:g_stack_limit
+    ldr  x17, [x16]
+    cmp  sp, x17
+    b.hs 8897f
+    bl   stack_exhausted
+8897:
+    ldr  w17, [x16, #8]
+    subs w17, w17, #1
+    str  w17, [x16, #8]
+    b.hi 8896f
+    stp  x29, x30, [sp, #-16]!
+    bl   deadline_tick
+    ldp  x29, x30, [sp], #16
+8896:
+.endm
+
 // Every object file must carry this (no executable stack).
 .macro NOTE_GNU_STACK
     .section .note.GNU-stack,"",%progbits
@@ -433,6 +496,7 @@
 #define NF_PAREN     16    // parser: expression was parenthesised
 #define NF_DSCAN     32    // vexec.S: dict_single analysed this tree (cache)
 #define NF_DSINGLE   64    // vexec.S: ... and it has exactly one local column
+#define NF_DSNODICT  128   // vexec.S: ... which is not a dictionary column
 
 // Function ids (N_OP of bound NK_FUNC / NK_AGG)
 #define F_COUNT       1
@@ -795,12 +859,13 @@
 #define VB_N        16             // u64 tuples in the batch
 #define VB_EC       24             // EvalCtx* (EC_TABLES; EC_TUPLE set for
                                    //   row-at-a-time fallbacks)
-#define VB_POOL     32             // Vec** scratch vectors [VPOOL_MAX]
+#define VB_POOL     32             // Vec** scratch vectors [VB_POOLCAP]
 #define VB_POOLN    40             // u64 vectors in use (stack discipline)
 #define VB_DCACHE   48             // dictionary truth tables (vexec.S)
 #define VB_MCACHE   56             // per-dictionary-code memos (vexec.S)
-#define VB_SIZE     64
-#define VPOOL_MAX   64
+#define VB_POOLCAP  64             // u64 slots of VB_POOL (grows by doubling)
+#define VB_SIZE     80
+#define VPOOL_MAX   64             // initial VB_POOLCAP
 #define VKEY_MAX    32             // most keys evaluated as vectors at once
 // Join key task (vexec.S vkey_cells)
 #define VK_TS       0              // TupleSet*

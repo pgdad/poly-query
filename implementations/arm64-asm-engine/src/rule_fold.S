@@ -36,6 +36,7 @@ ENDF fold_slot
 //   x19 node, x20 index, x21 count
 // =============================================================================
 LFUNC fold_expr
+    GUARD_TICK                          // CR-6: recursive
     ENTER 2
     mov  x19, x0
     ldr  w9, [x19, #N_KIND]
@@ -83,6 +84,7 @@ ENDF fold_expr
 // IN lists, LIKE): no columns, aggregates, group keys or subqueries
 //   x19 node, x20 index, x21 count
 LFUNC opt_foldable
+    GUARD_TICK                          // CR-6: recursive
     ENTER 3
     mov  x19, x0
     ldr  w9, [x19, #N_KIND]
@@ -154,6 +156,7 @@ LFUNC try_eval
     add  sp, sp, #(512 + 16)
     LEAVE 1
 1:  bl   .Lte_restore
+    bl   check_deadline                 // a timeout is not discarded (CR-6)
     TLS_ADDR x9, g_err_code
     str  wzr, [x9]
     mov  x0, #0

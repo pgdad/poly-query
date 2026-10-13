@@ -60,6 +60,7 @@ ENDF pn_new
 //   x19 logical plan, x20 physical root
 // =============================================================================
 FUNC phys_plan
+    GUARD_TICK                          // CR-6: recursive
     ENTER 1
     mov  x19, x0
     bl   pp_lower
@@ -81,6 +82,7 @@ ENDF phys_plan
 //   x19 logical node, x20 physical node, x21 index, x22 children array
 // =============================================================================
 LFUNC pp_lower
+    GUARD_TICK                          // CR-6: recursive
     ENTER 3
     mov  x19, x0
     ldr  w9, [x19, #LN_OP]
@@ -253,6 +255,7 @@ ENDF pp_rewrite
 //   x19 node, x20 conjunct, x21 mask, x22 left mask, x23 right mask
 // =============================================================================
 LFUNC push_conj
+    GUARD_TICK                          // CR-6: recursive
     ENTER 4
     mov  x19, x0
     mov  x20, x1
@@ -316,6 +319,7 @@ ENDF range_mask
 //   x23 left mask, x24 right mask, x25 residual, x26 key vectors base
 // =============================================================================
 LFUNC pp_joins
+    GUARD_TICK                          // CR-6: recursive
     ENTER 5
     sub  sp, sp, #80                    // [0] conjuncts Vec, [32] lkeys Vec,
                                         // [56] rkeys Vec (n, cap, data)
@@ -436,6 +440,7 @@ ENDF pp_joins
 //   x19 node, x20 left estimate, x21 right estimate
 // =============================================================================
 LFUNC pp_access
+    GUARD_TICK                          // CR-6: recursive
     ENTER 3
     mov  x19, x0
     ldr  w9, [x19, #PN_OP]

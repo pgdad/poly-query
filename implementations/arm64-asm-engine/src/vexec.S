@@ -66,6 +66,8 @@ FUNC vb_new
     mov  x0, #(VPOOL_MAX * 8)
     bl   arena_zalloc
     str  x0, [x19, #VB_POOL]
+    mov  x9, #VPOOL_MAX
+    str  x9, [x19, #VB_POOLCAP]
     mov  x0, #(DC_ENTRIES * 24 + 16)
     bl   arena_zalloc
     str  x0, [x19, #VB_DCACHE]
@@ -74,13 +76,16 @@ FUNC vb_new
 ENDF vb_new
 
 // vpool_get(x0 VBatch*) -> x0 Vec*
-//   x19 slot
+// The slot array doubles when an expression is deeper than its capacity,
+// so every vector is reused by later batches (CR-6: deep statements).
+//   x19 VBatch*, x20 slot index
 FUNC vpool_get
     ldr  x9, [x0, #VB_POOLN]
+    ldr  x11, [x0, #VB_POOLCAP]
+    cmp  x9, x11
+    b.hs 2f
     add  x10, x9, #1
     str  x10, [x0, #VB_POOLN]
-    cmp  x9, #VPOOL_MAX
-    b.hs 2f
     ldr  x10, [x0, #VB_POOL]
     add  x10, x10, x9, lsl #3
     ldr  x0, [x10]
@@ -92,8 +97,22 @@ FUNC vpool_get
     bl   arena_alloc
     str  x0, [x19]
     LEAVE 1
-2:  mov  x0, #VEC_SIZE                  // very deep expression: unpooled
-    b    arena_alloc
+2:  ENTER 2                             // grow the slot array, then retry
+    mov  x19, x0
+    lsl  x0, x11, #4                    // 2 * cap slots
+    bl   arena_zalloc
+    mov  x20, x0
+    ldr  x1, [x19, #VB_POOL]
+    ldr  x2, [x19, #VB_POOLCAP]
+    lsl  x2, x2, #3
+    bl   memcpy
+    str  x20, [x19, #VB_POOL]
+    ldr  x9, [x19, #VB_POOLCAP]
+    lsl  x9, x9, #1
+    str  x9, [x19, #VB_POOLCAP]
+    mov  x0, x19
+    LEAVE_NORET 2
+    b    vpool_get
 ENDF vpool_get
 
 // vpool_put(x0 VBatch*)   (leaf)
@@ -110,6 +129,7 @@ ENDF vpool_put
 //   x19 node
 // =============================================================================
 LFUNC is_pure_const
+    GUARD_TICK                          // CR-6: recursive
     ENTER 1
     mov  x19, x0
     ldr  w9, [x19, #N_KIND]
@@ -141,6 +161,7 @@ ENDF is_pure_const
 //        operand types of a comparison
 // =============================================================================
 FUNC veval
+    GUARD_TICK                          // CR-6: recursive
     ENTER 5
     sub  sp, sp, #16
     mov  x19, x0
@@ -302,7 +323,7 @@ FUNC veval
     str  w9, [sp]
     mov  x25, #0
 2:  cmp  x25, x22
-    b.hs .Lve_release2
+    b.hs .Lve_release1
     ldrh w28, [x21, x25, lsl #1]
     add  x25, x25, #1
     add  x9, x26, #VEC_NULLS
@@ -384,7 +405,7 @@ FUNC veval
     b.eq .Lve_cmp_simd                  // dense signed comparison: NEON
 32: mov  x25, #0
 4:  cmp  x25, x22
-    b.hs .Lve_release2
+    b.hs .Lve_release1
     ldrh w28, [x21, x25, lsl #1]
     add  x25, x25, #1
     add  x9, x26, #VEC_NULLS
@@ -454,7 +475,7 @@ FUNC veval
     add  x14, x23, #VEC_NULLS
     mov  x10, #0
 3:  cmp  x10, x22
-    b.hs .Lve_release2
+    b.hs .Lve_release1
     ldr  q0, [x12, x10]
     ldr  q1, [x13, x10]
     orr  v0.16b, v0.16b, v1.16b
@@ -482,7 +503,11 @@ FUNC veval
     ldr  x9, [x26, #DC_NDICT]
     ldr  x10, [x2, #TBL_NROWS]
     cmp  x10, x9, lsl #2                // worth it: ndict <= nrows / 4
-    b.lo 9f
+    b.hs 01f
+    mov  x0, x19                        // no (for the whole statement): the
+    bl   ds_mark_nodict                 // subtrees are not walked again
+    b    9f
+01:
     mov  x0, x19
     mov  x1, x20
     mov  x2, x26
@@ -623,9 +648,7 @@ FUNC veval
     cmp  w24, #OP_AND
     cset w9, eq
     str  w9, [sp]
-    mov  x0, x20
-    bl   vpool_get
-    mov  x26, x0
+    mov  x26, x23                       // left values in the output vector
     ldr  x0, [x19, #N_A]
     mov  x1, x20
     mov  x2, x21
@@ -704,9 +727,7 @@ FUNC veval
 8:  str  x0, [x23, x10, lsl #3]
     strb wzr, [x15, x10]
     b    4b
-9:  mov  x0, x20
-    bl   vpool_put
-    b    .Lve_release2
+9:  b    .Lve_release2
 
     // ---- unary operators -------------------------------------------------------
 .Lve_unary:
@@ -856,21 +877,22 @@ FUNC veval
 4:  str  x0, [x23, x11, lsl #3]
     b    2b
 
-    // local helper: both operands into fresh vectors x26 (N_A), x27 (N_B)
+    // local helper: the left operand (N_A) into the output vector (x26 =
+    // x23: kernels read position p of the operands before writing p), then
+    // the right one (N_B) into a fresh vector x27. A left-deep chain thus
+    // holds no vector while its left operand is evaluated (CR-6).
 .Lve_operands:
     stp  x29, x30, [sp, #-16]!
-    mov  x0, x20
-    bl   vpool_get
-    mov  x26, x0
-    mov  x0, x20
-    bl   vpool_get
-    mov  x27, x0
+    mov  x26, x23
     ldr  x0, [x19, #N_A]
     mov  x1, x20
     mov  x2, x21
     mov  x3, x22
     mov  x4, x26
     bl   veval
+    mov  x0, x20
+    bl   vpool_get
+    mov  x27, x0
     ldr  x0, [x19, #N_B]
     mov  x1, x20
     mov  x2, x21
@@ -882,6 +904,7 @@ FUNC veval
 .Lve_release2:
     mov  x0, x20
     bl   vpool_put
+.Lve_release1:
     mov  x0, x20
     bl   vpool_put
     b    .Lve_ret
@@ -905,6 +928,7 @@ LFUNC dict_single
     tbz  w9, #5, 1f                     // is cached in the node flags)
     mov  x0, #0
     tbz  w9, #6, 9f                     // NF_DSINGLE: walk for the column
+    tbnz w9, #7, 9f                     // NF_DSNODICT: known not to apply
 1:  mov  x9, #-1
     stp  x9, xzr, [sp]
     stp  xzr, xzr, [sp, #16]
@@ -931,28 +955,69 @@ LFUNC dict_single
     ldr  x11, [x19, #VB_EC]
     ldr  x11, [x11, #EC_TABLES]
     ldr  x2, [x11, x1, lsl #3]          // Table*
-    cbz  x2, 9f
+    cbz  x2, 8f
     ldr  w12, [x2, #TBL_LAYOUT]
-    cbnz w12, 9f
+    cbnz w12, 8f
     ldr  x12, [x2, #TBL_COLS]
     add  x12, x12, x10, lsl #5          // Column*
     ldr  w13, [x12, #COL_ENC]
     cmp  w13, #CENC_DICT
-    b.ne 9f
+    b.ne 8f
     mov  x0, x12
 9:  add  sp, sp, #32
     LEAVE 2
+8:  mov  x0, x20                        // one column, not a dictionary: so
+    bl   ds_mark_nodict                 // are its subtrees (veval descends
+    mov  x0, #0                         // into them: no walk per node)
+    b    9b
 ENDF dict_single
+
+// ds_mark_nodict(x0 Node*) — sets NF_DSNODICT on the tree (dict_single does
+// not apply to it nor to any subtree with the same single column); stops
+// at subtrees marked before, so marking a chain level by level stays linear
+//   x19 node, x20 child index, x21 children
+LFUNC ds_mark_nodict
+    GUARD_TICK                          // CR-6: recursive
+    ENTER 3
+    mov  x19, x0
+    ldr  w9, [x19, #N_FLAGS]
+    tbnz w9, #7, 9f
+    orr  w9, w9, #NF_DSNODICT
+    str  w9, [x19, #N_FLAGS]
+    bl   expr_nchildren
+    mov  x21, x0
+    mov  x20, #0
+1:  cmp  x20, x21
+    b.hs 9f
+    mov  x0, x19
+    mov  x1, x20
+    bl   expr_child_slot
+    add  x20, x20, #1
+    ldr  x0, [x0]
+    cbz  x0, 1b
+    bl   ds_mark_nodict
+    b    1b
+9:  LEAVE 3
+ENDF ds_mark_nodict
 
 // ds_walk(x0 Node*, x1 state: rv, column, bad, complex) — dict_single's
 // tree walk; "complex": a node veval leaves to the row evaluator (function,
 // CASE, LIKE, IN, BETWEEN, CAST, ||) — without one the vector kernels are
-// faster than the memo
-//   x19 node, x20 state, x21 child index, x22 children
+// faster than the memo. The walk is bottom-up: every node it visits gets
+// its own verdict cached (NF_DSCAN, NF_DSINGLE), so veval descending a long
+// chain analyses each node once (CR-6: linear, not quadratic). The node's
+// summary is then merged into the caller's state.
+//   x19 node, x20 caller's state, x21 child index, x22 children
+//   stack: [sp] this node's state (rv, column, bad, complex)
 LFUNC ds_walk
+    GUARD_TICK                          // CR-6: recursive
     ENTER 2
+    sub  sp, sp, #32
     mov  x19, x0
     mov  x20, x1
+    mov  x9, #-1
+    stp  x9, xzr, [sp]
+    stp  xzr, xzr, [sp, #16]
     ldr  w9, [x19, #N_KIND]
     cmp  w9, #NK_COL
     b.eq 5f
@@ -991,41 +1056,60 @@ LFUNC ds_walk
     cmp  w10, #OP_CONCAT
     b.ne 1f
 7:  mov  x10, #1                        // complex
-    str  x10, [x20, #24]
+    str  x10, [sp, #24]
 1:  mov  x0, x19
     bl   expr_nchildren
     mov  x22, x0
     mov  x21, #0
 2:  cmp  x21, x22
-    b.hs 9f
-    ldr  x9, [x20, #16]
-    cbnz x9, 9f
+    b.hs 10f
     mov  x0, x19
     mov  x1, x21
     bl   expr_child_slot
     add  x21, x21, #1
     ldr  x0, [x0]
     cbz  x0, 2b
-    mov  x1, x20
+    mov  x1, sp
     bl   ds_walk
     b    2b
 5:  ldr  w10, [x19, #N_OP]              // column: outer reference?
     cbnz w10, 8f
     ldr  x10, [x19, #N_B]               // rv
     ldr  x11, [x19, #N_VAL]             // column
-    ldr  x12, [x20]
-    tbnz x12, #63, 6f                   // the first column
-    cmp  x12, x10
-    b.ne 8f
-    ldr  x12, [x20, #8]
-    cmp  x12, x11
-    b.ne 8f
-    b    9f
-6:  stp  x10, x11, [x20]
-    b    9f
-8:  mov  x9, #1
+    stp  x10, x11, [sp]
+    b    10f
+8:  mov  x9, #1                         // bad
+    str  x9, [sp, #16]
+10: // cache this node's verdict: NF_DSCAN, and NF_DSINGLE if not bad,
+    // complex and with a column
+    ldp  x9, x10, [sp, #16]             // bad, complex
+    ldr  x11, [sp]                      // rv
+    ldr  w12, [x19, #N_FLAGS]
+    orr  w12, w12, #NF_DSCAN
+    cbnz x9, 11f
+    cbz  x10, 11f
+    tbnz x11, #63, 11f
+    orr  w12, w12, #NF_DSINGLE
+11: str  w12, [x19, #N_FLAGS]
+    // merge into the caller's state
+    cbz  x9, 12f
     str  x9, [x20, #16]
-9:  LEAVE 2
+12: cbz  x10, 13f
+    str  x10, [x20, #24]
+13: tbnz x11, #63, 15f                  // no column here
+    ldr  x12, [x20]
+    ldr  x13, [sp, #8]
+    tbz  x12, #63, 14f
+    stp  x11, x13, [x20]                // the caller's first column
+    b    15f
+14: cmp  x12, x11                       // a different column: bad
+    ldr  x12, [x20, #8]
+    ccmp x12, x13, #0, eq
+    b.eq 15f
+    mov  x9, #1
+    str  x9, [x20, #16]
+15: add  sp, sp, #32
+    LEAVE 2
 ENDF ds_walk
 
 // dict_memo(x0 Node*, x1 VBatch*, x2 DictCol*) -> x0 slots ((ndict + 1) x
@@ -1142,6 +1226,7 @@ ENDF dict_truth
 // Positions 0..VB_N-1 for which the predicate is TRUE.
 // =============================================================================
 FUNC vfilter
+    GUARD_TICK                          // CR-6: recursive
     mov  x4, x2
     mov  x2, x1
     mov  x1, x0
@@ -1165,6 +1250,7 @@ ENDF vfilter
 //   x25 positions where the left operand is not FALSE
 // =============================================================================
 FUNC vfilter_sel
+    GUARD_TICK                          // CR-6: recursive
     ENTER 4
     mov  x19, x0
     mov  x20, x1
@@ -1272,6 +1358,7 @@ ENDF vfilter_sel
 //        [sp+32] end of the window
 // =============================================================================
 FUNC vkey_cells
+    GUARD_TICK                          // CR-6: recursive
     ENTER 5
     sub  sp, sp, #48
     ldr  x19, [x0, #VK_TS]

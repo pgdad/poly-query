@@ -29,6 +29,7 @@ ENDF rule_simplify_predicates
 // simplify_slot(x0 Node** slot, x1 unused): *slot = simplify_expr(*slot)
 //   x19 slot
 LFUNC simplify_slot
+    GUARD_TICK                          // CR-6: recursive
     ENTER 1
     mov  x19, x0
     ldr  x0, [x19]
@@ -42,6 +43,7 @@ ENDF simplify_slot
 //   x19 node, x20 index, x21 count
 // =============================================================================
 LFUNC simplify_expr
+    GUARD_TICK                          // CR-6: recursive
     ENTER 2
     mov  x19, x0
     ldr  w9, [x19, #N_KIND]
@@ -148,6 +150,7 @@ ENDF lit_truth
 //   x19 node, x20 index
 // =============================================================================
 LFUNC drop_true
+    GUARD_TICK                          // CR-6: recursive
     cbz  x0, 9f
     ENTER 2
     mov  x19, x0

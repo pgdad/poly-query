@@ -100,6 +100,7 @@ ENDF bind_query
 //   x19 ctx, x20 Query*, x21 BoundQuery*, x22/x23 bound LIMIT/OFFSET exprs
 // =============================================================================
 LFUNC bq_bind
+    GUARD_TICK                          // CR-6: recursive
     ldr  x9, [x0, #Q_NUNION]            // UNION ALL compound
     cbnz x9, bq_bind_union
     ENTER 3
@@ -218,6 +219,7 @@ ENDF bq_bind
 //   x28 OutCol*
 // =============================================================================
 LFUNC bq_bind_union
+    GUARD_TICK                          // CR-6: recursive
     ENTER 5
     mov  x20, x0
     stp  x1, x2, [sp, #-32]!
@@ -446,16 +448,24 @@ ENDF shape_table
 //   x24 list node
 // =============================================================================
 LFUNC bind_with
-    ENTER 3
+    GUARD_TICK                          // CR-6: recursive
+    ENTER 4
     mov  x19, x0
     ldr  x9, [x19, #BC_Q]
     ldr  x20, [x9, #Q_CTES]
     ldr  x21, [x9, #Q_NCTES]
+    mov  x0, x20                        // names all distinct: no scan below
+    mov  x1, x21                        // (CR-6: linear-time long WITHs)
+    bl   cte_names_distinct
+    mov  w25, w0
 .Lbw_loop:
     cbz  x21, .Lbw_end
-    // duplicate name within this WITH?
+    // duplicate name within this WITH?  (scan only if one exists, so the
+    // error is still reported where the original order finds it)
     ldr  x24, [x19, #BC_CTES]
+    cbnz w25, 2f
 1:  cbz  x24, 2f
+    DEADLINE_TICK
     ldr  x9, [x24, #CL_OWNER]
     cmp  x9, x19
     b.ne 2f                             // entries of outer WITHs come later
@@ -500,11 +510,63 @@ LFUNC bind_with
     sub  x21, x21, #1
     b    .Lbw_loop
 .Lbw_end:
-    LEAVE 3
+    LEAVE 4
 .Lbw_dup:
     ldr  x9, [x20, #CTE_NAME]
     RAISE_S ERR_SEMANTIC, "duplicate CTE name ", x9
 ENDF bind_with
+
+// cte_names_distinct(x0 CTE array, x1 count) -> w0 1 if no two names are
+// equal (ASCII case-insensitive): sorts a copy of the names (qsort) and
+// compares neighbours
+//   x19 Str* array, x20 count, x21 index
+LFUNC cte_names_distinct
+    ENTER 3
+    mov  x20, x1
+    mov  x21, x0
+    cmp  x20, #2
+    b.lo 8f
+    lsl  x0, x20, #3
+    bl   arena_alloc
+    mov  x19, x0
+    mov  x9, #0
+1:  ldr  x10, [x21, #CTE_NAME]
+    str  x10, [x19, x9, lsl #3]
+    add  x21, x21, #CTE_SIZE
+    add  x9, x9, #1
+    cmp  x9, x20
+    b.lo 1b
+    mov  x0, x19
+    mov  x1, x20
+    mov  x2, #8
+    ADR_L x3, cte_name_cmp
+    bl   qsort
+    mov  x21, #1
+2:  cmp  x21, x20
+    b.hs 8f
+    sub  x9, x21, #1
+    ldr  x0, [x19, x9, lsl #3]
+    ldr  x1, [x19, x21, lsl #3]
+    bl   str_ieq
+    cbnz w0, 9f
+    add  x21, x21, #1
+    b    2b
+8:  mov  w0, #1
+    LEAVE 3
+9:  mov  w0, #0
+    LEAVE 3
+ENDF cte_names_distinct
+
+// cte_name_cmp(x0 Str**, x1 Str**) -> w0 <0/0/>0   (qsort comparator)
+LFUNC cte_name_cmp
+    ldr  x9, [x0]
+    ldr  x10, [x1]
+    add  x0, x9, #STR_DATA
+    ldr  x1, [x9, #STR_LEN]
+    add  x2, x10, #STR_DATA
+    ldr  x3, [x10, #STR_LEN]
+    b    ci_cmp
+ENDF cte_name_cmp
 
 // =============================================================================
 // add_rv(x0 ctx, x1 Str* name, x2 Table*, w3 kind, x4 sub, w5 cte levels up)
@@ -567,6 +629,7 @@ ENDF add_rv
 //   x23 CTE list cursor, x24 levels up
 // =============================================================================
 LFUNC bind_from
+    GUARD_TICK                          // CR-6: recursive
     ENTER 4
     mov  x19, x0
     mov  x20, x1
@@ -587,6 +650,7 @@ LFUNC bind_from
     mov  x22, x19                       // ctx whose level x24 counts
 .Lbf_cte:
     cbz  x23, .Lbf_catalog
+    DEADLINE_TICK                       // CR-6: long WITH lists
     ldr  x0, [x23, #CL_NAME]
     ldr  x1, [x20, #FR_NAME]
     bl   str_ieq
@@ -844,6 +908,7 @@ ENDF dec_wtype
 // Dispatcher: tail-calls the binder of the node kind (no frame of its own).
 // =============================================================================
 FUNC bind_expr
+    GUARD_TICK                          // CR-6: recursive
     ldr  w9, [x1, #N_KIND]
     cmp  w9, #NK_LIT
     b.eq bind_lit
@@ -1077,6 +1142,7 @@ ENDF col_exists_local
 //   w24 type of the subquery column, w25 values type
 // =============================================================================
 LFUNC bind_subq
+    GUARD_TICK                          // CR-6: recursive
     ENTER 4
     mov  x19, x0
     mov  x20, x1
@@ -1183,6 +1249,7 @@ ENDF bind_subq
 //   x19 ctx, x20 node, x21 bound operand
 // =============================================================================
 LFUNC bind_unary
+    GUARD_TICK                          // CR-6: recursive
     ENTER 2
     mov  x19, x0
     mov  x20, x1
@@ -1224,6 +1291,7 @@ ENDF bind_unary
 //   x19 ctx, x20 node
 // =============================================================================
 LFUNC bind_isnull
+    GUARD_TICK                          // CR-6: recursive
     ENTER 1
     mov  x19, x0
     mov  x20, x1
@@ -1247,6 +1315,7 @@ ENDF bind_isnull
 //   x19 ctx, x20 node, x21 bound operand
 // =============================================================================
 LFUNC bind_cast
+    GUARD_TICK                          // CR-6: recursive
     ENTER 2
     mov  x19, x0
     mov  x20, x1
@@ -1276,6 +1345,7 @@ ENDF bind_cast
 //   x19 ctx, x20 node
 // =============================================================================
 LFUNC bind_binary
+    GUARD_TICK                          // CR-6: recursive
     ENTER 2
     mov  x19, x0
     mov  x20, x1
@@ -1591,6 +1661,7 @@ ENDF func_lookup
 //   w24 result type
 // =============================================================================
 LFUNC bind_func
+    GUARD_TICK                          // CR-6: recursive
     ENTER 3
     mov  x19, x0
     mov  x20, x1
@@ -1778,6 +1849,7 @@ ENDF emit_rv_cols
 //   x24 OutCol array, x25 output position, x26 bound expr, x27 rv index
 // =============================================================================
 LFUNC bind_select
+    GUARD_TICK                          // CR-6: recursive
     ENTER 5
     mov  x19, x0
     ldr  x20, [x19, #BC_Q]
@@ -1907,6 +1979,7 @@ ENDF bind_select
 //   x28 output column index (name matching)
 // =============================================================================
 LFUNC bind_order
+    GUARD_TICK                          // CR-6: recursive
     ENTER 5
     mov  x19, x0
     ldr  x20, [x19, #BC_BQ]
@@ -2051,6 +2124,7 @@ ENDF bind_order
 //   x24 item, x25 output column cursor / index
 // =============================================================================
 LFUNC bind_group
+    GUARD_TICK                          // CR-6: recursive
     ENTER 4
     mov  x19, x0
     ldr  x20, [x19, #BC_BQ]
@@ -2249,6 +2323,7 @@ ENDF check_outer_refs
 //   x19 bq, x20 node, x21 index, x22 count
 // =============================================================================
 LFUNC group_rewrite
+    GUARD_TICK                          // CR-6: recursive
     ENTER 3
     mov  x19, x0
     mov  x20, x1
@@ -2313,6 +2388,7 @@ ENDF group_rewrite
 // contains_agg(x0 Node*) -> w0 1 if the expression contains an aggregate
 //   x19 node, x20 index, x21 count
 LFUNC contains_agg
+    GUARD_TICK                          // CR-6: recursive
     ENTER 2
     mov  x19, x0
     ldr  w9, [x19, #N_KIND]
@@ -2419,6 +2495,7 @@ ENDF expr_child_slot
 //   x19 a, x20 b, x21 child index, x22 child count
 // =============================================================================
 FUNC expr_equal
+    GUARD_TICK                          // CR-6: recursive
     ENTER 3
     mov  x19, x0
     mov  x20, x1
@@ -2541,6 +2618,7 @@ ENDF expr_equal
 //   x19 ctx
 // =============================================================================
 LFUNC bind_limit_expr
+    GUARD_TICK                          // CR-6: recursive
     cbnz x1, 1f
     mov  x0, #0
     ret
