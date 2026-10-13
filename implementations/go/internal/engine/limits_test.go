@@ -236,3 +236,23 @@ func TestNestedCorrelatedSubqueries(t *testing.T) {
 		}
 	}
 }
+
+// TestPlanMemoryBudget: inlining CTEs that reference their predecessor
+// twice doubles the plan per CTE; analysis charges the plan against the
+// query's memory budget instead of exhausting memory.
+func TestPlanMemoryBudget(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.DataDir = t.TempDir()
+	cfg.MaxQueryMemoryMB = 64
+	e := New(cfg)
+	var sb strings.Builder
+	sb.WriteString("WITH c0 AS (SELECT 1 AS x)")
+	for i := 1; i < 40; i++ {
+		fmt.Fprintf(&sb, ", c%d AS (SELECT a.x FROM c%d a, c%d b WHERE a.x = b.x)", i, i-1, i-1)
+	}
+	sb.WriteString(" SELECT count(*) FROM c39")
+	_, err := e.Query(context.Background(), sb.String(), QueryOptions{MaxRows: -1})
+	if !errs.Is(err, errs.ResourceLimit) || !strings.Contains(err.Error(), "memory budget") {
+		t.Fatalf("got %v, want RESOURCE_LIMIT (memory budget)", err)
+	}
+}

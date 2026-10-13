@@ -489,6 +489,7 @@ func (e *Engine) plan(intr *interrupt.Checker, q *ast.Query, opts QueryOptions) 
 		TestFunctions: e.cfg.TestFunctions,
 		EvalConst:     exec.EvalConstant,
 		Interrupt:     intr,
+		MemoryLimit:   e.cfg.MaxQueryMemoryMB << 20,
 	})
 	if err != nil {
 		return nil, err

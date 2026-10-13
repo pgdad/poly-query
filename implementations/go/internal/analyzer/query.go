@@ -32,6 +32,9 @@ func (a *analyzer) query(q *ast.Query, outer *scope, env *cteEnv) (plan.Node, er
 	if err := a.cfg.Interrupt.Check(); err != nil {
 		return nil, err
 	}
+	if err := a.step(1 + len(q.Items)); err != nil {
+		return nil, err
+	}
 	seen := map[string]bool{}
 	for _, c := range q.With {
 		key := storage.FoldKey(c.Name)

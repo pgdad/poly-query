@@ -472,7 +472,14 @@ passes. They are now linear (or n log n):
   the result depends on. Subqueries calling PQ_SLEEP keep a memo per
   evaluator. 400 such levels take 2 s.
 
-**Memory.** Three changes keep vectorized memory bounded:
+**Memory.** Analysis charges the plan it builds against the query's
+memory budget (`--max-query-memory-mb`), at an estimated 256 bytes per
+bound expression and query block, and fails with `RESOURCE_LIMIT` (`query
+exceeded its memory budget`) beyond it. Inlined CTEs can make a plan
+exponentially larger than its statement: 30 CTEs that each reference the
+previous one twice reached 25 GiB of resident memory before their timeout,
+and now stop after 2.6 s at 1.7 GiB. Three more changes keep vectorized
+memory bounded:
 
 * vectorized constants fill their batch vector lazily, since most operators
   read the scalar;
@@ -489,7 +496,7 @@ passes. They are now linear (or n log n):
 | `internal/interrupt` | new: deadline checker shared by all stages |
 | `internal/engine` | timeout context created before parsing (from `Received`) and passed to every stage; `Explain` takes a context; `Config.Limits`; claims `change.expression_limits` |
 | `internal/protocol` | requests record their receipt time; the `explain` op gets the request context |
-| `internal/analyzer` | deadline ticks in binding and per query block; linear GROUP BY key and ORDER BY item matching; linear CTE validation |
+| `internal/analyzer` | deadline ticks in binding and per query block; plan size charged against the memory budget (`Config.MemoryLimit`); linear GROUP BY key and ORDER BY item matching; linear CTE validation |
 | `internal/optimizer` | `Optimize` checks the deadline before each rule and returns an error; rules take an `Interrupt` and tick it in their recursion (`interrupted`, recovered by `Optimize`); constant folding uses `plan.Props`; linear-time greedy join reordering |
 | `internal/physical` | deadline check per planned node; O(n log n) IN-list points; join schemas built in one pass |
 | `internal/plan` | `Props` (memoized constant/volatile/movable/size), `ChainOperands`; join schemas built in one pass |
@@ -503,7 +510,8 @@ Tests:
 * `internal/engine/limits_test.go`: minimum-size statements in
   row/vectorized/parallel/auto mode with real parallel workers, `||` chain
   semantics, RESOURCE_LIMIT, timeouts in every stage, CTE chains and
-  validation;
+  validation, many-way joins, nested correlated subqueries, the plan
+  memory budget;
 * `internal/optimizer/interrupt_test.go`: rules stop at the deadline, many-way
   join reordering;
 * `internal/plan/props_test.go` and `internal/interrupt/interrupt_test.go`;
@@ -1477,8 +1485,9 @@ Observations:
   by row inside vectorized operators (to bound buffer memory), so very
   large expressions over large tables run at row-mode speed per worker.
 * CTEs are inlined. A chain of n CTEs that each reference the previous one
-  twice yields a plan of 2ⁿ scans: such a statement is small, but it ends
-  with `TIMEOUT` instead of being computed.
+  twice yields a plan of 2ⁿ scans: such a statement is small, but for large
+  n it ends with `RESOURCE_LIMIT` (plan memory) or `TIMEOUT` instead of
+  being computed.
 * Correlated subqueries whose correlation is not an equality (e.g.
   `q.age < p.age`) rescan their input per distinct outer value.
 
