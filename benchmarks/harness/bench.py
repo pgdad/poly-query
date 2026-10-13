@@ -161,9 +161,16 @@ def summarize(xs: list[float], rng: random.Random) -> dict:
 def digest(resp: dict) -> str | None:
     if "rows" not in resp:
         return None
-    def norm(v):
+    # FLOAT64 may be written as `3` or `3.0` (spec/data-types/types.md §5), so integral JSON numbers in FLOAT64
+    # columns are read as floats before hashing; floats are rounded to absorb summation-order noise.
+    types = [c.get("type") for c in resp.get("columns") or []]
+
+    def norm(v, ty):
+        if ty == "FLOAT64" and isinstance(v, int) and not isinstance(v, bool):
+            v = float(v)
         return round(v, 6) if isinstance(v, float) else v
-    return hashlib.sha256(json.dumps([[norm(v) for v in r] for r in resp["rows"]]).encode()).hexdigest()[:16]
+    return hashlib.sha256(json.dumps([[norm(v, types[i] if i < len(types) else None) for i, v in enumerate(r)]
+                                      for r in resp["rows"]]).encode()).hexdigest()[:16]
 
 
 # ------------------------------------------------------------------ helpers
