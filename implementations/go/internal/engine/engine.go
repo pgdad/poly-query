@@ -49,7 +49,7 @@ var Capabilities = append([]string{
 	"phase3", "storage.pqcf", "storage.mmap", "index.hash", "index.btree",
 	"phase4", "http.streaming",
 	"phase5", "exec.row", "exec.vectorized", "exec.parallel", "join.hash", "join.merge", "join.nested_loop",
-	"change.union_all", "change.decimal38",
+	"change.union_all", "change.decimal38", "change.expression_limits",
 }, nativeCapabilities()...)
 
 func nativeCapabilities() []string {

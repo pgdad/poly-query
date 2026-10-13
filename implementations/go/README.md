@@ -49,7 +49,7 @@ None. Only the Go standard library is used (`ENGINE.json` lists no libraries).
 `storage.pqcf`, `storage.mmap`, `index.hash`, `index.btree`, `phase4`,
 `http.streaming`, `phase5`, `exec.row`, `exec.vectorized`, `exec.parallel`,
 `join.hash`, `join.merge`, `join.nested_loop`, `change.union_all`,
-`change.decimal38`,
+`change.decimal38`, `change.expression_limits`,
 `native.kernels`.
 
 `native.kernels` is claimed by cgo builds (the default with a C compiler):
@@ -91,6 +91,7 @@ SQL text ─lexer→ tokens ─parser→ AST ─analyzer→ logical plan ─opti
 | `internal/ingest` | CSV (RFC 4180 + spec rules) and strict JSON/JSONL parsers, schema inference and explicit-schema conversion |
 | `internal/types` | Type system: canonical names/aliases, values, exact DECIMAL arithmetic (narrow: int64 unscaled + 128-bit products; wide: `Int128` unscaled + 256-bit-safe products; exact sums in int64 → 128 bits → big.Int), proleptic Gregorian DATE/TIMESTAMP, CAST matrix, text parsing/formatting, exact ordering across INT64/DECIMAL |
 | `internal/errs` | Structured errors with stable codes and optional details |
+| `internal/interrupt` | The query's deadline/cancellation as seen by every stage (`Checker`: cheap `Tick` in loops, `Check` at boundaries; TIMEOUT/CANCELLED errors) |
 | `internal/native` | cgo binding of `libpqkernels`: run-time `dlopen`/`dlsym`, ABI check, length-checked Go wrappers per kernel (stub without cgo) |
 
 ### Column IDs instead of positions
@@ -358,6 +359,133 @@ Decisions:
   comparing old and new binaries on ~400 random and hand-written queries
   (derived tables with unused columns, correlated subqueries, CTE
   self-joins, UNION ALL) × 6 option sets (identical).
+
+### Statement size limits (change request CR-6)
+
+Implemented as specified in `spec/changes/expression-limits.md`
+(capability `change.expression_limits`).
+
+**Limits of this engine** (`parser.DefaultLimits`). A statement beyond any
+of them fails with `RESOURCE_LIMIT` naming the measure, before any other
+error of the statement is looked for:
+
+| measure | limit | CR-6 minimum | message |
+|---|---|---|---|
+| SQL text length | 16 MiB (16,777,216 bytes) | 1 MiB | `statement text length N bytes exceeds 16777216` |
+| expression nesting depth (CR-6 §1) | 4,096 | 1,000 | `expression nesting depth exceeds 4096` |
+| operands (literals, column references, `*` arguments) | 250,000 | 25,000 | `operand count exceeds 250000` |
+| nesting of parenthesized FROM items (not a CR-6 measure) | 4,096 | – | `join nesting depth exceeds 4096` |
+
+Within these limits, statements are bounded only by memory and time. On the
+probe's 100-row table, these run in tens of milliseconds in every mode: a
+10,000-term `OR`, a 10,000-item `IN` list, a 10,000-term sum or `||` chain,
+a 5,000-branch `CASE`, 1,000 nested parentheses/function calls/`NOT`s/
+`CASE`s/`CAST`s, 1,000 nested subqueries or derived tables, a chain of
+10,000 CTEs and 1 MiB string literals. The 250,000-operand worst cases take
+about 2.5 s and stay below 600 MiB. The HTTP body limit
+(`--max-request-bytes`, `413`) applies independently.
+
+The limits are chosen so that no goroutine stack can be exhausted. Go's
+limit is 1 GB per goroutine, and running out is fatal, so the engine must
+avoid it. The depth limit bounds the parser's recursion. The operand limit
+bounds the longest left-deep chain the other recursive passes see; at about
+1 KiB of stack per chain element, the deepest pass needs at most 256 MiB,
+whether it runs in the query goroutine or in a parallel worker.
+
+**Measuring.** The parser computes the CR-6 nesting depth exactly. Every
+expression parser returns the *height* of what it parsed:
+
+* 0 for a literal or column reference;
+* one more than its operands for a construct: parentheses, unary `+`/`-`,
+  `NOT`, function call, `CAST`, `CASE`, `IN`, `BETWEEN`, `LIKE`,
+  comparison, subquery;
+* one more than its tallest operand for a whole chain of binary operators
+  of one precedence level.
+
+A subquery's height is one more than the largest height inside it. To stop
+early on input such as a million `(`, the parser also counts the constructs
+*currently open* while it descends. That count never exceeds the final
+depth, so it rejects nothing within the limit. Tokens are read lazily from
+a `lexer.Scanner` (the parser holds only its lookahead), so a huge
+statement needs no token array. A lexical error later in the text is still
+reported in preference to a syntax error, exactly as with up-front
+tokenization.
+
+**Timeout over every stage.** The effective timeout now counts from the
+receipt of the request (`QueryOptions.Received`, set when the protocol
+layer starts decoding it), not from the start of execution. One context
+carries it through every stage:
+
+* parsing: checked every 256 tokens;
+* analysis: every 256 bound expressions and per query block;
+* optimization: before each optimizer rule;
+* physical planning: per plan node;
+* operator construction: per operator and per parallel worker copy;
+* execution: operators check every 4,096 rows, and an expression of 4,096+
+  nodes also checks at every evaluation, so a single expensive row cannot
+  delay `TIMEOUT`.
+
+For statements of 100,000–250,000 operands with timeouts from 1 ms to
+1.5 s, `TIMEOUT` arrived at most 0.4 s late in every mode. The largest
+stretches without a check are single optimizer or planning passes over one
+250,000-node expression, about 150 ms each.
+
+**Superlinear work removed.** Long statements exposed several quadratic
+passes. They are now linear (or n log n):
+
+* constant folding and vector compilation asked "is this subtree
+  constant / volatile?" at every node. `plan.Props` memoizes these
+  properties, and subtree sizes, per node.
+* GROUP BY key matching rendered the canonical string of every
+  subexpression. Now only subexpressions with the size of some key are
+  rendered; equal-size subtrees are disjoint, so this is linear per
+  distinct key size.
+* the physical planner deduplicated IN-list points pairwise. It now sorts
+  them.
+* `a || b || …` copied the growing prefix at every operator. A chain is now
+  evaluated as one n-ary concatenation (row and vectorized), with the same
+  left-to-right evaluation, error and NULL semantics.
+* validating each CTE re-analyzed every CTE it (transitively) references.
+  During validation, a reference to an already validated CTE now resolves
+  to a typed stub. The validation result is discarded, and real references
+  are still analyzed afresh.
+* the parallel-pipeline probe walked the whole pipeline below every
+  operator. It is memoized per node.
+
+**Memory.** Three changes keep vectorized memory bounded:
+
+* vectorized constants fill their batch vector lazily, since most operators
+  read the scalar;
+* vector buffers are sized to the rows actually seen;
+* an expression larger than 65,536 nodes divided by the number of worker
+  threads is evaluated row by row inside the vectorized operators. Its
+  vectorized form would keep a batch buffer per node and worker: 5 GiB for
+  a 250,000-term sum.
+
+| Module | Change |
+|---|---|
+| `internal/sql/lexer` | `Scanner`: tokens on demand (`Tokenize` uses it) |
+| `internal/sql/parser` | `limits.go`: `Limits`, `DefaultLimits`, `ParseWith`; lazy token buffer; exact nesting heights, open-construct guard, operand count, text length, deadline checks; chains parsed by one `chain` helper |
+| `internal/interrupt` | new: deadline checker shared by all stages |
+| `internal/engine` | timeout context created before parsing (from `Received`) and passed to every stage; `Explain` takes a context; `Config.Limits`; claims `change.expression_limits` |
+| `internal/protocol` | requests record their receipt time; the `explain` op gets the request context |
+| `internal/analyzer` | deadline ticks in binding and per query block; linear GROUP BY key matching; linear CTE validation |
+| `internal/optimizer` | `Optimize` checks the deadline before each rule and returns an error; constant folding uses `plan.Props` |
+| `internal/physical` | deadline check per planned node; O(n log n) IN-list points |
+| `internal/plan` | `Props` (memoized constant/volatile/movable/size), `ChainOperands` |
+| `internal/exec` | `compile` (operator entry point; per-evaluation deadline check for big expressions) vs `compileExpr` (recursion); n-ary `\|\|`; lazy constant vectors; row fallback for huge expressions; per-copy deadline checks for parallel workers; memoized pipeline probe |
+
+Tests:
+
+* `internal/sql/parser/limits_test.go`: the depth measure per construct,
+  early stops far beyond the limits, operand counting, lexical error
+  precedence, the parse deadline;
+* `internal/engine/limits_test.go`: minimum-size statements in
+  row/vectorized/parallel/auto mode with real parallel workers, `||` chain
+  semantics, RESOURCE_LIMIT, timeouts in every stage, CTE chains and
+  validation;
+* `internal/plan/props_test.go` and `internal/interrupt/interrupt_test.go`;
+* black-box: `tests/regression/robustness_probe.py --only expression_limits`.
 
 ### Value representation
 
@@ -1264,6 +1392,14 @@ Observations:
   remain `PARSE_ERROR`.
 * **CR-2 spec version**: `spec_version` stays `1.0.0` for the same reason as
   for CR-1 (the phase-1 case pins it), although CR-2 names `1.2.0-cr2`.
+  The same holds for CR-6 (`1.3.0-cr6`).
+* **CR-6 nesting depth details**: `x IN (SELECT …)` is one level (the IN
+  and its subquery), `(SELECT …)` as a scalar is one level (the parentheses
+  belong to the subquery), and `IS [NOT] NULL` is not a level (CR-6 does
+  not list it). Parenthesized FROM items do not count toward the depth;
+  they have their own guard with the same limit. The depth and operand
+  checks stop parsing early. A statement beyond a limit therefore reports
+  `RESOURCE_LIMIT` even if it also has a syntax error later in the text.
 * **Wide DECIMAL details**: `ROUND(x, n)` with `n` far below zero is 0 (or
   `NUMERIC_OVERFLOW` when the rounded value needs more than 38 digits);
   the precision of a DECIMAL column bounds the values a search argument can
@@ -1315,6 +1451,12 @@ Observations:
   vectorized plans.
 * A hash aggregation, DISTINCT or sort directly over a `UNION ALL` runs
   single-threaded. Its branches still use parallel pipelines.
+* Expressions larger than 65,536 nodes ÷ worker threads are evaluated row
+  by row inside vectorized operators (to bound buffer memory), so very
+  large expressions over large tables run at row-mode speed per worker.
+* CTEs are inlined. A chain of n CTEs that each reference the previous one
+  twice yields a plan of 2ⁿ scans: such a statement is small, but it ends
+  with `TIMEOUT` instead of being computed.
 * Correlated subqueries whose correlation is not an equality (e.g.
   `q.age < p.age`) rescan their input per distinct outer value.
 
