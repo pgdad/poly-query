@@ -1547,6 +1547,8 @@ FUNC cw_exec
     mov CN_JREQ(%rbx), %r13
     mov g_arena(%rip), %rdi
     call arena_reset
+    mov g_arena(%rip), %rax         /* no budget left over from a failed query */
+    movq $0, AR_LIMIT(%rax)
     mov CN_JKIND(%rbx), %rax
     cmp $JK_BODY, %rax
     jne 1f
