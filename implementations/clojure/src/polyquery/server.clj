@@ -18,13 +18,14 @@
             [polyquery.server.http :as http]
             [polyquery.server.metrics :as metrics]
             [polyquery.util.json :as json]
-            [polyquery.util.log :as log])
+            [polyquery.util.log :as log]
+            [polyquery.util.threads :as threads])
   (:import (java.io FileDescriptor FileOutputStream IOException PrintStream)
            (java.net InetAddress InetSocketAddress ServerSocket Socket SocketException)
            (java.nio.charset StandardCharsets)
            (java.util ArrayList UUID)
            (java.util.concurrent ArrayBlockingQueue ConcurrentHashMap ExecutorService Executors
-                                 Future ThreadFactory TimeUnit TimeoutException)
+                                 Future TimeUnit TimeoutException)
            (java.util.concurrent.atomic AtomicBoolean AtomicLong)))
 
 (set! *warn-on-reflection* true)
@@ -82,15 +83,6 @@
 ;; ---------------------------------------------------------------------------
 ;; Server state
 
-(defn- thread-factory
-  "Daemon platform threads with a large stack (deeply nested SQL/JSON)."
-  ^ThreadFactory [prefix]
-  (let [n (AtomicLong.)]
-    (reify ThreadFactory
-      (newThread [_ r]
-        (doto (Thread. nil r (str prefix "-" (.incrementAndGet n)) (* 256 1024 1024))
-          (.setDaemon true))))))
-
 (defn make-server
   "opts: :workers :queue-depth :query-timeout-ms :shutdown-grace-ms
   :max-request-bytes."
@@ -103,8 +95,8 @@
    :shutting-down (AtomicBoolean. false)
    :connections (ConcurrentHashMap/newKeySet)
    :active-requests (AtomicLong.)
-   :query-pool (Executors/newCachedThreadPool (thread-factory "pq-query"))
-   :connection-pool (Executors/newCachedThreadPool (thread-factory "pq-conn"))})
+   :query-pool (Executors/newCachedThreadPool (threads/factory "pq-query"))
+   :connection-pool (Executors/newCachedThreadPool (threads/factory "pq-conn"))})
 
 (defn- shutting-down? [srv] (.get ^AtomicBoolean (:shutting-down srv)))
 
@@ -201,25 +193,45 @@
 (defn- submit ^Future [srv ^Callable f]
   (.submit ^ExecutorService (:query-pool srv) f))
 
+(def ^:private timeout-grace-ns
+  "How long after its deadline a query may take to stop by itself before
+  the connection thread answers TIMEOUT for it (CR-6 §4: within 1 s)."
+  (* 300 1000000))
+
+(defn- overdue?
+  "True when a query with this deadline should have stopped by now."
+  [^long deadline]
+  (and (pos? deadline) (> (- (System/nanoTime) (+ deadline (long timeout-grace-ns))) 0)))
+
+(defn- abandon-overdue!
+  "Cancels a query that has not stopped at its deadline (its outcome is
+  discarded); returns the TIMEOUT error."
+  [^QueryEntry entry]
+  (.set ^AtomicBoolean (:cancel entry) true)
+  (log/warn "query did not stop at its deadline; answered TIMEOUT" {"query_id" (:id entry)})
+  (err/error "TIMEOUT" "query exceeded its timeout"))
+
 (defn- await-result
   "Waits for a query's future while watching for client disconnects (which
-  cancel the query)."
-  [^Future fut conn ^QueryEntry entry]
+  cancel the query) and for its deadline: every stage polls the deadline,
+  but should the query not stop shortly after it, the answer is TIMEOUT."
+  [^Future fut conn ^QueryEntry entry req deadline]
   (loop []
     (let [r (try (.get fut poll-ms TimeUnit/MILLISECONDS)
                  (catch TimeoutException _ ::pending))]
-      (if (= r ::pending)
-        (do (when (and (not (client-gone? entry)) (http/client-gone? conn))
-              (mark-client-gone! entry))
-            (recur))
-        r))))
+      (cond
+        (not= r ::pending) r
+        (overdue? deadline) (protocol/error-response (get req "id") (abandon-overdue! entry))
+        :else (do (when (and (not (client-gone? entry)) (http/client-gone? conn))
+                    (mark-client-gone! entry))
+                  (recur))))))
 
 (defn- run-query
   "Executes an admitted (non-streaming) query request; returns the protocol
   response object."
   [srv conn ^QueryEntry entry req deadline]
   (let [state (query-state srv entry deadline)]
-    (await-result (submit srv #(protocol/handle-request state req)) conn entry)))
+    (await-result (submit srv #(protocol/handle-request state req)) conn entry req deadline)))
 
 ;; --- streaming (protocol.md §7.2)
 
@@ -301,9 +313,13 @@
       (let [msg (.poll q poll-ms TimeUnit/MILLISECONDS)]
         (cond
           (nil? msg)
-          (if (http/client-gone? conn)
-            (abandon)
-            (recur header?))
+          (cond
+            (http/client-gone? conn) (abandon)
+            (and (not header?) (overdue? deadline))
+            (let [e (abandon-overdue! entry)]
+              (finish-query! srv entry "TIMEOUT" 0)
+              (assoc (error-reply (get req "id") e) :headers headers))
+            :else (recur header?))
 
           :else
           (let [step (try (stream-step srv conn entry msg header? headers)

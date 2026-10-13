@@ -12,7 +12,9 @@
   Expressions containing subqueries also require the columns of this row
   that correlated references inside the subqueries read (outer-column nodes
   of the subquery's correlation cell, at any nesting depth)."
-  (:require [polyquery.sql.bound :as b]))
+  (:require [polyquery.exec.context :as ctx]
+            [polyquery.sql.bound :as b]
+            [polyquery.util.tree :as tree]))
 
 (set! *warn-on-reflection* true)
 
@@ -22,18 +24,20 @@
   [x cell]
   (into #{}
         (keep #(when (and (map? %) (= :outer-column (:node %)) (= cell (:cell %))) (:index %)))
-        (tree-seq #(and (coll? %) (not (record? %)))
+        (tree/pre-order #(and (coll? %) (not (record? %)))
                   #(if (map? %) (vals %) (seq %))
                   x)))
 
 (defn expr-columns
-  "Indices of the row an expression is evaluated on that it reads."
+  "Indices of the row an expression is evaluated on that it reads. Only
+  correlated subqueries can read it (an uncorrelated one is not searched:
+  that would cost time quadratic in the nesting depth of subqueries)."
   [e]
   (if (nil? e)
     #{}
     (into (b/column-indices e)
           (mapcat #(outer-refs (:query %) (:cell %)))
-          (filter #(= :subquery (:node %)) (b/nodes e)))))
+          (filter #(and (= :subquery (:node %)) (:correlated? %)) (b/nodes e)))))
 
 (defn- all-columns [node] (set (range (:width node))))
 
@@ -61,6 +65,7 @@
   required are replaced by constants, so that the columns only they read are
   not scanned."
   [node required]
+  (ctx/poll!)
   (case (:op node)
     :scan (assoc node :columns (vec (sort (filter #(< (long %) (long (:width node))) required))))
     :values node

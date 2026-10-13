@@ -30,11 +30,10 @@
             [polyquery.exec.operators :as ops]
             [polyquery.exec.sort :as sort]
             [polyquery.exec.vectorized :as vec]
-            [polyquery.exec.vjoin :as vjoin])
+            [polyquery.exec.vjoin :as vjoin]
+            [polyquery.util.threads :as threads])
   (:import (java.util ArrayDeque ArrayList Arrays Comparator)
-           (java.util.concurrent Callable ExecutionException ExecutorService Executors Future
-                                 ThreadFactory)
-           (java.util.concurrent.atomic AtomicLong)
+           (java.util.concurrent Callable ExecutionException ExecutorService Executors Future)
            (polyquery.exec.operators Candidate)))
 
 (set! *warn-on-reflection* true)
@@ -44,12 +43,7 @@
   1024)
 
 (defonce ^:private ^ExecutorService pool
-  (let [n (AtomicLong.)]
-    (Executors/newCachedThreadPool
-     (reify ThreadFactory
-       (newThread [_ r]
-         (doto (Thread. ^Runnable r (str "pq-worker-" (.incrementAndGet n)))
-           (.setDaemon true)))))))
+  (Executors/newCachedThreadPool (threads/factory "pq-worker")))
 
 (defn- unwrap ^Throwable [^Throwable t]
   (if (and (instance? ExecutionException t) (.getCause t)) (.getCause t) t))

@@ -917,22 +917,35 @@
 ;; ---------------------------------------------------------------------------
 
 (defn- concat-kernel
-  "`a || b`: NULL-propagating string concatenation."
+  "`a || b || …`: NULL-propagating string concatenation of a chain of ||,
+  appended to one StringBuilder per row (linear in the length of the
+  result, however long the chain). An operand that may fail is evaluated
+  only on the rows where the operands before it are all non-NULL, as in the
+  row engine."
   [env e]
-  (let [lk (compile-kernel env (:left e))
-        rk (compile-kernel env (:right e))
-        fail? (may-fail? (:right e))]
+  (let [operands (bound/left-chain :concat e)
+        ks (mapv #(compile-kernel env %) operands)
+        fails (mapv may-fail? operands)
+        nk (count ks)]
     (reify Kernel
       (eval [_ bt sel n]
-        (let [lv (ev lk bt sel n)
-              rv (eval-right rk fail? lv bt sel n)
-              out (object-array cap)]
+        (let [acc (object-array cap)
+              accv (ObjVec. acc)
+              v0 (ev (nth ks 0) bt sel n)]
           (each-sel [i sel n]
-            (let [a (.getObj lv i)]
-              (when (some? a)
-                (let [c (.getObj rv i)]
-                  (when (some? c) (aset out i (str a c)))))))
-          (ObjVec. out))))))
+            (let [a (.getObj v0 i)]
+              (when (some? a) (aset acc i (doto (StringBuilder.) (.append ^Object a))))))
+          (loop [j 1]
+            (when (< j nk)
+              (let [rv (eval-right (nth ks j) (nth fails j) accv bt sel n)]
+                (each-sel [i sel n]
+                  (when-let [^StringBuilder sb (aget acc i)]
+                    (let [x (.getObj rv i)]
+                      (if (some? x) (.append sb ^Object x) (aset acc i nil)))))
+                (recur (inc j)))))
+          (each-sel [i sel n]
+            (when-let [sb (aget acc i)] (aset acc i (.toString ^Object sb))))
+          accv)))))
 
 (defn- wide-operands?
   "True when arithmetic or a comparison node e computes on wide DECIMAL

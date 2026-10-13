@@ -42,6 +42,17 @@
     (when (and (pos? dl) (> (- (System/nanoTime) dl) 0))
       (err/fail! "TIMEOUT" "query exceeded its timeout"))))
 
+(def ^:dynamic *preparing*
+  "The context of the query whose statement this thread is preparing
+  (parsing, analysis, planning), or nil. The timeout covers these stages
+  too (CR-6 §4): their per-node work polls the deadline with poll!."
+  nil)
+
+(defn poll!
+  "check! for the query being prepared on this thread, if any."
+  []
+  (when-let [c *preparing*] (check! c)))
+
 (defn reserve!
   "Accounts `bytes` against the memory budget; RESOURCE_LIMIT when exceeded."
   [^QueryContext ctx ^long bytes]

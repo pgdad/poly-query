@@ -234,7 +234,7 @@
                          (:group-by core))
         aggs (volatile! [])
         cx (if aggregated?
-             (assoc base :mode :post-agg :aggs aggs :group-keys group-keys)
+             (binder/post-agg-context base aggs group-keys)
              (assoc base :agg-error "aggregates are not allowed here"))
         outputs (vec (map-indexed
                       (fn [i item]

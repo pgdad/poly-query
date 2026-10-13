@@ -7,6 +7,7 @@
     polyquery.values-test
     polyquery.sql.lexer-test
     polyquery.sql.parser-test
+    polyquery.sql.limits-test
     polyquery.sql.analyzer-test
     polyquery.ingest.csv-test
     polyquery.ingest.json-test

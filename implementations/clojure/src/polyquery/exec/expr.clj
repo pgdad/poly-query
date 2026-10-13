@@ -11,6 +11,7 @@
             the nested plans of subquery expressions"
   (:require [polyquery.errors :as err]
             [polyquery.exec.functions :as functions]
+            [polyquery.sql.bound :as b]
             [polyquery.types :as t]
             [polyquery.values :as v]))
 
@@ -290,6 +291,23 @@
                         :else false)]
                 (if not? (not3 r) r)))))))
 
+(defn- compile-concat
+  "`a || b || …`: the operands of a chain of || are evaluated left to right
+  until one is NULL (then so is the result), into one StringBuilder: linear
+  in the length of the result, however long the chain."
+  [c e]
+  (let [^objects fs (object-array (map #(compile-expr c %) (b/left-chain :concat e)))
+        n (alength fs)]
+    (fn [row]
+      (let [sb (StringBuilder.)]
+        (loop [i 0]
+          (if (= i n)
+            (.toString sb)
+            (let [x ((aget fs i) row)]
+              (when (some? x)
+                (.append sb ^Object x)
+                (recur (inc i))))))))))
+
 ;; ---------------------------------------------------------------------------
 
 (defn compile-expr
@@ -303,8 +321,7 @@
                     (fn [_] (aget ^objects (aget holder 0) i)))
     :neg (compile-neg c e)
     :arith (compile-arith c e)
-    :concat (binary-op (compile-expr c (:left e)) (compile-expr c (:right e))
-                       (fn [a b] (str a b)))
+    :concat (compile-concat c e)
     :compare (compile-compare c e)
     :and (compile-and c e)
     :or (compile-or c e)

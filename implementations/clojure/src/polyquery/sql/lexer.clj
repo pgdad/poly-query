@@ -6,6 +6,7 @@
   identifier, text unescaped), :number, :string (text unescaped), :op
   (operator/punctuation) or :eof."
   (:require [polyquery.errors :as err]
+            [polyquery.exec.context :as ctx]
             [polyquery.util.text :as text]))
 
 (set! *warn-on-reflection* true)
@@ -52,9 +53,11 @@
         emit (fn
                ([type text start]
                 (let [[l c] (pos->lc start)]
+                  (when (zero? (bit-and (count tokens) 1023)) (ctx/poll!))
                   (conj! tokens {:type type :text text :line l :col c})))
                ([type text start raw]
                 (let [[l c] (pos->lc start)]
+                  (when (zero? (bit-and (count tokens) 1023)) (ctx/poll!))
                   (conj! tokens {:type type :text text :line l :col c :raw raw}))))]
     (loop [i 0]
       (if (>= i n)
