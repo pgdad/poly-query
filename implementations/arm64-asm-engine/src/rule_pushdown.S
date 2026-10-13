@@ -32,8 +32,7 @@
 //   [sp] conjunct Vec (n, cap, data)
 // =============================================================================
 FUNC rule_push_filters
-    STACK_GUARD                         // CR-6: recursive
-    DEADLINE_TICK
+    GUARD_TICK                          // CR-6: recursive
     cbz  x0, 9f
     ENTER 4
     sub  sp, sp, #32
@@ -103,8 +102,7 @@ ENDF rule_push_filters
 //   x24 left mask, x25 right mask, [sp] conjunct Vec
 // =============================================================================
 FUNC rule_push_join_conditions
-    STACK_GUARD                         // CR-6: recursive
-    DEADLINE_TICK
+    GUARD_TICK                          // CR-6: recursive
     cbz  x0, 9f
     ENTER 5
     sub  sp, sp, #32
@@ -189,8 +187,7 @@ ENDF rule_push_join_conditions
 //   x19 node, x20 conjunct, x21 mask
 // =============================================================================
 LFUNC lp_push
-    STACK_GUARD                         // CR-6: recursive
-    DEADLINE_TICK
+    GUARD_TICK                          // CR-6: recursive
     ENTER 2
     mov  x19, x0
     mov  x20, x1

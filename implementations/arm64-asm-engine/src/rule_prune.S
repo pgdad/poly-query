@@ -20,8 +20,7 @@
 //   x19 plan, x20 bq, x21 column-flag array per rv (u8**), x22 rv index
 // =============================================================================
 FUNC rule_prune_columns
-    STACK_GUARD                         // CR-6: recursive
-    DEADLINE_TICK
+    GUARD_TICK                          // CR-6: recursive
     cbz  x0, 9f
     ENTER 3
     mov  x19, x0
@@ -87,8 +86,7 @@ ENDF rule_prune_columns
 // Scan of the FROM tree an empty column set and records it
 //   x19 node, x20 array
 LFUNC pr_scans
-    STACK_GUARD                         // CR-6: recursive
-    DEADLINE_TICK
+    GUARD_TICK                          // CR-6: recursive
     cbz  x0, 9f
     ENTER 2
     mov  x19, x0
@@ -129,8 +127,7 @@ ENDF pr_slot
 // pr_expr(x0 Node*, x1 u8** per rv)
 //   x19 node, x20 array, x21 index, x22 count
 LFUNC pr_expr
-    STACK_GUARD                         // CR-6: recursive
-    DEADLINE_TICK
+    GUARD_TICK                          // CR-6: recursive
     ENTER 3
     mov  x19, x0
     mov  x20, x1

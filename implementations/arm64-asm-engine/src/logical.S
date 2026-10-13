@@ -54,8 +54,7 @@ ENDF ln_new
 //   x19 bq, x20 current top node
 // =============================================================================
 FUNC lp_build
-    STACK_GUARD                         // CR-6: recursive
-    DEADLINE_TICK
+    GUARD_TICK                          // CR-6: recursive
     ldr  x9, [x0, #BQ_NUNION]
     cbnz x9, lp_union
     ENTER 2
@@ -106,8 +105,7 @@ ENDF lp_build
 //   Limit? <- Sort? <- UnionAll(branch plans, in order)
 //   x19 bq, x20 node, x21 index, x22 children array
 LFUNC lp_union
-    STACK_GUARD                         // CR-6: recursive
-    DEADLINE_TICK
+    GUARD_TICK                          // CR-6: recursive
     ENTER 3
     mov  x19, x0
     mov  w0, #LO_UNION
@@ -168,8 +166,7 @@ ENDF lp_upper
 // lp_from(x0 BoundQuery*, x1 BoundFrom*) -> x0 LogicalNode* (FROM tree)
 //   x19 bq, x20 BoundFrom*, x21 rv index / join node
 LFUNC lp_from
-    STACK_GUARD                         // CR-6: recursive
-    DEADLINE_TICK
+    GUARD_TICK                          // CR-6: recursive
     ENTER 3
     mov  x19, x0
     mov  x20, x1
@@ -224,8 +221,7 @@ ENDF lp_from
 //   x19 node, x20 fn, x21 arg, x22 bq, x23 index
 // =============================================================================
 FUNC lp_exprs
-    STACK_GUARD                         // CR-6: recursive
-    DEADLINE_TICK
+    GUARD_TICK                          // CR-6: recursive
     cbz  x0, 9f
     ENTER 4
     mov  x19, x0
@@ -329,8 +325,7 @@ ENDF lp_print
 //   x19 buf, x20 node, x21 depth, x22 bq, x23 index / RV*, x24 scratch,
 //   x25 / x26 column loop
 LFUNC lp_print_at
-    STACK_GUARD                         // CR-6: recursive
-    DEADLINE_TICK
+    GUARD_TICK                          // CR-6: recursive
     ENTER 4
     mov  x19, x0
     mov  x20, x1
@@ -614,8 +609,7 @@ ENDF lp_print_at
 //   x19 buf, x20 node, x21 bq, x22 index, x23 count
 // =============================================================================
 FUNC lp_print_expr
-    STACK_GUARD                         // CR-6: recursive
-    DEADLINE_TICK
+    GUARD_TICK                          // CR-6: recursive
     ENTER 3
     mov  x19, x0
     mov  x20, x1

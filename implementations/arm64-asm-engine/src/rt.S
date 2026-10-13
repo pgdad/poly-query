@@ -37,7 +37,8 @@ g_err_col:       .skip 4
     .global g_stack_limit
 g_stack_limit:   .skip 8       // lowest sp allowed (STACK_GUARD); 0 = unchecked
     .global g_tick
-g_tick:          .skip 4       // DEADLINE_TICK countdown
+g_tick:          .skip 8       // DEADLINE_TICK countdown (u32); must follow
+                               // g_stack_limit (GUARD_TICK, pq.inc)
 
     // process-wide settings (written once by main before any thread starts)
     .bss

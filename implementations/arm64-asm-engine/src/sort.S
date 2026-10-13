@@ -908,8 +908,7 @@ ENDF rx_bucket_task
 // Stack: [sp] 256 u64 counters / bucket ends
 // =============================================================================
 LFUNC rx_msd
-    STACK_GUARD                         // CR-6: recursive
-    DEADLINE_TICK
+    GUARD_TICK                          // CR-6: recursive
     ENTER 5
     sub  sp, sp, #2048
     mov  x19, x0

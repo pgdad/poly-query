@@ -136,6 +136,27 @@
 8898:
 .endm
 
+// GUARD_TICK: STACK_GUARD and DEADLINE_TICK sharing one TLS address
+// (g_tick is the word after g_stack_limit, rt.S). Same clobbers.
+.macro GUARD_TICK
+    mrs  x16, tpidr_el0
+    add  x16, x16, #:tprel_hi12:g_stack_limit, lsl #12
+    add  x16, x16, #:tprel_lo12_nc:g_stack_limit
+    ldr  x17, [x16]
+    cmp  sp, x17
+    b.hs 8897f
+    bl   stack_exhausted
+8897:
+    ldr  w17, [x16, #8]
+    subs w17, w17, #1
+    str  w17, [x16, #8]
+    b.hi 8896f
+    stp  x29, x30, [sp, #-16]!
+    bl   deadline_tick
+    ldp  x29, x30, [sp], #16
+8896:
+.endm
+
 // Every object file must carry this (no executable stack).
 .macro NOTE_GNU_STACK
     .section .note.GNU-stack,"",%progbits

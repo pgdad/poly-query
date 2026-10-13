@@ -70,13 +70,12 @@ ENDF raise_div0
 // Dispatcher: tail-calls the evaluator of the node kind (no frame of its own).
 // =============================================================================
 FUNC eval
-    STACK_GUARD                         // CR-6: recursive
-    DEADLINE_TICK
     ldr  w9, [x0, #N_KIND]
     cmp  w9, #NK_COL
     b.eq ev_col
     cmp  w9, #NK_LIT
     b.eq ev_lit
+    GUARD_TICK                          // CR-6: recursive (leaves are not)
     cmp  w9, #NK_BINARY
     b.eq ev_binary
     cmp  w9, #NK_CAST

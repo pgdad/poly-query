@@ -604,8 +604,7 @@ ENDF wk_inline
 //   x19 node, x20 index, x21 count
 // =============================================================================
 FUNC expr_par_safe
-    STACK_GUARD                         // CR-6: recursive
-    DEADLINE_TICK
+    GUARD_TICK                          // CR-6: recursive
     cbnz x0, 1f
     mov  w0, #1
     ret

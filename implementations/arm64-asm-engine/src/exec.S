@@ -199,8 +199,7 @@ ENDF eval_true
 //   x19 root, x20 ctx
 // =============================================================================
 FUNC exec_plan
-    STACK_GUARD                         // CR-6: recursive
-    DEADLINE_TICK
+    GUARD_TICK                          // CR-6: recursive
     ENTER 2
     mov  x19, x0
     bl   exec_settings
@@ -302,8 +301,7 @@ ENDF exec_plan_stream
 //   x19 node, x20 ctx, x21 bq, x22 result set
 // =============================================================================
 LFUNC ex_rows
-    STACK_GUARD                         // CR-6: recursive
-    DEADLINE_TICK
+    GUARD_TICK                          // CR-6: recursive
     ENTER 3
     mov  x19, x0
     mov  x20, x1
@@ -430,8 +428,7 @@ ENDF ex_rows
 //   x24 result set, x25 destination cursor
 // =============================================================================
 LFUNC ex_union
-    STACK_GUARD                         // CR-6: recursive
-    DEADLINE_TICK
+    GUARD_TICK                          // CR-6: recursive
     ENTER 4
     mov  x19, x0
     mov  x20, x1
@@ -543,8 +540,7 @@ ENDF project_row
 //   [sp] sink, [sp+8] batch cells, [sp+16] first row of the batch
 // =============================================================================
 LFUNC ex_project
-    STACK_GUARD                         // CR-6: recursive
-    DEADLINE_TICK
+    GUARD_TICK                          // CR-6: recursive
     cbnz x4, 0f                         // mode "row": rows pulled from the
     TLS_ADDR x9, g_x_mode               // iterator tree (volcano.S)
     ldr  w9, [x9]
@@ -660,8 +656,7 @@ ENDF ex_project
 // Stack: [sp] null tuple / scratch
 // =============================================================================
 LFUNC ex_aggregate
-    STACK_GUARD                         // CR-6: recursive
-    DEADLINE_TICK
+    GUARD_TICK                          // CR-6: recursive
     ENTER 5
     mov  x19, x0
     mov  x20, x1
@@ -807,8 +802,7 @@ ENDF ex_aggregate
 //   x25 first, x26 end, x27 rs, x28 state
 // =============================================================================
 LFUNC agg_group
-    STACK_GUARD                         // CR-6: recursive
-    DEADLINE_TICK
+    GUARD_TICK                          // CR-6: recursive
     ENTER 5
     mov  x19, x0
     mov  x20, x1
@@ -935,8 +929,7 @@ ENDF null_tuple
 //   x25 index; stack: ts, records, rec size, first, end, state
 // =============================================================================
 LFUNC agg_distinct
-    STACK_GUARD                         // CR-6: recursive
-    DEADLINE_TICK
+    GUARD_TICK                          // CR-6: recursive
     ENTER 5
     sub  sp, sp, #64
     stp  x2, x3, [sp]
@@ -1348,8 +1341,7 @@ ENDF distinct_rows
 //   x19 node, x20 ctx, x21 bq
 // =============================================================================
 FUNC ex_tuples
-    STACK_GUARD                         // CR-6: recursive
-    DEADLINE_TICK
+    GUARD_TICK                          // CR-6: recursive
     TLS_ADDR x9, g_x_mode               // mode "row": Volcano iterators
     ldr  w9, [x9]
     cmp  w9, #XM_ROW
@@ -1410,8 +1402,7 @@ ENDF ex_tuples
 //   count, x26 total rows; [sp] RowVec (index scans), [sp+24] cursor
 // =============================================================================
 FUNC scan_ranges
-    STACK_GUARD                         // CR-6: recursive
-    DEADLINE_TICK
+    GUARD_TICK                          // CR-6: recursive
     ENTER 5
     sub  sp, sp, #32
     mov  x19, x0
@@ -1530,8 +1521,7 @@ ENDF scan_ranges
 //   x27 tasks, x28 task records; [sp] scratch
 // =============================================================================
 LFUNC ex_scan
-    STACK_GUARD                         // CR-6: recursive
-    DEADLINE_TICK
+    GUARD_TICK                          // CR-6: recursive
     ENTER 5
     sub  sp, sp, #32
     mov  x19, x0
@@ -1682,8 +1672,7 @@ ENDF ts_concat
 //   [sp+32] batch tuples
 // =============================================================================
 FUNC scan_task
-    STACK_GUARD                         // CR-6: recursive
-    DEADLINE_TICK
+    GUARD_TICK                          // CR-6: recursive
     ENTER 5
     sub  sp, sp, #48
     mov  x19, x0
@@ -1935,8 +1924,7 @@ ENDF index_rows
 //   x19 RV*, x20 ctx, x21 SubPlan*
 // =============================================================================
 LFUNC rv_table
-    STACK_GUARD                         // CR-6: recursive
-    DEADLINE_TICK
+    GUARD_TICK                          // CR-6: recursive
     ENTER 2
     ldr  x9, [x0, #BQ_RVS]
     mov  x10, #RV_SIZE
@@ -1969,8 +1957,7 @@ ENDF rv_table
 //   x19 sp, x20 rs, x21 shape, x22 table, x23 column, x24 row, x25 Column*
 // =============================================================================
 LFUNC materialize
-    STACK_GUARD                         // CR-6: recursive
-    DEADLINE_TICK
+    GUARD_TICK                          // CR-6: recursive
     ENTER 4
     mov  x19, x0
     mov  x21, x2
@@ -2060,8 +2047,7 @@ ENDF materialize
 //   x19 sp
 // =============================================================================
 LFUNC sp_rows
-    STACK_GUARD                         // CR-6: recursive
-    DEADLINE_TICK
+    GUARD_TICK                          // CR-6: recursive
     ENTER 1
     mov  x19, x0
     ldr  x9, [x19, #SP_DONE]

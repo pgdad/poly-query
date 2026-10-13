@@ -307,8 +307,7 @@ ENDF bind_unit
 //   accumulator, x25 Node** args, w26 id / scratch, w27/x28 scratch
 // =============================================================================
 FUNC bind_scalar_func
-    STACK_GUARD                         // CR-6: recursive
-    DEADLINE_TICK
+    GUARD_TICK                          // CR-6: recursive
     ENTER 5
     mov  x19, x0
     mov  x20, x1
@@ -571,8 +570,7 @@ ENDF bind_scalar_func
 //   w26 result type
 // =============================================================================
 FUNC bind_case
-    STACK_GUARD                         // CR-6: recursive
-    DEADLINE_TICK
+    GUARD_TICK                          // CR-6: recursive
     ENTER 5
     mov  x19, x0
     mov  x20, x1
@@ -706,8 +704,7 @@ ENDF new_logic
 //   x19 ctx, x20 node, x21 x, x22 a / x >= a, x23 b / x <= b
 // =============================================================================
 FUNC bind_between
-    STACK_GUARD                         // CR-6: recursive
-    DEADLINE_TICK
+    GUARD_TICK                          // CR-6: recursive
     ENTER 3
     mov  x19, x0
     mov  x20, x1
@@ -755,8 +752,7 @@ ENDF bind_between
 //   w25 NF_CONST accumulator
 // =============================================================================
 FUNC bind_inlist
-    STACK_GUARD                         // CR-6: recursive
-    DEADLINE_TICK
+    GUARD_TICK                          // CR-6: recursive
     ENTER 4
     mov  x19, x0
     mov  x20, x1
@@ -794,8 +790,7 @@ ENDF bind_inlist
 //   x19 ctx, x20 node, x21 bound string
 // =============================================================================
 FUNC bind_like
-    STACK_GUARD                         // CR-6: recursive
-    DEADLINE_TICK
+    GUARD_TICK                          // CR-6: recursive
     ENTER 2
     mov  x19, x0
     mov  x20, x1

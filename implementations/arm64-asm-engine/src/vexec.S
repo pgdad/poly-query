@@ -129,8 +129,7 @@ ENDF vpool_put
 //   x19 node
 // =============================================================================
 LFUNC is_pure_const
-    STACK_GUARD                         // CR-6: recursive
-    DEADLINE_TICK
+    GUARD_TICK                          // CR-6: recursive
     ENTER 1
     mov  x19, x0
     ldr  w9, [x19, #N_KIND]
@@ -162,8 +161,7 @@ ENDF is_pure_const
 //        operand types of a comparison
 // =============================================================================
 FUNC veval
-    STACK_GUARD                         // CR-6: recursive
-    DEADLINE_TICK
+    GUARD_TICK                          // CR-6: recursive
     ENTER 5
     sub  sp, sp, #16
     mov  x19, x0
@@ -979,8 +977,7 @@ ENDF dict_single
 // at subtrees marked before, so marking a chain level by level stays linear
 //   x19 node, x20 child index, x21 children
 LFUNC ds_mark_nodict
-    STACK_GUARD                         // CR-6: recursive
-    DEADLINE_TICK
+    GUARD_TICK                          // CR-6: recursive
     ENTER 3
     mov  x19, x0
     ldr  w9, [x19, #N_FLAGS]
@@ -1013,8 +1010,7 @@ ENDF ds_mark_nodict
 //   x19 node, x20 caller's state, x21 child index, x22 children
 //   stack: [sp] this node's state (rv, column, bad, complex)
 LFUNC ds_walk
-    STACK_GUARD                         // CR-6: recursive
-    DEADLINE_TICK
+    GUARD_TICK                          // CR-6: recursive
     ENTER 2
     sub  sp, sp, #32
     mov  x19, x0
@@ -1230,8 +1226,7 @@ ENDF dict_truth
 // Positions 0..VB_N-1 for which the predicate is TRUE.
 // =============================================================================
 FUNC vfilter
-    STACK_GUARD                         // CR-6: recursive
-    DEADLINE_TICK
+    GUARD_TICK                          // CR-6: recursive
     mov  x4, x2
     mov  x2, x1
     mov  x1, x0
@@ -1255,8 +1250,7 @@ ENDF vfilter
 //   x25 positions where the left operand is not FALSE
 // =============================================================================
 FUNC vfilter_sel
-    STACK_GUARD                         // CR-6: recursive
-    DEADLINE_TICK
+    GUARD_TICK                          // CR-6: recursive
     ENTER 4
     mov  x19, x0
     mov  x20, x1
@@ -1364,8 +1358,7 @@ ENDF vfilter_sel
 //        [sp+32] end of the window
 // =============================================================================
 FUNC vkey_cells
-    STACK_GUARD                         // CR-6: recursive
-    DEADLINE_TICK
+    GUARD_TICK                          // CR-6: recursive
     ENTER 5
     sub  sp, sp, #48
     ldr  x19, [x0, #VK_TS]
