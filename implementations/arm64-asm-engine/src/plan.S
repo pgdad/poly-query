@@ -76,6 +76,7 @@ ENDF plan_query
 // =============================================================================
 FUNC split_conj
     STACK_GUARD                         // CR-6: recursive
+    DEADLINE_TICK
     ENTER 2
     mov  x19, x0
     mov  x20, x1
@@ -158,6 +159,7 @@ ENDF pvec_push
 // =============================================================================
 FUNC expr_rvmask
     STACK_GUARD                         // CR-6: recursive
+    DEADLINE_TICK
     ENTER 3
     mov  x19, x0
     mov  x20, #0
@@ -211,6 +213,7 @@ ENDF expr_rvmask
 // =============================================================================
 FUNC plan_explain
     STACK_GUARD                         // CR-6: recursive
+    DEADLINE_TICK
     ENTER 4
     mov  x19, x0
     mov  x20, x1
@@ -500,6 +503,7 @@ ENDF plan_explain
 // =============================================================================
 LFUNC pe_subplans
     STACK_GUARD                         // CR-6: recursive
+    DEADLINE_TICK
     ENTER 4
     mov  x19, x0
     mov  x20, x1
@@ -590,6 +594,7 @@ ENDF pe_subplans
 //   x19 buf, x20 node, x21 count, x22 index, x23 child count
 LFUNC pe_expr
     STACK_GUARD                         // CR-6: recursive
+    DEADLINE_TICK
     ENTER 4
     mov  x19, x0
     mov  x20, x1

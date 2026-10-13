@@ -71,6 +71,7 @@ ENDF raise_div0
 // =============================================================================
 FUNC eval
     STACK_GUARD                         // CR-6: recursive
+    DEADLINE_TICK
     ldr  w9, [x0, #N_KIND]
     cmp  w9, #NK_COL
     b.eq ev_col
@@ -299,6 +300,85 @@ LFUNC ev_isnull
 ENDF ev_isnull
 
 // =============================================================================
+// ev_concat_chain(x0 Node*, x1 ctx) -> x0 Str*, x1 isnull
+// A left-deep chain o0 || o1 || ... || ok (k >= 2): the operands are
+// evaluated left to right like the nested binary nodes would, then copied
+// into one string. Linear time and memory, and no recursion along the chain
+// (CR-6: pairwise evaluation allocates O(k^2) bytes per row).
+//   x19 node, x20 ctx, x21 operand array (Node*, then Str*), x22 k,
+//   x23 index, x24 any NULL, x25 total length / destination
+// =============================================================================
+LFUNC ev_concat_chain
+    ENTER 5
+    mov  x19, x0
+    mov  x20, x1
+    mov  x22, #0                        // count the || nodes of the spine
+    mov  x9, x19
+1:  ldr  w10, [x9, #N_KIND]
+    cmp  w10, #NK_BINARY
+    b.ne 2f
+    ldr  w10, [x9, #N_OP]
+    cmp  w10, #OP_CONCAT
+    b.ne 2f
+    add  x22, x22, #1
+    ldr  x9, [x9, #N_A]
+    b    1b
+2:  add  x0, x22, #1
+    lsl  x0, x0, #3
+    bl   arena_alloc
+    mov  x21, x0
+    mov  x9, x19                        // operands, rightmost last
+    mov  x23, x22
+3:  cbz  x23, 4f
+    ldr  x10, [x9, #N_B]
+    str  x10, [x21, x23, lsl #3]
+    sub  x23, x23, #1
+    ldr  x9, [x9, #N_A]
+    b    3b
+4:  str  x9, [x21]
+    mov  x24, #0
+    mov  x25, #0
+    mov  x23, #0
+5:  cmp  x23, x22                       // evaluate o0 .. ok in order
+    b.hi 6f
+    ldr  x0, [x21, x23, lsl #3]
+    mov  x1, x20
+    bl   eval
+    str  x0, [x21, x23, lsl #3]
+    orr  x24, x24, x1
+    cbnz x1, 51f
+    ldr  x9, [x0, #STR_LEN]
+    add  x25, x25, x9
+51: add  x23, x23, #1
+    b    5b
+6:  cbnz x24, 9f                        // any NULL operand => NULL
+    add  x0, x25, #(STR_DATA + 1)
+    bl   arena_alloc
+    str  x25, [x0, #STR_LEN]
+    add  x9, x0, #STR_DATA
+    strb wzr, [x9, x25]                 // NUL terminator after the bytes
+    mov  x25, x0
+    mov  x23, #0
+    mov  x24, x9                        // write position
+7:  cmp  x23, x22
+    b.hi 8f
+    ldr  x1, [x21, x23, lsl #3]
+    ldr  x2, [x1, #STR_LEN]
+    add  x1, x1, #STR_DATA
+    mov  x0, x24
+    add  x24, x24, x2
+    bl   memcpy
+    add  x23, x23, #1
+    b    7b
+8:  mov  x0, x25
+    mov  x1, #0
+    LEAVE 5
+9:  mov  x0, #0
+    mov  x1, #1
+    LEAVE 5
+ENDF ev_concat_chain
+
+// =============================================================================
 // ev_binary: arithmetic, ||, comparisons, AND/OR.
 //   x19 node, x20 ctx, x21 left payload, x22 left isnull, w23 op
 // =============================================================================
@@ -310,7 +390,18 @@ LFUNC ev_binary
     cmp  w23, #OP_AND
     b.hs .Lbin_logic
     ldr  x0, [x19, #N_A]
-    bl   eval
+    cmp  w23, #OP_CONCAT                // a || b || c ...: one pass
+    b.ne 1f
+    ldr  w9, [x0, #N_KIND]
+    cmp  w9, #NK_BINARY
+    b.ne 1f
+    ldr  w9, [x0, #N_OP]
+    cmp  w9, #OP_CONCAT
+    b.ne 1f
+    mov  x0, x19
+    LEAVE_NORET 3
+    b    ev_concat_chain
+1:  bl   eval
     mov  x21, x0
     mov  x22, x1
     ldr  x0, [x19, #N_B]

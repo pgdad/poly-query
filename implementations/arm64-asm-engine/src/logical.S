@@ -55,6 +55,7 @@ ENDF ln_new
 // =============================================================================
 FUNC lp_build
     STACK_GUARD                         // CR-6: recursive
+    DEADLINE_TICK
     ldr  x9, [x0, #BQ_NUNION]
     cbnz x9, lp_union
     ENTER 2
@@ -106,6 +107,7 @@ ENDF lp_build
 //   x19 bq, x20 node, x21 index, x22 children array
 LFUNC lp_union
     STACK_GUARD                         // CR-6: recursive
+    DEADLINE_TICK
     ENTER 3
     mov  x19, x0
     mov  w0, #LO_UNION
@@ -167,6 +169,7 @@ ENDF lp_upper
 //   x19 bq, x20 BoundFrom*, x21 rv index / join node
 LFUNC lp_from
     STACK_GUARD                         // CR-6: recursive
+    DEADLINE_TICK
     ENTER 3
     mov  x19, x0
     mov  x20, x1
@@ -222,6 +225,7 @@ ENDF lp_from
 // =============================================================================
 FUNC lp_exprs
     STACK_GUARD                         // CR-6: recursive
+    DEADLINE_TICK
     cbz  x0, 9f
     ENTER 4
     mov  x19, x0
@@ -326,6 +330,7 @@ ENDF lp_print
 //   x25 / x26 column loop
 LFUNC lp_print_at
     STACK_GUARD                         // CR-6: recursive
+    DEADLINE_TICK
     ENTER 4
     mov  x19, x0
     mov  x20, x1
@@ -610,6 +615,7 @@ ENDF lp_print_at
 // =============================================================================
 FUNC lp_print_expr
     STACK_GUARD                         // CR-6: recursive
+    DEADLINE_TICK
     ENTER 3
     mov  x19, x0
     mov  x20, x1

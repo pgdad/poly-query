@@ -33,6 +33,7 @@
 // =============================================================================
 FUNC rule_push_filters
     STACK_GUARD                         // CR-6: recursive
+    DEADLINE_TICK
     cbz  x0, 9f
     ENTER 4
     sub  sp, sp, #32
@@ -103,6 +104,7 @@ ENDF rule_push_filters
 // =============================================================================
 FUNC rule_push_join_conditions
     STACK_GUARD                         // CR-6: recursive
+    DEADLINE_TICK
     cbz  x0, 9f
     ENTER 5
     sub  sp, sp, #32
@@ -188,6 +190,7 @@ ENDF rule_push_join_conditions
 // =============================================================================
 LFUNC lp_push
     STACK_GUARD                         // CR-6: recursive
+    DEADLINE_TICK
     ENTER 2
     mov  x19, x0
     mov  x20, x1

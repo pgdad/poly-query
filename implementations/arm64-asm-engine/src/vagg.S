@@ -196,6 +196,7 @@ ENDF agg_par_ok
 // =============================================================================
 FUNC vagg_aggregate
     STACK_GUARD                         // CR-6: recursive
+    DEADLINE_TICK
     ENTER 5
     sub  sp, sp, #16
     mov  x19, x0
@@ -1031,6 +1032,7 @@ ENDF gt_rehash
 // =============================================================================
 FUNC agg_task
     STACK_GUARD                         // CR-6: recursive
+    DEADLINE_TICK
     ENTER 5
     sub  sp, sp, #64
     mov  x19, x0
@@ -1330,6 +1332,7 @@ ENDF agg_task
 // =============================================================================
 LFUNC vagg_distinct
     STACK_GUARD                         // CR-6: recursive
+    DEADLINE_TICK
     ENTER 5
     sub  sp, sp, #48
     mov  x19, x0
@@ -1514,6 +1517,7 @@ ENDF vagg_distinct
 // =============================================================================
 LFUNC dagg_task
     STACK_GUARD                         // CR-6: recursive
+    DEADLINE_TICK
     ENTER 5
     sub  sp, sp, #32
     mov  x19, x0
@@ -2049,6 +2053,7 @@ ENDF merge_task
 // =============================================================================
 LFUNC emit_groups
     STACK_GUARD                         // CR-6: recursive
+    DEADLINE_TICK
     ENTER 5
     sub  sp, sp, #32
     mov  x19, x0
@@ -2162,6 +2167,7 @@ ENDF emit_groups
 //   x25 node
 LFUNC emit_task
     STACK_GUARD                         // CR-6: recursive
+    DEADLINE_TICK
     ENTER 5
     mov  x19, x0
     ldr  x20, [x19, #ET_CTX]

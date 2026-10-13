@@ -30,6 +30,7 @@ ENDF rule_simplify_predicates
 //   x19 slot
 LFUNC simplify_slot
     STACK_GUARD                         // CR-6: recursive
+    DEADLINE_TICK
     ENTER 1
     mov  x19, x0
     ldr  x0, [x19]
@@ -44,6 +45,7 @@ ENDF simplify_slot
 // =============================================================================
 LFUNC simplify_expr
     STACK_GUARD                         // CR-6: recursive
+    DEADLINE_TICK
     ENTER 2
     mov  x19, x0
     ldr  w9, [x19, #N_KIND]
@@ -151,6 +153,7 @@ ENDF lit_truth
 // =============================================================================
 LFUNC drop_true
     STACK_GUARD                         // CR-6: recursive
+    DEADLINE_TICK
     cbz  x0, 9f
     ENTER 2
     mov  x19, x0

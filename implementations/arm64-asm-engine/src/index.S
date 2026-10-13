@@ -558,6 +558,7 @@ ENDF index_stmt
 //   x19 vec, w20 row, x21 new cap
 FUNC rowvec_push
     STACK_GUARD                         // CR-6: recursive
+    DEADLINE_TICK
     ldp  x9, x10, [x0]
     cmp  x9, x10
     b.hs 1f

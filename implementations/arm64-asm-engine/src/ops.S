@@ -122,6 +122,7 @@ ENDF ot_exec
 // =============================================================================
 FUNC ex_filter
     STACK_GUARD                         // CR-6: recursive
+    DEADLINE_TICK
     ENTER 3
     sub  sp, sp, #OT_SIZE
     mov  x19, x0
@@ -162,6 +163,7 @@ ENDF ex_filter
 // =============================================================================
 FUNC filter_task
     STACK_GUARD                         // CR-6: recursive
+    DEADLINE_TICK
     ENTER 5
     mov  x19, x0
     ldr  x20, [x19, #OT_CTX]
@@ -260,6 +262,7 @@ ENDF filter_task
 // =============================================================================
 FUNC project_rows
     STACK_GUARD                         // CR-6: recursive
+    DEADLINE_TICK
     ENTER 3
     sub  sp, sp, #OT_SIZE
     str  x0, [sp, #OT_NODE]
@@ -325,6 +328,7 @@ ENDF bq_out_par_safe
 // =============================================================================
 FUNC project_task
     STACK_GUARD                         // CR-6: recursive
+    DEADLINE_TICK
     ENTER 5
     mov  x19, x0
     ldr  x20, [x19, #OT_CTX]

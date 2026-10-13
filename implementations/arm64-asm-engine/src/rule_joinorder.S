@@ -31,6 +31,7 @@
 // =============================================================================
 FUNC rule_reorder_joins
     STACK_GUARD                         // CR-6: recursive
+    DEADLINE_TICK
     cbz  x0, 9f
     ldr  w9, [x0, #LN_OP]
     cmp  w9, #LO_JOIN
@@ -62,6 +63,7 @@ ENDF rule_reorder_joins
 // =============================================================================
 LFUNC jo_order
     STACK_GUARD                         // CR-6: recursive
+    DEADLINE_TICK
     ENTER 2
     sub  sp, sp, #64
     mov  x19, x0
@@ -104,6 +106,7 @@ ENDF jo_order
 //   x19 node, x20 inputs, x21 conditions
 LFUNC jo_collect
     STACK_GUARD                         // CR-6: recursive
+    DEADLINE_TICK
     ENTER 3
     mov  x19, x0
     mov  x20, x1

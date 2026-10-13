@@ -81,6 +81,7 @@ ENDF it_emit
 // =============================================================================
 FUNC it_open
     STACK_GUARD                         // CR-6: recursive
+    DEADLINE_TICK
     ENTER 3
     mov  x19, x0
     mov  x20, x1
@@ -479,6 +480,7 @@ ENDF it_hj_next
 // =============================================================================
 FUNC it_drain
     STACK_GUARD                         // CR-6: recursive
+    DEADLINE_TICK
     ENTER 2
     bl   it_open
     mov  x19, x0

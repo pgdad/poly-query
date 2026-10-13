@@ -909,6 +909,7 @@ ENDF rx_bucket_task
 // =============================================================================
 LFUNC rx_msd
     STACK_GUARD                         // CR-6: recursive
+    DEADLINE_TICK
     ENTER 5
     sub  sp, sp, #2048
     mov  x19, x0

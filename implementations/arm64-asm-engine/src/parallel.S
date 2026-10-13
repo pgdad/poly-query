@@ -605,6 +605,7 @@ ENDF wk_inline
 // =============================================================================
 FUNC expr_par_safe
     STACK_GUARD                         // CR-6: recursive
+    DEADLINE_TICK
     cbnz x0, 1f
     mov  w0, #1
     ret

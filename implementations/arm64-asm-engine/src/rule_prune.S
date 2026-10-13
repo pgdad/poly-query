@@ -21,6 +21,7 @@
 // =============================================================================
 FUNC rule_prune_columns
     STACK_GUARD                         // CR-6: recursive
+    DEADLINE_TICK
     cbz  x0, 9f
     ENTER 3
     mov  x19, x0
@@ -87,6 +88,7 @@ ENDF rule_prune_columns
 //   x19 node, x20 array
 LFUNC pr_scans
     STACK_GUARD                         // CR-6: recursive
+    DEADLINE_TICK
     cbz  x0, 9f
     ENTER 2
     mov  x19, x0
@@ -128,6 +130,7 @@ ENDF pr_slot
 //   x19 node, x20 array, x21 index, x22 count
 LFUNC pr_expr
     STACK_GUARD                         // CR-6: recursive
+    DEADLINE_TICK
     ENTER 3
     mov  x19, x0
     mov  x20, x1

@@ -115,6 +115,27 @@
 8899:
 .endm
 
+// DEADLINE_TICK: every DEADLINE_TICKS-th execution calls check_deadline
+// (deadline_tick, rt.S: raises TIMEOUT / CANCELLED). Placed at the entry of
+// the recursive passes over statements (parser, binder, optimizer, planner,
+// expression evaluators) so the timeout covers every stage (CR-6 §4).
+// Clobbers x16, x17 and the flags only (every other register is preserved),
+// so it may precede the prologue.
+#define DEADLINE_TICKS 1024
+.macro DEADLINE_TICK
+    mrs  x16, tpidr_el0
+    add  x16, x16, #:tprel_hi12:g_tick, lsl #12
+    add  x16, x16, #:tprel_lo12_nc:g_tick
+    ldr  w17, [x16]
+    subs w17, w17, #1
+    str  w17, [x16]
+    b.hi 8898f
+    stp  x29, x30, [sp, #-16]!
+    bl   deadline_tick
+    ldp  x29, x30, [sp], #16
+8898:
+.endm
+
 // Every object file must carry this (no executable stack).
 .macro NOTE_GNU_STACK
     .section .note.GNU-stack,"",%progbits

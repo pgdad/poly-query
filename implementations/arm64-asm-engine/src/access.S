@@ -46,6 +46,7 @@ k_small:    .double 16.0
 // =============================================================================
 LFUNC const_value
     STACK_GUARD                         // CR-6: recursive
+    DEADLINE_TICK
     ENTER 2
     mov  x19, x0
     ldr  w9, [x19, #N_KIND]

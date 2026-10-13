@@ -148,6 +148,7 @@ ENDF key_records
 // =============================================================================
 FUNC ex_nljoin
     STACK_GUARD                         // CR-6: recursive
+    DEADLINE_TICK
     ENTER 5
     sub  sp, sp, #48
     mov  x19, x0
@@ -311,6 +312,7 @@ ENDF ex_nljoin
 #define MJ_SIZE     144
 FUNC ex_mergejoin
     STACK_GUARD                         // CR-6: recursive
+    DEADLINE_TICK
     ENTER 5
     sub  sp, sp, #48
     mov  x19, x0
@@ -535,6 +537,7 @@ ENDF ex_mergejoin
 // =============================================================================
 LFUNC mj_task
     STACK_GUARD                         // CR-6: recursive
+    DEADLINE_TICK
     ENTER 5
     sub  sp, sp, #16
     mov  x19, x0
@@ -809,6 +812,7 @@ ENDF mj_lower_bound
 // =============================================================================
 FUNC mj_side
     STACK_GUARD                         // CR-6: recursive
+    DEADLINE_TICK
     ENTER 5
     sub  sp, sp, #32
     str  xzr, [sp, #24]                 // [sp+24] sorted payloads
@@ -1308,6 +1312,7 @@ ENDF keys_equal
 // =============================================================================
 FUNC ex_hashjoin
     STACK_GUARD                         // CR-6: recursive
+    DEADLINE_TICK
     ENTER 5
     sub  sp, sp, #16
     mov  x19, x0
@@ -1572,6 +1577,7 @@ ENDF hj_table
 // =============================================================================
 FUNC join_keys
     STACK_GUARD                         // CR-6: recursive
+    DEADLINE_TICK
     ENTER 5
     mov  x19, x0
     mov  x20, x1

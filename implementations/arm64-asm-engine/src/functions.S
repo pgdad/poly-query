@@ -308,6 +308,7 @@ ENDF bind_unit
 // =============================================================================
 FUNC bind_scalar_func
     STACK_GUARD                         // CR-6: recursive
+    DEADLINE_TICK
     ENTER 5
     mov  x19, x0
     mov  x20, x1
@@ -571,6 +572,7 @@ ENDF bind_scalar_func
 // =============================================================================
 FUNC bind_case
     STACK_GUARD                         // CR-6: recursive
+    DEADLINE_TICK
     ENTER 5
     mov  x19, x0
     mov  x20, x1
@@ -705,6 +707,7 @@ ENDF new_logic
 // =============================================================================
 FUNC bind_between
     STACK_GUARD                         // CR-6: recursive
+    DEADLINE_TICK
     ENTER 3
     mov  x19, x0
     mov  x20, x1
@@ -753,6 +756,7 @@ ENDF bind_between
 // =============================================================================
 FUNC bind_inlist
     STACK_GUARD                         // CR-6: recursive
+    DEADLINE_TICK
     ENTER 4
     mov  x19, x0
     mov  x20, x1
@@ -791,6 +795,7 @@ ENDF bind_inlist
 // =============================================================================
 FUNC bind_like
     STACK_GUARD                         // CR-6: recursive
+    DEADLINE_TICK
     ENTER 2
     mov  x19, x0
     mov  x20, x1

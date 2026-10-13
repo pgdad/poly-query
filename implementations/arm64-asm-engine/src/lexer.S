@@ -269,6 +269,7 @@ FUNC lex_tokenize
 
 // ---- start a token ------------------------------------------------------------
 .Ltoken:
+    DEADLINE_TICK                       // CR-6: the timeout covers lexing
     mov  x27, x19
     TRACK_TO_X27
     // Keep room for this token and the final EOF token: need count+2 <= cap.

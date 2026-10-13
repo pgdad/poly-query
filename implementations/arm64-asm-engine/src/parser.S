@@ -265,6 +265,7 @@ ENDF parse_sql
 // -----------------------------------------------------------------------------
 LFUNC p_query
     STACK_GUARD                         // CR-6: recursive
+    DEADLINE_TICK
     stp  x29, x30, [sp, #-96]!
     mov  x29, sp
     stp  x19, x20, [sp, #16]
@@ -365,6 +366,7 @@ ENDF p_query
 // -----------------------------------------------------------------------------
 LFUNC p_union
     STACK_GUARD                         // CR-6: recursive
+    DEADLINE_TICK
     stp  x29, x30, [sp, #-80]!
     mov  x29, sp
     stp  x19, x20, [sp, #16]
@@ -423,6 +425,7 @@ ENDF p_union
 // -----------------------------------------------------------------------------
 LFUNC p_with
     STACK_GUARD                         // CR-6: recursive
+    DEADLINE_TICK
     stp  x29, x30, [sp, #-112]!
     mov  x29, sp
     stp  x19, x20, [sp, #16]
@@ -475,6 +478,7 @@ ENDF p_with
 // -----------------------------------------------------------------------------
 LFUNC p_select_core
     STACK_GUARD                         // CR-6: recursive
+    DEADLINE_TICK
     stp  x29, x30, [sp, #-96]!
     mov  x29, sp
     stp  x19, x20, [sp, #16]
@@ -608,6 +612,7 @@ ENDF p_select_core
 // -----------------------------------------------------------------------------
 LFUNC p_from_item
     STACK_GUARD                         // CR-6: recursive
+    DEADLINE_TICK
     stp  x29, x30, [sp, #-64]!
     mov  x29, sp
     stp  x19, x20, [sp, #16]
@@ -699,6 +704,7 @@ ENDF p_from_item
 // -----------------------------------------------------------------------------
 LFUNC p_table_ref
     STACK_GUARD                         // CR-6: recursive
+    DEADLINE_TICK
     stp  x29, x30, [sp, #-48]!
     mov  x29, sp
     stp  x19, x20, [sp, #16]
@@ -774,6 +780,7 @@ ENDF p_table_ref
 // -----------------------------------------------------------------------------
 LFUNC p_expr
     STACK_GUARD                         // CR-6: recursive
+    DEADLINE_TICK
     stp  x29, x30, [sp, #-32]!
     mov  x29, sp
     stp  x19, x20, [sp, #16]
@@ -792,6 +799,7 @@ ENDF p_expr
 // next-higher level as operand parser and the level's operator table.
 LFUNC p_or                          // or_expr = and_expr { OR and_expr }
     STACK_GUARD                         // CR-6: recursive
+    DEADLINE_TICK
     adr  x1, p_and
     ADR_L x2, optab_or
     b    p_binloop
@@ -799,6 +807,7 @@ ENDF p_or
 
 LFUNC p_and                         // and_expr = not_expr { AND not_expr }
     STACK_GUARD                         // CR-6: recursive
+    DEADLINE_TICK
     adr  x1, p_not
     ADR_L x2, optab_and
     b    p_binloop
@@ -806,6 +815,7 @@ ENDF p_and
 
 LFUNC p_concat                      // concat_expr = additive { || additive }
     STACK_GUARD                         // CR-6: recursive
+    DEADLINE_TICK
     adr  x1, p_add
     ADR_L x2, optab_concat
     b    p_binloop
@@ -813,6 +823,7 @@ ENDF p_concat
 
 LFUNC p_add                         // additive = mult { (+|-) mult }
     STACK_GUARD                         // CR-6: recursive
+    DEADLINE_TICK
     adr  x1, p_mul
     ADR_L x2, optab_add
     b    p_binloop
@@ -820,6 +831,7 @@ ENDF p_add
 
 LFUNC p_mul                         // multiplicative = unary { (*|/|%) unary }
     STACK_GUARD                         // CR-6: recursive
+    DEADLINE_TICK
     adr  x1, p_unary
     ADR_L x2, optab_mul
     b    p_binloop
@@ -878,6 +890,7 @@ ENDF p_binloop
 // -----------------------------------------------------------------------------
 LFUNC p_not
     STACK_GUARD                         // CR-6: recursive
+    DEADLINE_TICK
     stp  x29, x30, [sp, #-48]!
     mov  x29, sp
     stp  x19, x20, [sp, #16]
@@ -924,6 +937,7 @@ ENDF p_not
 // -----------------------------------------------------------------------------
 LFUNC p_pred
     STACK_GUARD                         // CR-6: recursive
+    DEADLINE_TICK
     stp  x29, x30, [sp, #-96]!
     mov  x29, sp
     stp  x19, x20, [sp, #16]
@@ -1068,6 +1082,7 @@ ENDF p_pred
 // -----------------------------------------------------------------------------
 LFUNC p_unary
     STACK_GUARD                         // CR-6: recursive
+    DEADLINE_TICK
     stp  x29, x30, [sp, #-48]!
     mov  x29, sp
     stp  x19, x20, [sp, #16]
@@ -1142,6 +1157,7 @@ ENDF p_unary
 // -----------------------------------------------------------------------------
 LFUNC p_primary
     STACK_GUARD                         // CR-6: recursive
+    DEADLINE_TICK
     stp  x29, x30, [sp, #-64]!
     mov  x29, sp
     stp  x19, x20, [sp, #16]
@@ -1371,6 +1387,7 @@ ENDF p_primary
 // -----------------------------------------------------------------------------
 LFUNC p_case
     STACK_GUARD                         // CR-6: recursive
+    DEADLINE_TICK
     stp  x29, x30, [sp, #-96]!
     mov  x29, sp
     stp  x19, x20, [sp, #16]
@@ -1435,6 +1452,7 @@ ENDF p_case
 // -----------------------------------------------------------------------------
 LFUNC p_funcall
     STACK_GUARD                         // CR-6: recursive
+    DEADLINE_TICK
     stp  x29, x30, [sp, #-80]!
     mov  x29, sp
     stp  x19, x20, [sp, #16]

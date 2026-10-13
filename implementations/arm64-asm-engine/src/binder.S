@@ -101,6 +101,7 @@ ENDF bind_query
 // =============================================================================
 LFUNC bq_bind
     STACK_GUARD                         // CR-6: recursive
+    DEADLINE_TICK
     ldr  x9, [x0, #Q_NUNION]            // UNION ALL compound
     cbnz x9, bq_bind_union
     ENTER 3
@@ -220,6 +221,7 @@ ENDF bq_bind
 // =============================================================================
 LFUNC bq_bind_union
     STACK_GUARD                         // CR-6: recursive
+    DEADLINE_TICK
     ENTER 5
     mov  x20, x0
     stp  x1, x2, [sp, #-32]!
@@ -449,6 +451,7 @@ ENDF shape_table
 // =============================================================================
 LFUNC bind_with
     STACK_GUARD                         // CR-6: recursive
+    DEADLINE_TICK
     ENTER 3
     mov  x19, x0
     ldr  x9, [x19, #BC_Q]
@@ -571,6 +574,7 @@ ENDF add_rv
 // =============================================================================
 LFUNC bind_from
     STACK_GUARD                         // CR-6: recursive
+    DEADLINE_TICK
     ENTER 4
     mov  x19, x0
     mov  x20, x1
@@ -849,6 +853,7 @@ ENDF dec_wtype
 // =============================================================================
 FUNC bind_expr
     STACK_GUARD                         // CR-6: recursive
+    DEADLINE_TICK
     ldr  w9, [x1, #N_KIND]
     cmp  w9, #NK_LIT
     b.eq bind_lit
@@ -1083,6 +1088,7 @@ ENDF col_exists_local
 // =============================================================================
 LFUNC bind_subq
     STACK_GUARD                         // CR-6: recursive
+    DEADLINE_TICK
     ENTER 4
     mov  x19, x0
     mov  x20, x1
@@ -1190,6 +1196,7 @@ ENDF bind_subq
 // =============================================================================
 LFUNC bind_unary
     STACK_GUARD                         // CR-6: recursive
+    DEADLINE_TICK
     ENTER 2
     mov  x19, x0
     mov  x20, x1
@@ -1232,6 +1239,7 @@ ENDF bind_unary
 // =============================================================================
 LFUNC bind_isnull
     STACK_GUARD                         // CR-6: recursive
+    DEADLINE_TICK
     ENTER 1
     mov  x19, x0
     mov  x20, x1
@@ -1256,6 +1264,7 @@ ENDF bind_isnull
 // =============================================================================
 LFUNC bind_cast
     STACK_GUARD                         // CR-6: recursive
+    DEADLINE_TICK
     ENTER 2
     mov  x19, x0
     mov  x20, x1
@@ -1286,6 +1295,7 @@ ENDF bind_cast
 // =============================================================================
 LFUNC bind_binary
     STACK_GUARD                         // CR-6: recursive
+    DEADLINE_TICK
     ENTER 2
     mov  x19, x0
     mov  x20, x1
@@ -1602,6 +1612,7 @@ ENDF func_lookup
 // =============================================================================
 LFUNC bind_func
     STACK_GUARD                         // CR-6: recursive
+    DEADLINE_TICK
     ENTER 3
     mov  x19, x0
     mov  x20, x1
@@ -1790,6 +1801,7 @@ ENDF emit_rv_cols
 // =============================================================================
 LFUNC bind_select
     STACK_GUARD                         // CR-6: recursive
+    DEADLINE_TICK
     ENTER 5
     mov  x19, x0
     ldr  x20, [x19, #BC_Q]
@@ -1920,6 +1932,7 @@ ENDF bind_select
 // =============================================================================
 LFUNC bind_order
     STACK_GUARD                         // CR-6: recursive
+    DEADLINE_TICK
     ENTER 5
     mov  x19, x0
     ldr  x20, [x19, #BC_BQ]
@@ -2065,6 +2078,7 @@ ENDF bind_order
 // =============================================================================
 LFUNC bind_group
     STACK_GUARD                         // CR-6: recursive
+    DEADLINE_TICK
     ENTER 4
     mov  x19, x0
     ldr  x20, [x19, #BC_BQ]
@@ -2264,6 +2278,7 @@ ENDF check_outer_refs
 // =============================================================================
 LFUNC group_rewrite
     STACK_GUARD                         // CR-6: recursive
+    DEADLINE_TICK
     ENTER 3
     mov  x19, x0
     mov  x20, x1
@@ -2329,6 +2344,7 @@ ENDF group_rewrite
 //   x19 node, x20 index, x21 count
 LFUNC contains_agg
     STACK_GUARD                         // CR-6: recursive
+    DEADLINE_TICK
     ENTER 2
     mov  x19, x0
     ldr  w9, [x19, #N_KIND]
@@ -2436,6 +2452,7 @@ ENDF expr_child_slot
 // =============================================================================
 FUNC expr_equal
     STACK_GUARD                         // CR-6: recursive
+    DEADLINE_TICK
     ENTER 3
     mov  x19, x0
     mov  x20, x1
@@ -2559,6 +2576,7 @@ ENDF expr_equal
 // =============================================================================
 LFUNC bind_limit_expr
     STACK_GUARD                         // CR-6: recursive
+    DEADLINE_TICK
     cbnz x1, 1f
     mov  x0, #0
     ret

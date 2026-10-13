@@ -61,6 +61,7 @@ ENDF pn_new
 // =============================================================================
 FUNC phys_plan
     STACK_GUARD                         // CR-6: recursive
+    DEADLINE_TICK
     ENTER 1
     mov  x19, x0
     bl   pp_lower
@@ -83,6 +84,7 @@ ENDF phys_plan
 // =============================================================================
 LFUNC pp_lower
     STACK_GUARD                         // CR-6: recursive
+    DEADLINE_TICK
     ENTER 3
     mov  x19, x0
     ldr  w9, [x19, #LN_OP]
@@ -256,6 +258,7 @@ ENDF pp_rewrite
 // =============================================================================
 LFUNC push_conj
     STACK_GUARD                         // CR-6: recursive
+    DEADLINE_TICK
     ENTER 4
     mov  x19, x0
     mov  x20, x1
@@ -320,6 +323,7 @@ ENDF range_mask
 // =============================================================================
 LFUNC pp_joins
     STACK_GUARD                         // CR-6: recursive
+    DEADLINE_TICK
     ENTER 5
     sub  sp, sp, #80                    // [0] conjuncts Vec, [32] lkeys Vec,
                                         // [56] rkeys Vec (n, cap, data)
@@ -441,6 +445,7 @@ ENDF pp_joins
 // =============================================================================
 LFUNC pp_access
     STACK_GUARD                         // CR-6: recursive
+    DEADLINE_TICK
     ENTER 3
     mov  x19, x0
     ldr  w9, [x19, #PN_OP]
