@@ -279,7 +279,7 @@ class Binder:
         first entry of each folded alias) or an expression."""
         if _is_ordinal(node):
             assert isinstance(node, ast.NumberLit)
-            k = int(node.text)
+            k = values.int_from_digits(node.text)
             if not 1 <= k <= len(entries):
                 raise errors.semantic_error(f"GROUP BY position {k} is out of range", **pos(node))
             return self._bind_entry_expr(entries[k - 1], ctx)
@@ -658,7 +658,7 @@ class _SortTargets:
         by (unqualified) output name; None if it is neither."""
         if _is_ordinal(expr):
             assert isinstance(expr, ast.NumberLit)
-            k = int(expr.text)
+            k = values.int_from_digits(expr.text)
             if not 1 <= k <= len(self.outputs):
                 raise errors.semantic_error(f"ORDER BY position {k} is out of range", **pos(expr))
             return k - 1

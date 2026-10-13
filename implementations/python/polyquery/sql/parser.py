@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections import deque
 
-from .. import errors
+from .. import errors, values
 from ..limits import Check, StatementMeter, check_text_length, no_check
 from . import ast
 from .lexer import FUTURE_KEYWORDS, Lexer, Token, TokenKind
@@ -576,7 +576,7 @@ class Parser:
         if tok.kind is not TokenKind.NUMBER or not tok.value.isdigit():
             raise self.error("expected integer type parameter")
         self.advance()
-        return int(tok.value)
+        return values.int_from_digits(tok.value)  # (a huge value is out of range)
 
     def parse_case(self) -> ast.Case:
         start = self.expect_keyword("CASE")
