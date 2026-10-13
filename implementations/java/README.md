@@ -25,7 +25,10 @@ and the requirement change **CR-1 `UNION ALL`** (`spec/changes/union-all.md`) �
 plan separation** (`spec/changes/refactor-plan-separation.md`) — see
 [Change CR-3](#change-cr-3-logicalphysical-plan-separation); and the architectural change
 **CR-2 DECIMAL precision 38** with PQCF v2 (`spec/changes/decimal38.md`) — see
-[Change CR-2](#change-cr-2-decimal-precision-38). Most recently, query **latency** on the
+[Change CR-2](#change-cr-2-decimal-precision-38); and the requirement change **CR-6
+expression size limits** (`spec/changes/expression-limits.md`: minimum statement sizes in every
+execution mode, `RESOURCE_LIMIT` beyond the engine's limits, the timeout in every stage) — see
+[Change CR-6](#change-cr-6-expression-size-limits). Earlier, query **latency** on the
 `analytics` benchmark workload was optimized (parallel sorting with normalized keys, top-N
 cutoff, parallel DISTINCT aggregates, shared CTE aggregations, cheaper parallel merges and join
 builds, JIT warm-up through an AOT cache) — see
@@ -35,7 +38,10 @@ Capabilities: `phase1 ingest.csv ingest.json ingest.jsonl sql.basic test.functio
 sql.groupby sql.join sql.functions sql.subquery sql.cte sql.correlated_subquery phase3
 storage.pqcf storage.mmap index.hash index.btree phase4 http.streaming phase5 exec.row
 exec.vectorized exec.parallel join.hash join.merge join.nested_loop native.kernels
-change.union_all change.decimal38`.
+change.union_all change.decimal38 change.expression_limits`.
+
+Statement size limits (CR-6): SQL text 64 MiB, expression nesting depth 4,096, 200,000
+operands — beyond them `RESOURCE_LIMIT` (see [Change CR-6](#change-cr-6-expression-size-limits)).
 
 ## Prerequisites and build
 
@@ -80,12 +86,12 @@ Source lives in `src/main/java/polyquery/`, one package per layer:
 
 | Package | Responsibility |
 |---|---|
-| `common` | `ErrorCode`, `PolyQueryException` (code + message + details), ASCII name folding |
+| `common` | `ErrorCode`, `PolyQueryException` (code + message + details), ASCII name folding, `Checkpoint` (timeout/cancellation polls of every stage) |
 | `types` | `DataType`, value representation, exact DECIMAL arithmetic for narrow (`long`) and wide (`BigInteger`) values (`Decimals`), DATE/TIMESTAMP (`DateTimes`), strict text parsers, `Casts`, ordering/text (`Values`) |
 | `json` | Strict RFC 8259 parser (keeps number literal text, optional duplicate-key rejection) and writer |
-| `sql.lexer` | Tokenizer with line/column positions, reserved keywords, comments |
+| `sql.lexer` | Tokenizer (tokens on demand) with line/column positions, reserved keywords, comments |
 | `sql.ast` | Immutable AST (sealed interfaces + records) for the full v1 grammar |
-| `sql.parser` | Recursive-descent parser (WITH, joins, subqueries, CASE, IN, LIKE, BETWEEN, EXPLAIN, CREATE/DROP INDEX); `PARSE_ERROR` carries `line`/`column` |
+| `sql.parser` | Recursive-descent parser (WITH, joins, subqueries, CASE, IN, LIKE, BETWEEN, EXPLAIN, CREATE/DROP INDEX); `PARSE_ERROR` carries `line`/`column`; enforces the statement size limits (`StatementLimits`, CR-6) |
 | `sql.analyzer` | Semantic validation: `Scope` (range variables, correlation), `ExpressionBinder` + `TypeCoercion` + `ScalarFunctionBinder` (typing), `Analyzer` (per query level: FROM/joins/derived tables/CTEs, GROUP BY rewriting, ORDER BY resolution → `BoundQuery`), `LogicalPlanner` (`BoundQuery` → logical plan) |
 | `plan` | Bound (typed) expressions (`BoundExpr`, `BoundExprs` traversal and input-slot analysis), aggregate calls, subqueries, the logical plan (`LogicalPlan`: `Scan`, `SingleRow`, `Filter`, `Project`, `Join`, `Aggregate`, `Distinct`, `Sort`, `Limit`, `UnionAll`), `LogicalPlanPrinter` (debug text), expression formatter |
 | `optimizer` | Rule-based logical optimizer on the logical plan only: `OptimizerRule`, `LogicalOptimizer` (`STANDARD` rule sequence, `DISABLED` for `optimize: false`), rules `ConstantFolding`, `PredicateSimplification`, `PredicatePushdown` (below projections, into join inputs, CROSS→INNER), `JoinReorder` (inner-join trees), `ProjectionPruning`; `ExprSafety` (can an expression fail / be NULL — with interval arithmetic over column statistics) |
@@ -957,6 +963,191 @@ count and native kernels were chosen by `Engine` outside planning.
 * **Projection pruning** uses the physical pruner's pass-through criterion (column references
   and constants), so scans read the same columns with and without `optimize`.
 
+## Change CR-6: expression size limits
+
+`spec/changes/expression-limits.md` (capability `change.expression_limits`): every statement
+within the minimum sizes executes in every execution mode, a statement beyond the engine's
+limits fails with `RESOURCE_LIMIT` naming the measure, and the query timeout covers parsing,
+binding, planning and execution.
+
+### The engine's limits
+
+| measure | limit of this engine | CR-6 minimum |
+|---|---|---|
+| text length (UTF-8 bytes of the SQL text) | 67,108,864 (64 MiB) | 1,048,576 |
+| nesting depth | 4,096 | 1,000 |
+| operand count (literals, column references, `*` arguments) | 200,000 | 25,000 |
+
+Beyond a limit the statement fails with `RESOURCE_LIMIT` and a message naming the measure —
+`statement text length exceeds 67108864 bytes`, `expression nesting depth exceeds 4096`,
+`statement operand count exceeds 200000` — with `details` `{"measure": "text_length" |
+"nesting_depth" | "operand_count", "limit": N}` (over HTTP: status 413, like every
+`RESOURCE_LIMIT`). The limits are checked while parsing, so `RESOURCE_LIMIT` takes precedence
+over a `PARSE_ERROR` later in the text and over semantic errors (CR-6 §3 allows this). Valid
+SQL within the limits never fails with `PARSE_ERROR` because of its size. Over HTTP,
+`--max-request-bytes` (default 1 GiB) still applies to the request body first. The constants
+are in `sql/parser/StatementLimits.java`.
+
+**How nesting depth is counted** (CR-6 §1): one level for each parenthesized expression, unary
+`+`/`-` (also when folded into a numeric literal, `-5`), `NOT`, function call (also
+aggregates), `CAST`, `CASE`, `IN (…)`, `BETWEEN`, `LIKE`, comparison, `IS [NOT] NULL` (counted as a
+comparison) and subquery (scalar, `EXISTS`, `IN`, derived table, CTE body); `x IN (SELECT …)`
+counts the `IN` and the subquery. A chain of binary operators of one precedence level (`OR`;
+`AND`; `||`; `+`/`-`; `*`/`/`/`%`) counts once, whatever its length; the parenthesized
+operand of a chain is a level of its own. A parenthesized join in `FROM` (`(a JOIN b ON …)`)
+also counts. The clauses of the statement's own query are at depth 0. The depth of a statement
+is the most constructs enclosing any expression, so `x >= 0` inside 998 parentheses has depth
+999, and so do `NOT NOT … x >= 0` with 998 `NOT`s and 998 nested `ABS` calls around `x` in
+`… >= 0`.
+
+Statement shapes that none of the three measures covers — many FROM items or joins, many
+`UNION ALL` branches, long chains of CTEs that reference each other — have no limit of their
+own besides memory and time: their planning and execution observe the timeout like everything
+else (a 2,000-table join chain plans and runs in 4.5–9 s), and a stack overflow anywhere is
+reported as `RESOURCE_LIMIT` (see below).
+
+### Parsing within the limits
+
+* **Tokens on demand.** The lexer (`Lexer.next`) produces one token at a time; the parser keeps
+  a four-token ring buffer instead of a token list, so a large statement never exists as a
+  token array, and a statement beyond a limit is rejected as soon as the limit is crossed
+  (a 100,000-term `OR` chain fails after 200,000 operands, in ~30 ms).
+* **Exact depth with an early stop.** A construct's left operand is parsed before the construct
+  is recognized (`a = b`, `a OR b`), so the depth is computed bottom-up: every parse method
+  leaves the *height* of what it parsed (the most constructs enclosing any expression inside
+  it, counting itself) in a field, and constructs add one to the largest height of their parts.
+  To bound the recursion, a top-down counter of the constructs entered on the current path —
+  never more than the true depth — stops the parse as soon as it passes the limit (100,000
+  nested parentheses are rejected after 4,097 levels, in under 10 ms).
+* **Operands** are counted as literals, column references and `count(*)`'s `*` are parsed.
+* **Text length** is checked before lexing (UTF-8 bytes, computed only when the text could
+  exceed the limit).
+
+### Deep recursion and stacks
+
+Every later stage (binder, optimizer rules, physical planner, both expression compilers, the
+evaluators) walks the binary expression trees recursively, and a left-deep chain of 100,000
+operators is 100,000 levels deep. The AST and the bound expressions stay binary (no n-ary
+nodes): every rule, kernel and the row-exact error semantics depend on that shape, and the
+chains fit the stacks. Query code runs only on threads with large stacks: the session/exec
+thread and the HTTP connection and query threads have 512 MiB, parallel workers 256 MiB
+(address space reserved, committed only as used). The statements at the engine's limits
+(a 99,999-term `OR` chain, a 199,990-term sum or `||` chain, 4,090 nested `ABS` calls, scalar
+subqueries or derived tables) run in every mode with several-fold headroom. Should a stack
+overflow anyway — in any thread — it is reported as `RESOURCE_LIMIT` (session/exec handler,
+HTTP query manager/streamer, parallel worker results) and the process continues.
+
+### Linear work in the size of the statement
+
+Long chains exposed several stages whose work grew quadratically or worse; all are now linear
+(or close to it) in the size of the statement:
+
+* **Constant folding / predicate simplification** asked "is this subtree constant?" at every
+  node by scanning the subtree (10,000-term `OR`: 1.6 s, 100,000 terms: > 30 s). `Constness`
+  memoizes the answer per node (by identity — expression records compare structurally, which is
+  a subtree walk itself). A constant subexpression whose evaluation fails stays in place (its
+  error belongs to the rows that evaluate it) and is no longer re-evaluated by each ancestor:
+  `ConstantEvaluator` gets the recorded failures and compiles such a node to raise its error.
+* **Vectorized compilation** folded constants with the same per-node subtree scan; it is
+  memoized too, and a constant subtree whose folding fails is compiled to row-at-a-time code
+  for the whole subtree instead of being re-tried at each of its nodes.
+* **Predicate pushdown** recomputed the stored-column origins of a plan at every level it
+  descended (cubic for nested derived tables with filters: 999 levels took 6 s, now 0.3 s);
+  `ExprSafety.OriginCache` memoizes them per pass. `LogicalPlan.width()` and single-pass
+  join schemas (logical and physical) avoid rebuilding column lists per level of deep join
+  trees; join reordering indexes conjuncts per input.
+* **`||` chains** are evaluated by one n-ary loop in both engines (`BoundExprs.concatOperands`;
+  `Kernels.Concat` takes all operands) instead of copying the growing prefix at every link,
+  with the same NULL semantics (the row engine stops at the first NULL operand, as the nested
+  operators did).
+* **Kernel memory.** Every vectorized kernel owns a result vector of the batch size, so a
+  200,000-node expression with 2,048-row batches held ~3.6 GB per pipeline instance (and per
+  parallel worker). `BatchBuilder` now chooses the batch size per query so that batch size ×
+  expression nodes stays within 4 Mi positions (at least 16 rows per batch); queries with up to
+  2,048 expression nodes — every ordinary query — keep the default batches.
+
+### The timeout covers every stage
+
+`common.Checkpoint` installs the query's timeout/cancellation check for the current thread;
+the stages poll it (`Checkpoint.poll()`, a thread-local counter that reads the clock every 256
+polls) inside every loop or recursion whose work grows with the statement:
+
+* `Engine.execute` installs it around parsing, binding, planning and execution (and checks
+  explicitly between the stages); subqueries planned on first execution and the `explain` op
+  run under it too;
+* polls: the lexer (per token), the parser (per construct and chain link), the binder (per
+  expression), `BoundExprs.children` (every generic expression traversal of the optimizer and
+  planner), `LogicalPlan.transformUp` (every rule over every node), join reordering, both
+  expression compilers;
+* evaluation: one row or batch through a 100,000-level expression can take seconds, so the
+  row compiler wraps every 32nd nesting level in a closure that polls, and `VecCompiler`
+  inserts a polling kernel (`Kernels.Polling`) every 32 levels; parallel worker tasks run with
+  the query's check installed (`Parallel.submit`), so workers stop within milliseconds too.
+
+Measured (session mode, `timeout_ms` 2,000, 200,000-row table, statements at the engine's limits —
+a 99,999-term `OR`/`AND` chain, a 199,990-term sum and `||` chain, a 66,000-branch `CASE`,
+4,090 nested `ABS` calls; each in row, vectorized, parallel and auto mode): every `TIMEOUT`
+arrived 0.00–0.10 s after the deadline (before: up to 62 s late in parallel mode). Planning
+timeouts (2,000-table join chain, 4,000 chained CTEs) arrive within 0.3 s.
+
+### Results
+
+`python3 tests/regression/robustness_probe.py --only expression_limits --require-pass`: pass —
+all 40 minimum cases correct in row, vectorized, parallel and auto mode (each ≤ 0.2 s); beyond
+the minimums, 100,000 nested parentheses and the 100,000-term `OR` chain fail with
+`RESOURCE_LIMIT` within 50 ms, the 100,000-item `IN` list (100,002 operands) computes the
+correct result. The whole probe takes ~2.5 s (before: 169 s, with `PARSE_ERROR` for the
+nested parentheses and hangs past the timeout for the long `OR` chain). Statements at the
+engine's own limits take at most 1.8 s in every mode (99,999-term `OR`/`AND` chains,
+199,990-term sum and `||` chain, 199,990-item `IN` list, 4,090 nested parentheses / `ABS` /
+`NOT` / unary minus / `CAST` / `CASE` / scalar subqueries / derived tables / `EXISTS` /
+chained CTEs). `ExpressionLimitsTest` covers the depth measure (exactly at and one past the
+limit, chains, left operands, every kind of construct), the operand and text limits (also
+multi-byte UTF-8), timeout polling during parsing, large statements in every execution mode
+(really parallel: 16-row morsels), n-ary `||` NULL semantics and failing constant chains.
+
+### Modules touched
+
+| Module | Change |
+|---|---|
+| `common.Checkpoint` (new) | per-thread timeout/cancellation check for the stages before and around execution |
+| `sql.lexer.Lexer` | on-demand `next()` (`tokenize` kept for tests) |
+| `sql.parser.Parser`, `StatementLimits` (new) | token ring buffer, depth (height + early-stop counter), operand count, text length, `RESOURCE_LIMIT` errors; polls |
+| `sql.analyzer.ExpressionBinder` | polls; no line/column details added to `TIMEOUT`/`CANCELLED` |
+| `plan.BoundExprs`, `plan.LogicalPlan` | `isRowInput`, `concatOperands`; polls in `children`/`transformUp`; `width()`, single-pass join schema |
+| `optimizer` | `Constness` (new), `ConstantFolding.Folder` (memo + recorded failures), `PredicateSimplification`, `PredicatePushdown.Pass` (memoized origins), `ExprSafety.OriginCache`, `JoinReorder` (per-input conjuncts, binary search, polls), `ProjectionPruning` (`width()`) |
+| `physical` | `PhysicalPlan` single-pass join schemas; `PhysicalPlanner` (`width()`) |
+| `exec` | `ExpressionCompiler` (polling every 32 levels, n-ary `||`, recorded failures), `ConstantEvaluator` |
+| `exec.vector` | `VecCompiler` (memoized folding, failed folds as row code, polling kernels), `Kernels` (`Polling`, n-ary `Concat`), `BatchBuilder` (batch size per query), `VectorExecutor`, `Parallel` (workers run under the query's checkpoint) |
+| `engine.Engine` | installs the checkpoint for every stage, checks between stages; `explain` under the timeout |
+| `engine.Version` | claims `change.expression_limits` |
+| tests | `ExpressionLimitsTest` (new) |
+
+### Decisions
+
+* **Limits well above the minimums** (×4 depth, ×8 operands, ×64 text): far enough that no
+  realistic statement meets them, low enough that recursion at the limits has several-fold
+  stack headroom and that one statement's kernels and plans stay within a few hundred MB.
+  The 100,000-item `IN` list of the probe is within the limits (and answered correctly); the
+  100,000-term `OR` chain (200,002 operands) is not.
+* **Limits enforced in the parser only.** Every later stage sees a bounded statement, so no
+  other stage needs its own depth guard; the work they do is linear and observes the timeout.
+* **Binary trees, big stacks** instead of n-ary AND/OR/arithmetic nodes or rebalanced trees:
+  rebalancing would change overflow behaviour of arithmetic and the evaluation order that
+  error semantics depend on, and n-ary nodes would touch every rule and kernel. Only `||`
+  got an n-ary evaluator, as a pure execution optimization (the tree is unchanged).
+* **Cooperative checks, no watchdog thread.** Each stage stops itself at its next poll, so no
+  abandoned computation keeps running after a `TIMEOUT` and session mode stays strictly
+  sequential. Checks are cheap enough (a thread-local counter) to sit in the hot recursion of
+  every stage.
+* **`spec_version` stays `1.0.0`** (as for CR-1/CR-2: `catalog.pqt` requires it); the
+  capability `change.expression_limits` signals the change.
+* The probe's environment variables `PQ_PAR_MIN`/`PQ_PARALLEL_MIN_ROWS` are not used by this
+  engine (it splits tables into 65,536-row morsels; `-Dpolyquery.morselRows` changes that), so
+  the probe's 100-row "parallel" cases run on one thread; parallel evaluation of the same
+  statements was verified on a 200,000-row table and by `ExpressionLimitsTest` with 16-row
+  morsels.
+
 ## Latency optimization (analytics workload)
 
 Task: lower the latency of the queries of `benchmarks/workloads/analytics.json` at scale `1m`
@@ -1234,6 +1425,9 @@ python3 tests/conformance/runner.py --engine implementations/java/bin/polyquery
 python3 tests/conformance/runner.py --engine implementations/java/bin/polyquery --modes
 python3 tests/conformance/runner.py --engine implementations/java/bin/polyquery --transport http
 python3 tests/concurrency/http_suite.py --engine implementations/java/bin/polyquery
+# CR-6 statement size limits (minimums in every mode, beyond the limits, timeout lateness)
+python3 tests/regression/robustness_probe.py --engine implementations/java/bin/polyquery \
+    --only expression_limits --require-pass
 # native kernels (M9): build the library, then every query with native: true
 make -C native-kernels
 python3 tests/conformance/runner.py --engine implementations/java/bin/polyquery \
@@ -1324,6 +1518,15 @@ row/dictionary layouts, hash/btree indexes, PQCF-backed tables (lazy mmap, small
 and `use_indexes`/`optimize` off.
 
 ## Known limitations
+
+* Statement sizes (CR-6): SQL text up to 64 MiB, nesting depth up to 4,096, up to 200,000
+  operands; beyond, `RESOURCE_LIMIT`. Joins, `UNION ALL` branches and CTE chains have no
+  separate limit; very wide join results (hundreds of tables, i.e. rows of thousands of
+  columns) are bounded by memory: a 4,000-way cross join exhausts the heap and fails with
+  `RESOURCE_LIMIT` ("out of memory") rather than reaching the join-row limit, and garbage
+  collection can then delay its answer past the timeout. The `explain` op's plan JSON nests two
+  levels per plan node, so plans of statements nested hundreds of levels deep exceed the
+  nesting depth some JSON parsers accept (Python's default ≈ 1,000).
 
 * Native kernels serve the vectorized engine only, and within it: filters over dense batches
   from table scans (not over joins, index scans or row-layout tables, whose vectors carry no
