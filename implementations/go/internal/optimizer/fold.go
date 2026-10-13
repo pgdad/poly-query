@@ -45,6 +45,7 @@ func (r ConstantFolding) Apply(n plan.Node) plan.Node {
 
 // foldExpr replaces the maximal constant subexpressions of e by literals.
 func foldExpr(e plan.Expr, eval EvalFunc) plan.Expr {
+	props := plan.NewProps()
 	return plan.Map(e, func(x plan.Expr) plan.Expr {
 		switch x.(type) {
 		case *plan.Literal, *plan.ColumnRef:
@@ -52,7 +53,7 @@ func foldExpr(e plan.Expr, eval EvalFunc) plan.Expr {
 		case *plan.Subquery:
 			return nil
 		}
-		if !plan.IsConstant(x) || !movable(x) {
+		if !props.IsConstant(x) || !props.Movable(x) {
 			return nil
 		}
 		v, err := eval(x)

@@ -37,10 +37,11 @@ type vcompiler struct {
 	ec      *Context
 	lay     layout
 	classes []vclass // classes of the batch columns
+	props   *plan.Props
 }
 
 func newVCompiler(ec *Context, cols []plan.Column) *vcompiler {
-	c := &vcompiler{ec: ec, lay: layoutOf(cols)}
+	c := &vcompiler{ec: ec, lay: layoutOf(cols), props: plan.NewProps()}
 	for _, col := range cols {
 		c.classes = append(c.classes, classOf(col.Type))
 	}
@@ -59,6 +60,11 @@ func volatile(e plan.Expr) bool {
 	return found
 }
 
+// constant reports whether e can be evaluated once at compile time.
+func (c *vcompiler) constant(e plan.Expr) bool {
+	return c.props.IsConstant(e) && !c.props.Volatile(e)
+}
+
 func (c *vcompiler) compile(e plan.Expr) (vexpr, error) {
 	t := e.Type()
 	if ref, ok := e.(*plan.ColumnRef); ok {
@@ -67,7 +73,7 @@ func (c *vcompiler) compile(e plan.Expr) (vexpr, error) {
 		}
 		return c.fallback(e)
 	}
-	if plan.IsConstant(e) && !volatile(e) {
+	if c.constant(e) {
 		if v, err := evalConstant(c.ec, e); err == nil {
 			return newVConst(v, classOf(t)), nil
 		}
@@ -115,7 +121,7 @@ func (c *vcompiler) compile(e plan.Expr) (vexpr, error) {
 		return c.elementwise(e)
 	case *plan.InList:
 		for _, item := range x.List {
-			if !plan.IsConstant(item) {
+			if !c.props.IsConstant(item) {
 				return c.fallback(e)
 			}
 		}
@@ -995,7 +1001,7 @@ func (c *vcompiler) elementwise(e plan.Expr) (vexpr, error) {
 			first = false
 			return nil
 		}
-		if plan.IsConstant(x) && !volatile(x) {
+		if c.constant(x) {
 			return x
 		}
 		v, err := c.compile(x)
