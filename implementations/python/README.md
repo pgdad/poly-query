@@ -357,18 +357,24 @@ be affected by that.)
 
 **Deep trees.** The parser builds long chains iteratively, but the trees
 are left-deep: a 200,000-operand sum is a 200,000-level tree that the binder,
-optimizer, compilers and the plan pickler process recursively. Instead of
-rewriting every recursive pass, the engine makes deep recursion safe:
+optimizer and compilers process recursively. Instead of rewriting every
+recursive pass, the engine makes deep recursion safe:
 
-* every thread that runs statements has a 512 MiB stack (virtual address
-  space; only what a statement uses is committed): `session` and `exec` run
-  their loop on such a thread (`limits.run_with_large_stack`) and `serve`
-  creates its request threads with it. The recursion limit is raised to
-  2,000,000 (Python-to-Python calls do not use the C stack in CPython 3.14,
-  so this only bounds frame memory). The deepest statement within the
-  limits needs well under a quarter of the stack, including pickling its
-  plan for worker processes, which are forked from these threads and keep
-  their stack;
+* in CPython 3.14 Python-to-Python calls do not use the C stack, so the
+  recursion limit is simply raised to 2,000,000 (it only bounds frame
+  memory). What recursed in C once per tree level — dataclass `==` and
+  `hash` of bound expressions — is iterative (`bound._expr_eq`,
+  `bound._expr_hash`, the hash cached per node), so the C stack a statement
+  needs grows with its nesting depth, not with its operand count: the
+  deepest statements within the limits run even on an 8 MiB stack;
+* still, every thread that runs statements gets a 256 MiB stack (virtual
+  address space; only what is used is committed) as headroom: `session` and
+  `exec` run their loop on such a thread (`limits.run_with_large_stack`) and
+  `serve` creates its connection threads with it (`limits.start_thread`
+  falls back to the default stack size where an address-space limit
+  refuses that much). Worker processes are forked from these threads and
+  keep their stack; pickling a plan for the worker pool falls back to
+  forking per query if it ever runs out of stack;
 * CPython 3.14 measures the real C stack of each thread and raises
   `RecursionError` before it overflows; the protocol layer reports any
   `RecursionError` as `RESOURCE_LIMIT` (`statement is too deeply nested`),
@@ -431,7 +437,7 @@ arrives 0.0–0.4 s after expiry in every mode.
 |---|---|---|
 | Limits | `limits.py` (new) | limits, `StatementMeter`, text length check, deadline checks, large-stack threads and recursion limit |
 | Lexer / parser | `sql/lexer.py`, `sql/parser.py`, `sql/ast.py` | lazy lexing with regex runs and deadline checks; measuring depth and operands; `RecursionError` → `RESOURCE_LIMIT`; `ast.Fingerprints` |
-| Analysis | `analysis/binder.py`, `analysis/bound.py`, `analysis/scope.py`, `analysis/typing_rules.py` | deadline check per node; iterative `walk` / `conjuncts`, cached bottom-up summaries, column keys and hashes, identity-based `map_children`; hashed GROUP BY / ORDER BY / alias / name lookups; linear IN-list typing |
+| Analysis | `analysis/binder.py`, `analysis/bound.py`, `analysis/scope.py`, `analysis/typing_rules.py` | deadline check per node; iterative `walk` / `conjuncts` / `==`, cached bottom-up summaries, column keys and hashes, identity-based `map_children`; hashed GROUP BY / ORDER BY / alias / name lookups; linear IN-list typing |
 | Planner | `planner/pipeline.py`, `optimizer.py`, `rules/base.py`, `rules/predicate_pushdown.py`, `rules/column_pruning.py`, `physical.py`, `logical.py`, `explain.py` | deadline checks (every rule gets the statement's `check`); hashed conjunct deduplication; iterative walks; size-filtered, linear shared-subquery signatures; indexed greedy join ordering; linear `render_expr` |
 | Execution | `execution/compiler.py`, `vcompiler.py`, `workers.py` | checked closures in large expressions; linear `like_matcher`; deadline checks while pickling plans |
 | Protocol / server | `protocol/handlers.py`, `protocol/session.py`, `server/http.py`, `server/app.py`, `cli.py` | deadline from receipt; GC paused until the response is written; `release_failed`; large-stack threads; capability `change.expression_limits`; (HTTP: a chunk size must be 1*HEXDIG — a negative size made the server read until EOF) |

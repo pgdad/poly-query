@@ -9,6 +9,7 @@ import re
 import select
 import socket
 import socketserver
+import threading
 import time
 from dataclasses import dataclass
 from http import HTTPStatus
@@ -18,6 +19,7 @@ from urllib.parse import parse_qs, unquote, urlsplit
 
 from .. import errors
 from ..execution.context import gc_paused
+from ..limits import start_thread
 from ..protocol.handlers import QueryControl, capabilities_info, error_of, version_info
 from ..protocol.serialize import dumps
 from ..protocol.session import decode_request, encode_response, precheck_request
@@ -224,6 +226,15 @@ class PolyQueryHTTPServer(ThreadingHTTPServer):
 
     def handle_error(self, request: Any, client_address: Any) -> None:
         log.debug("connection error", exc_info=True)
+
+    def process_request(self, request: Any, client_address: Any) -> None:
+        """One thread per connection (ThreadingMixIn), started with the large
+        statement stack when the system allows it (``limits.start_thread``)."""
+        start_thread(
+            lambda: threading.Thread(
+                target=self.process_request_thread, args=(request, client_address), daemon=True
+            )
+        )
 
 
 class ApiRequestHandler(BaseHTTPRequestHandler):

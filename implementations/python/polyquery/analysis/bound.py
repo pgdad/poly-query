@@ -479,13 +479,57 @@ def _expr_hash(self: Expr) -> int:
     return _bottom_up(self, "_hash", _combine_hash)
 
 
-def _install_hash(cls: type) -> None:
+# per expression class: its fields holding child expressions
+_CHILD_FIELD_NAMES: dict[type, tuple[str, ...]] = {}
+
+
+def _child_values(e: Expr) -> list[Any]:
+    names = _CHILD_FIELD_NAMES.get(type(e))
+    if names is None:
+        names = _CHILD_FIELD_NAMES[type(e)] = tuple(
+            f.name for f in dataclasses.fields(e) if f.name in _CHILD_FIELDS
+        )
+    return [getattr(e, name) for name in names]
+
+
+def _expr_eq(self: Expr, other: object) -> Any:
+    """Structural equality of the generated dataclass ``__eq__`` (same class,
+    equal compared fields), computed iteratively with an explicit stack: the
+    generated method recurses in C once per level (long chains are deep),
+    and compares cached hashes first."""
+    if self is other:
+        return True
+    if other.__class__ is not self.__class__:
+        return NotImplemented
+    stack: list[tuple[Any, Any]] = [(self, other)]
+    while stack:
+        a, c = stack.pop()
+        if a is c:
+            continue
+        if isinstance(a, Expr):
+            if c.__class__ is not a.__class__ or hash(a) != hash(c):
+                return False
+            for name in _scalar_fields(type(a)):
+                if getattr(a, name) != getattr(c, name):
+                    return False
+            stack.extend(zip(_child_values(a), _child_values(c)))
+        elif isinstance(a, tuple):  # tuples of children or of CASE branches
+            if not isinstance(c, tuple) or len(a) != len(c):
+                return False
+            stack.extend(zip(a, c))
+        elif a != c:  # None (no ELSE / argument)
+            return False
+    return True
+
+
+def _install(cls: type) -> None:
     cls.__hash__ = _expr_hash  # type: ignore[method-assign]
+    cls.__eq__ = _expr_eq  # type: ignore[method-assign]
     for sub in cls.__subclasses__():
-        _install_hash(sub)
+        _install(sub)
 
 
-_install_hash(Expr)
+_install(Expr)
 
 
 # ------------------------------------------------------------------ queries

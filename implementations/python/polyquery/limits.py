@@ -33,9 +33,10 @@ MAX_NESTING_DEPTH = 4096
 MAX_OPERANDS = 200_000
 
 # Stack of the threads that run statements (virtual address space; only the
-# pages a deep statement touches are committed). A left-deep chain of
-# MAX_OPERANDS operands needs well under a quarter of it.
-THREAD_STACK_BYTES = 512 * 1024 * 1024
+# pages a deep statement touches are committed). Expressions are compared,
+# hashed and walked iteratively, so the deepest statements within the limits
+# use only a few MiB of C stack; the rest is headroom.
+THREAD_STACK_BYTES = 256 * 1024 * 1024
 # Python frames do not use the C stack, so this only bounds the interpreter's
 # frame memory; MAX_OPERANDS-deep trees need a few frames per level.
 RECURSION_LIMIT = 2_000_000
@@ -45,6 +46,25 @@ def configure_interpreter() -> None:
     """Raises the recursion limit and the stack size of new threads."""
     sys.setrecursionlimit(max(sys.getrecursionlimit(), RECURSION_LIMIT))
     threading.stack_size(THREAD_STACK_BYTES)
+
+
+def start_thread(make: Callable[[], threading.Thread]) -> threading.Thread:
+    """Starts the thread ``make()`` creates, normally with the large stack;
+    if the system refuses one that large (an address-space limit), a new
+    thread with the platform's default stack size instead (deep statements
+    then fail with RESOURCE_LIMIT sooner)."""
+    thread = make()
+    try:
+        thread.start()
+        return thread
+    except RuntimeError:
+        previous = threading.stack_size(0)
+        try:
+            thread = make()
+            thread.start()
+        finally:
+            threading.stack_size(previous)
+        return thread
 
 
 def run_with_large_stack(fn: Callable[[], Any]) -> Any:
@@ -59,8 +79,7 @@ def run_with_large_stack(fn: Callable[[], Any]) -> Any:
         except BaseException as e:  # noqa: BLE001 - re-raised in the caller
             outcome["error"] = e
 
-    thread = threading.Thread(target=target, name="polyquery-main", daemon=True)
-    thread.start()
+    thread = start_thread(lambda: threading.Thread(target=target, name="polyquery-main", daemon=True))
     while thread.is_alive():
         thread.join(0.5)
     if "error" in outcome:
