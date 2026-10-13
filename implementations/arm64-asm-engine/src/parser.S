@@ -35,6 +35,7 @@
 #define PS_SIZE    16
 
 #define PARSE_MAX_DEPTH 4096        // CR-6: README "Limits"
+#define PARSE_MAX_OPERANDS 1000000  // literals, column references, f(*)
 
 // Growable array ("vector") living in a caller's stack frame. Elements are
 // zero-initialised; growth copies into a new arena block (doubling).
@@ -133,12 +134,19 @@ msg_syntax:      .asciz "syntax error at or near "
 msg_eoi:         .asciz "syntax error: unexpected end of input"
 msg_unsupported: .asciz "unsupported syntax "
 msg_too_deep:    .asciz "expression nesting depth exceeds 4096"
+msg_operands:    .asciz "operand count exceeds 1000000"
 msg_int_range:   .asciz "integer literal out of range "
 msg_num_range:   .asciz "numeric literal out of range "
 msg_bad_date:    .asciz "invalid DATE literal "
 msg_bad_ts:      .asciz "invalid TIMESTAMP literal "
 msg_bad_type:    .asciz "unknown type name "
 msg_bad_tparams: .asciz "invalid type parameters for "
+
+    // operands of the statement being parsed (node_new counts them; the
+    // parser record is not passed to node_new)
+    TBSS
+    .p2align 3
+g_parse_operands: .skip 8
 
     .text
 
@@ -154,6 +162,8 @@ FUNC parse_sql
     mov  x29, sp
     stp  x19, x20, [sp, #16]
     stp  x21, x22, [sp, #32]
+    TLS_ADDR x9, g_parse_operands
+    str  xzr, [x9]
     bl   lex_tokenize
     add  x19, sp, #48
     str  x0, [x19, #PS_CUR]
@@ -1473,6 +1483,8 @@ LFUNC p_funcall
     ADVANCE
     mov  w9, #NF_STAR
     str  w9, [x21, #N_FLAGS]
+    mov  x0, x20                    // "*" is an operand (CR-6)
+    bl   p_count_operand
     EXPECT TK_RPAREN
     b    9f
 1:  cmp  w10, #TK_RPAREN            // f()
@@ -1851,6 +1863,29 @@ LFUNC p_error
     brk  #0                         // not reached
 ENDF p_error
 
+// p_count_operand(x0 Token*) — counts one operand of the statement;
+// RESOURCE_LIMIT at the token beyond PARSE_MAX_OPERANDS (x0-x3, x9 only)
+LFUNC p_count_operand
+    TLS_ADDR x9, g_parse_operands
+    ldr  x1, [x9]
+    add  x1, x1, #1
+    str  x1, [x9]
+    ldr  x2, =PARSE_MAX_OPERANDS
+    cmp  x1, x2
+    b.hi 1f
+    ret
+1:  stp  x29, x30, [sp, #-16]!
+    mov  x29, sp
+    mov  x9, x0
+    mov  w0, #ERR_RESOURCE_LIMIT
+    ADR_L x1, msg_operands
+    ldr  w2, [x9, #TK_LINE]
+    ldr  w3, [x9, #TK_COL]
+    bl   pq_raise_pos
+    brk  #0                         // not reached
+    .ltorg
+ENDF p_count_operand
+
 // p_too_deep(x0 P) — noreturn: RESOURCE_LIMIT at the current token.
 LFUNC p_too_deep
     stp  x29, x30, [sp, #-16]!
@@ -1874,7 +1909,12 @@ LFUNC node_new
     stp  x19, x20, [sp, #16]
     mov  w19, w0
     mov  x20, x1
-    mov  x0, #N_SIZE
+    cmp  w19, #NK_LIT                   // literals and column references
+    ccmp w19, #NK_COL, #4, ne           // are operands (CR-6)
+    b.ne 1f
+    mov  x0, x20
+    bl   p_count_operand
+1:  mov  x0, #N_SIZE
     bl   arena_zalloc
     str  w19, [x0, #N_KIND]
     ldr  w9, [x20, #TK_LINE]
