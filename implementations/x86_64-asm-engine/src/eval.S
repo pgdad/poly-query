@@ -371,6 +371,18 @@ ev_binary:
     je ev_and
     cmp $B_OR, %ecx
     je ev_or
+    cmp $B_CONCAT, %ecx             /* a || b || c ...: one result buffer */
+    jne 1f
+    mov N_A(%rbx), %rax
+    cmpl $EK_BINARY, N_KIND(%rax)
+    jne 1f
+    cmpl $B_CONCAT, N_OP(%rax)
+    jne 1f
+    mov %rbx, %rdi
+    mov %r12, %rsi
+    call concat_chain
+    LEAVE
+1:
     mov N_A(%rbx), %rdi
     mov %r12, %rsi
     call eval
@@ -943,3 +955,113 @@ cv_from_str:
     jnz cast_conv_error
     LEAVE
 ENDF cast_value
+
+/* ---------------------------------------------------------------- || chains
+ * A chain of n concatenations evaluated pairwise copies its prefix n times
+ * (quadratic time and request-arena memory for the long chains of CR-6).
+ * concat_chain evaluates the operands of a whole || tree left to right into
+ * one growing buffer instead.  Same semantics as the pairwise evaluation:
+ * the first NULL operand makes the result NULL and the operands after it
+ * are not evaluated (eval returns NULL for a || b without evaluating b when
+ * a is NULL). */
+
+/* concat_chain(node rdi, ctx rsi) -> rax pstr*, rdx 1 if NULL */
+FUNC concat_chain
+    ENTER 32
+    movq $0, 0(%rsp)                /* buffer: pstr* (8-byte length + text) */
+    movq $0, 8(%rsp)                /* text length */
+    movq $0, 16(%rsp)               /* allocated bytes */
+    lea 0(%rsp), %rdx
+    call concat_append
+    test %eax, %eax
+    jnz 8f
+    mov 8(%rsp), %rdi               /* make sure the buffer exists */
+    xor %esi, %esi
+    lea 0(%rsp), %rdx
+    call concat_reserve
+    mov 0(%rsp), %rax
+    mov 8(%rsp), %rcx
+    mov %rcx, (%rax)
+    movb $0, 8(%rax, %rcx)
+    xor %edx, %edx
+    LEAVE
+8:  xor %eax, %eax
+    mov $1, %edx
+    LEAVE
+ENDF concat_chain
+
+/* concat_append(node rdi, ctx rsi, buffer rdx) -> eax 1 if an operand was NULL */
+FUNC concat_append
+    STACK_CHECK
+    ENTER 0
+    mov %rdi, %rbx
+    mov %rsi, %r12
+    mov %rdx, %r13
+    cmpl $EK_BINARY, N_KIND(%rbx)
+    jne 5f
+    cmpl $B_CONCAT, N_OP(%rbx)
+    jne 5f
+    mov N_A(%rbx), %rdi             /* a || b: both sides, in order */
+    mov %r12, %rsi
+    mov %r13, %rdx
+    call concat_append
+    test %eax, %eax
+    jnz 9f
+    mov N_B(%rbx), %rdi
+    mov %r12, %rsi
+    mov %r13, %rdx
+    call concat_append
+    jmp 9f
+5:  mov %rbx, %rdi                  /* an operand */
+    mov %r12, %rsi
+    call eval
+    mov $1, %ecx
+    test %edx, %edx
+    jnz 8f
+    mov %rax, %r14                  /* pstr */
+    mov 8(%r13), %rdi
+    mov (%r14), %rsi
+    mov %r13, %rdx
+    call concat_reserve
+    mov 0(%r13), %rdi
+    add 8(%r13), %rdi
+    add $8, %rdi
+    lea 8(%r14), %rsi
+    mov (%r14), %rdx
+    call memcpy
+    mov (%r14), %rax
+    add %rax, 8(%r13)
+    xor %ecx, %ecx
+8:  mov %ecx, %eax
+9:  LEAVE
+ENDF concat_append
+
+/* concat_reserve(len rdi, extra rsi, buffer rdx): room for len + extra
+ * bytes of text (+ length word and NUL), doubling the allocation */
+FUNC concat_reserve
+    ENTER 0
+    mov %rdx, %rbx
+    lea 9(%rdi, %rsi), %r12         /* bytes needed */
+    mov 16(%rbx), %r13
+    cmp %r13, %r12
+    jbe 9f
+    add %r13, %r13                  /* new size = max(2 * old, needed, 64) */
+    cmp %r12, %r13
+    cmovb %r12, %r13
+    mov $64, %eax
+    cmp %rax, %r13
+    cmovb %rax, %r13
+    mov %r13, %rdi
+    call tmp_alloc
+    mov %rax, %r14
+    mov 0(%rbx), %rsi
+    test %rsi, %rsi
+    jz 1f
+    lea 8(%r14), %rdi               /* keep the text so far */
+    add $8, %rsi
+    mov 8(%rbx), %rdx
+    call memcpy
+1:  mov %r14, 0(%rbx)
+    mov %r13, 16(%rbx)
+9:  LEAVE
+ENDF concat_reserve
