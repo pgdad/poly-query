@@ -49,6 +49,26 @@ exhaustion); CSV loads are now streamed into typed column builders and a
 heap guard turns memory exhaustion into `RESOURCE_LIMIT` while the engine
 keeps serving (see *Defect fix: large data and memory exhaustion*).
 
+## Library, application and example (application spec 1.0.0)
+
+The engine is also a **library**: the ASDF system `"polyquery"` exports the
+embedding API of `spec/apps/embedding.md` in the package `POLYQUERY.API`
+(`src/api/`). On top of it:
+
+* **[EMBEDDING.md](EMBEDDING.md)** — the developer guide: depending on the
+  system with ASDF, the API reference, value-type mapping, errors, resource
+  management, thread safety and a complete minimal program.
+* **[APP.md](APP.md)** — the user guide of **`pqledger`** (`bin/pqledger`,
+  source in `app/`), the personal-finance command-line application of
+  `spec/apps/pqledger.md`: configuration reference, rules and budget files,
+  every command with example output, exit codes, troubleshooting.
+* **`examples/embed-demo/`** — the minimal embedding program
+  (`bin/pq-embed-demo DATA_DIR CSV_FILE SQL`, embedding.md §5), a separate
+  ASDF system using only the public API.
+
+See *Embedding API and pqledger* below for how they are built and the
+design decisions.
+
 ## Build prerequisites
 
 * SBCL 2.6.9 (`sbcl` on `PATH`), with its bundled ASDF and `sb-rt` contrib.
@@ -56,8 +76,8 @@ keeps serving (see *Defect fix: large data and memory exhaustion*).
 * No network access and no third-party libraries are needed.
 
 ```sh
-make build      # compiles with ASDF and saves build/polyquery (standalone executable)
-make test       # runs the unit tests (sb-rt)
+make build      # compiles with ASDF and saves build/polyquery, build/pqledger, build/pq-embed-demo
+make test       # runs the unit tests (sb-rt) of the engine, its API and pqledger
 make lint       # clean recompile; fails on any compiler WARNING
 make fmt        # whitespace normalisation (there is no standard CL formatter)
 make clean
@@ -65,7 +85,8 @@ bin/polyquery version
 ```
 
 `bin/polyquery` is a small shell launcher that execs `build/polyquery` and works
-from any directory. The executable is saved with `:save-runtime-options`, so
+from any directory (`bin/pqledger` and `bin/pq-embed-demo` likewise exec
+`build/pqledger` and `build/pq-embed-demo`). The executable is saved with `:save-runtime-options`, so
 SBCL's runtime does not interpret any command-line arguments; the heap
 (64 GiB dynamic space, reserved address space that is only backed by memory
 as it is used; see *Defect fix: large data and memory exhaustion*) and
@@ -985,6 +1006,106 @@ files are streamed, not read; memory failures), `protocol/cli.lisp`
 (`--max-memory-mb`), `Makefile` (64 GiB dynamic space), `polyquery.asd`,
 and the unit tests `tests/test-memory.lisp`.
 
+### Embedding API and pqledger
+
+Application spec 1.0.0 (`spec/apps/embedding.md`, `spec/apps/pqledger.md`)
+turns the engine into a library and adds an application on top of it.
+
+**Layout.**
+
+| path | contents |
+|---|---|
+| `src/api/` | the embedding API, package `POLYQUERY.API`, part of the `"polyquery"` ASDF system |
+| `app/` | `pqledger`: its own ASDF system `"pqledger"` (`app/pqledger.asd`, sources in `app/src/`, unit tests in `app/tests/`) |
+| `examples/embed-demo/` | `pq-embed-demo`, a separate ASDF system depending only on `"polyquery"` |
+| `build.lisp` | builds one executable; `BUILD_SYSTEM`/`BUILD_TOPLEVEL`/`BUILD_OUTPUT` select which (the Makefile builds all three) |
+
+**One implementation for the CLI and the API.** The engine facade
+(`src/engine.lisp`: `execute-sql`, `load-input`, `save-table`,
+`open-table`, the catalog) is used by both the protocol handler
+(`src/protocol/requests.lisp`, behind `bin/polyquery`) and the API. The
+load request's logic (path safety, input size limits, streaming CSV files)
+moved from the protocol handler into `load-input` so that both share it
+unchanged; nothing else in the engine changed, and the engine claims exactly
+the capabilities it claimed before.
+
+**API design.** An instance is a `database` structure wrapping an engine
+session (configuration + catalog); `make-database` takes the CLI's limits
+as keyword arguments and `with-database` is the `with-` idiom for closing.
+Results are converted eagerly into native values (DECIMAL as exact
+rationals, DATE/TIMESTAMP as day/microsecond integers, NULL as `:null` so
+that it differs from a false BOOLEAN) and are independent of the instance.
+Every failure becomes one condition, `engine-error`, carrying the spec's
+error code; the API masks floating-point traps around each call as the
+executables do. `create-table` (rows of native values → table) is an
+addition beyond the required operations: it lets an application write
+tables without serializing them to CSV first.
+
+**pqledger structure** (`app/src/`, in load order): `conditions` (errors →
+exit statuses), `text`, `config` (locating and validating the
+configuration; the INI line syntax shared with the rules and budget
+files), `rules`, `statement` (bank CSV records with physical line numbers,
+date/amount conversion, merchant normalization), `ledger` (the three PQCF
+tables through the API, category resolution, import with duplicate
+detection, overrides), `output` (table/csv/json), `reports` (the SQL of
+every report), `cli` (argument parsing and dispatch) and `main`.
+
+**pqledger design decisions.**
+
+* *Everything through the engine.* A command creates an instance on
+  `data_dir`, opens the three ledger files with `open-table`, and computes
+  every report with SQL. The host parses files and arguments, converts
+  statement records, decides duplicates, formats output and computes the
+  `share` column (exactly, in rationals).
+* *Category resolution in SQL.* The rules become a table `rules` (rule_no,
+  category, pattern); a CTE turns each pattern into a LIKE pattern (`*` →
+  `%`, `?` → `_`; patterns may contain neither `%` nor `_`), joins it with
+  the *distinct* merchants (`LIKE` is case-sensitive, but merchants and
+  patterns are both ASCII-upper-cased, which gives exactly the specified
+  ASCII-case-insensitive whole-string match), keeps the lowest matching
+  rule_no per merchant and left-joins the overrides:
+  `COALESCE(override, rule category, 'uncategorized')`. Joining distinct
+  merchants rather than transactions keeps the non-equi join small. For
+  `query`, the same CTE materializes the `ledger` table.
+* *Writing.* A changed table is rebuilt in the instance with
+  `create-table` (existing rows read back by an `ORDER BY` key query plus
+  the new rows), saved with `save-table` under a temporary name in
+  `data_dir`, and renamed into place only after every changed table was
+  written — so a failing command leaves the ledger unchanged. `init` renames
+  `transactions.pqcf` last because its presence marks a ledger. An import
+  that only finds duplicates rewrites `batches.pqcf` only.
+* *Duplicates.* The ledger's counts per (date, amount, merchant) for the
+  account come from one GROUP BY query; the k-th file record of a key is
+  imported iff k > (ledger count), which is exactly "the last
+  max(0, f − l) records".
+* *Output* is assembled in memory and written only when the command
+  succeeded, so failures never print to stdout.
+
+**Decisions where the application spec is silent.**
+
+* `report KIND` must be the first argument after `report`; the options
+  follow in any order.
+* `list --category uncategorized` is a usage error (`uncategorized` is not
+  a category name, §3.3); use `--uncategorized`.
+* A column referenced *by name* while `header = false` is a configuration
+  error (exit 2), detected when an account using those settings imports.
+* An empty statement file with `header = true` has no header record: import
+  error (exit 4). A header without data rows imports nothing and still
+  records a batch.
+* A quote character inside an unquoted field is literal; a character after
+  a closing quote other than the delimiter or a line end is an import error
+  (as in the engine's CSV reader).
+* `currency_symbol` is removed from the start if the amount starts with it,
+  otherwise from the end.
+* A transaction id beyond the INT64 range given to `set-category` is an
+  unknown id (exit 6). `--top N` larger than INT64 is clamped.
+* The next batch number is one more than the largest in `batches.pqcf`.
+* A ledger file whose columns differ from §4 is reported as exit 7.
+* The configuration's `[engine] threads` is capped at 256 (the engine's
+  maximum per query).
+* `bin/pqledger` exits with status 7 and a `pqledger: error:` message when
+  the executable has not been built.
+
 ### Extensibility notes
 
 * A logical rewrite is a function from logical plan to logical plan in
@@ -1585,6 +1706,22 @@ copy-free scans for grouped aggregation.
 
 ## Testing
 
+* Application spec: `python3 tests/apps/pqledger/runner.py --app
+  implementations/common-lisp/bin/pqledger --embed-demo
+  implementations/common-lisp/bin/pq-embed-demo --trace` (24/24 cases,
+  3/3 embed cases, no process or socket violations). `make test` also runs
+  the API unit tests (`tests/test-api.lisp`: typed values, load from text
+  and files, errors leaving the instance usable, closed instances, PQCF
+  round trips) and pqledger's own unit tests (`app/tests/`: configuration,
+  rules and budget parsing, dates, amounts, merchants, CSV line numbers,
+  output formats, share rounding, duplicate selection, a ledger round trip
+  through the engine). During development the reports of a 300,000-row
+  ledger (three generated statement styles, a re-import, an override)
+  were compared byte for byte with an independent Python implementation
+  of the spec, and a separate copy of `examples/embed-demo` was built
+  outside the tree with only `CL_SOURCE_REGISTRY` pointing at this
+  directory.
+
 * `make test` — unit tests (sb-rt) for numeric parsing/formatting, temporal
   values, types, JSON, lexer/parser, CSV/JSON ingestion, expression
   evaluation, and Phase 2 analysis/planning/execution (joins, pushdown and
@@ -1700,6 +1837,14 @@ copy-free scans for grouped aggregation.
   complete).
 
 ## Known limitations
+
+* pqledger keeps the ledger in memory while a command runs (about 1.5 KB
+  per transaction for `list`/`export` of a million transactions, less for
+  reports). On a ledger of 1.1 million transactions every command took
+  0.3–3.2 s and at most 2.1 GB of memory (`--format json export`); an
+  import rewrites the whole `transactions.pqcf` (3 s at that size).
+* pqledger does not lock the ledger: two commands that write the same
+  ledger concurrently may lose one of the updates.
 
 * Wide DECIMAL (p > 18) values are bignum-capable integers in generic
   vectors: their arithmetic, comparisons, sums and keys run element by

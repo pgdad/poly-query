@@ -83,7 +83,10 @@
                  (:file "metrics")
                  (:file "server")))
    (:module "cli" :pathname "protocol" :serial t
-    :components ((:file "cli"))))
+    :components ((:file "cli")))
+   (:module "api" :serial t
+    :components ((:file "package")
+                 (:file "api"))))
   :in-order-to ((test-op (test-op "polyquery/tests"))))
 
 (defsystem "polyquery/tests"
@@ -108,7 +111,8 @@
                (:file "test-sort")
                (:file "test-latency")
                (:file "test-limits")
-               (:file "test-memory"))
+               (:file "test-memory")
+               (:file "test-api"))
   :perform (test-op (o c)
              (unless (uiop:symbol-call '#:polyquery-tests '#:run-all-tests)
                (error "unit tests failed"))))

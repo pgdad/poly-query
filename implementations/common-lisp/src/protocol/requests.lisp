@@ -292,47 +292,6 @@ serializing each value according to the type of its column in COLUMNS."
 ;;; ------------------------------------------------------------------
 ;;; load
 
-(defun resolve-data-path (config path)
-  "Resolve a request path inside the data directory (protocol.md §6)."
-  (when (or (zerop (length path))
-            (char= (char path 0) #\/)
-            (find (code-char 0) path)
-            (member ".." (split-string path #\/) :test #'string=))
-    (signal-pq-error "ACCESS_DENIED" "path ~S is not permitted" path))
-  (concatenate 'string (engine-config-data-dir config) path))
-
-(defun check-input-file-size (native-path max-bytes)
-  "Signal RESOURCE_LIMIT when the file is larger than MAX-BYTES."
-  (call-with-input-file-checked
-   native-path
-   (lambda (in)
-     (let ((size (file-length in)))
-       (when (> size max-bytes)
-         (resource-limit-error "input of ~D bytes exceeds the ingestion limit" size))))))
-
-(defun read-file-octets (native-path max-bytes)
-  (call-with-input-file-checked
-   native-path
-   (lambda (in)
-     (let ((size (file-length in)))
-       (when (> size max-bytes)
-         (resource-limit-error "input of ~D bytes exceeds the ingestion limit" size))
-       (ensure-heap-room size)
-       (handler-case
-           (let* ((buf (make-array size :element-type '(unsigned-byte 8)))
-                  (n (read-sequence buf in)))
-             (if (= n size) buf (subseq buf 0 n)))
-         (stream-error ()
-           (signal-pq-error "IO_ERROR" "cannot read input file")))))))
-
-(defun octets-to-text (octets)
-  "Decode UTF-8 OCTETS, ignoring a leading BOM."
-  (let ((start (if (and (>= (length octets) 3) (= (aref octets 0) #xEF)
-                        (= (aref octets 1) #xBB) (= (aref octets 2) #xBF))
-                   3 0)))
-    (handler-case (sb-ext:octets-to-string octets :start start :external-format :utf-8)
-      (error () (ingest-error "input is not valid UTF-8")))))
-
 (defun parse-schema-field (schema)
   "Parse the explicit schema array into a list of COLUMN-DEFs."
   (loop for item across schema
@@ -347,8 +306,7 @@ serializing each value according to the type of its column in COLUMNS."
 (defun op-load (session id request &optional octets)
   "Load a table. OCTETS, when given, is the raw input (an HTTP upload) and
 replaces the request's path/data fields."
-  (let* ((config (session-config session))
-         (name (request-field request "table" :required t :type :string))
+  (let* ((name (request-field request "table" :required t :type :string))
          (format-name (request-field request "format" :required t :type :string))
          (format (cond ((string= format-name "csv") :csv)
                        ((string= format-name "json") :json)
@@ -363,47 +321,20 @@ replaces the request's path/data fields."
                      (request-field options "header" :type :boolean)
                      t))
          (delimiter (let ((d (request-field options "delimiter" :type :string)))
-                      (cond ((null d) #\,)
-                            ((and (= (length d) 1) (< (char-code (char d 0)) 128)
-                                  (not (find (char d 0) (list #\" #\Newline #\Return))))
-                             (char d 0))
-                            (t (invalid-request-error "delimiter must be a single ASCII character")))))
+                      (if d (csv-delimiter-char d) #\,)))
          (schema (when schema-json (parse-schema-field schema-json)))
          (layout (layout-option options))
          (dictionary (if (nth-value 1 (json-get options "dictionary"))
                          (request-field options "dictionary" :type :boolean)
                          :auto)))
-    (when (zerop (length name))
-      (invalid-request-error "table name must not be empty"))
-    (when (and (null octets) (or (and path data) (and (null path) (null data))))
-      (invalid-request-error "exactly one of path or data is required"))
-    (when (and (eq format :csv) (not header) (null schema))
-      (invalid-request-error "header=false requires an explicit schema"))
-    (when (and (not replace) (catalog-table-exists-p (session-catalog session) name))
-      (signal-pq-error "ALREADY_EXISTS" "table ~A already exists" name))
-    (let* ((max-bytes (engine-config-max-ingest-bytes config))
-           (native (and (null octets) path (resolve-data-path config path)))
-           ;; CSV files are streamed; everything else is read into memory
-           (octets (cond (octets)
-                         ((and native (eq format :csv))
-                          (check-input-file-size native max-bytes)
-                          nil)
-                         (native (read-file-octets native max-bytes))
-                         (t (sb-ext:string-to-octets data :external-format :utf-8))))
-           (spec (make-ingest-spec :table-name name :format format :schema schema
-                                   :header header :delimiter delimiter
-                                   :max-rows (engine-config-max-table-rows config))))
-      (when (and octets (> (length octets) max-bytes))
-        (resource-limit-error "input exceeds the ingestion limit of ~D bytes" max-bytes))
-      (let ((table (load-table session spec
-                               (cond ((null octets) native)
-                                     ((eq format :csv) octets)
-                                     (t (octets-to-text octets)))
-                               :replace replace :layout layout :dictionary dictionary)))
-        (success-response id
-                          "table" (table-name table)
-                          "row_count" (table-row-count table)
-                          "columns" (columns-json (table-columns table)))))))
+    (let ((table (load-input session name format :path path :data data :octets octets
+                                                 :schema schema :header header
+                                                 :delimiter delimiter :replace replace
+                                                 :layout layout :dictionary dictionary)))
+      (success-response id
+                        "table" (table-name table)
+                        "row_count" (table-row-count table)
+                        "columns" (columns-json (table-columns table))))))
 
 (defun layout-option (options)
   "The table layout requested by a load/open \"layout\" option."
