@@ -15,7 +15,7 @@ JOB="interop-$(date -u +%Y%m%dT%H%M%SZ)-$$"
 SSH=(ssh -o BatchMode=yes -o ConnectTimeout=15 "$HOST")
 [[ -d $DIR ]] || { echo "arm_interop: no directory $DIR" >&2; exit 2; }
 "${SSH[@]}" "mkdir -p ~/.pq-stage/$JOB/repo/$DIR"
-git archive --format=tar HEAD tools/validation datasets/generators "implementations/$LANG_DIR" |
+git archive --format=tar HEAD tools/validation tests/apps/pqledger datasets/generators "implementations/$LANG_DIR" |
   "${SSH[@]}" "tar -C ~/.pq-stage/$JOB/repo -xf -"
 rsync -a "$DIR/" "$HOST:.pq-stage/$JOB/repo/$DIR/"
 
