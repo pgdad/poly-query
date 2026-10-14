@@ -4,8 +4,10 @@
  *   prof_start()  with PQ_PROF=FILE in the environment: samples the
  *       instruction pointer of the running thread every millisecond of
  *       process CPU time (ITIMER_PROF / SIGPROF) and writes one line per
- *       sample to FILE at exit: the address, the thread (its TLS base) and
- *       the time stamp counter, in hex.  Without PQ_PROF it does nothing.
+ *       sample to FILE at exit: the address, the thread (its TLS base), the
+ *       time stamp counter and the word at the stack pointer (the return
+ *       address when a leaf routine such as memcpy was interrupted), in
+ *       hex.  Without PQ_PROF it does nothing.
  *
  * `bench/prof.sh FILE` maps the addresses to the engine's symbols (the
  * binary is not position independent) and prints a flat profile.
@@ -15,10 +17,11 @@
     .section .note.GNU-stack, "", @progbits
 
 #define PROF_MAX    (1 << 22)       /* samples kept */
-#define PROF_REC    24              /* bytes per sample: rip, thread, tsc */
+#define PROF_REC    32              /* bytes per sample: rip, thread, tsc, [rsp] */
 #define SIGPROF_    27
 #define ITIMER_PROF_ 2
 #define UC_RIP      168             /* ucontext_t: uc_mcontext.gregs[REG_RIP] */
+#define UC_RSP      160             /* uc_mcontext.gregs[REG_RSP] */
 
     .data
     .p2align 3
@@ -73,6 +76,9 @@ prof_handler:
     jae 1f
     imul $PROF_REC, %rax, %rcx
     add prof_buf(%rip), %rcx
+    mov UC_RSP(%rdx), %rax
+    mov (%rax), %rax
+    mov %rax, 24(%rcx)
     mov UC_RIP(%rdx), %rdx
     mov %rdx, (%rcx)
     mov %fs:0, %rax
@@ -108,8 +114,9 @@ prof_dump:
     mov (%rax), %rdx
     mov 8(%rax), %rcx
     mov 16(%rax), %r8
+    mov 24(%rax), %r9
     mov %rbx, %rdi
-    CSTR %rsi, "%lx %lx %lx\n"
+    CSTR %rsi, "%lx %lx %lx %lx\n"
     xor %eax, %eax
     call fprintf
     inc %r13

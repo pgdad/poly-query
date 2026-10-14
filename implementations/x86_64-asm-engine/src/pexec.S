@@ -310,6 +310,69 @@ FUNC ts_append
     LEAVE
 ENDF ts_append
 
+/* ts_concat(sets rdi, P rsi) -> rax TupleSet* holding the tuples of the P
+ * sets (equal widths) in order: sets[0] itself when P = 1, else a set
+ * allocated once at its final size into which every part copies its own
+ * set in parallel (appending them one by one on this thread made the
+ * merge serial and re-copied the growing set at every doubling) */
+#define TC_SETS 0
+#define TC_DST  8
+#define TC_OFF  16      /* u64[P]: first tuple of each set */
+FUNC ts_concat
+    ENTER 32
+    mov %rdi, %rbx
+    mov %rsi, %r12
+    mov (%rbx), %rax
+    cmp $1, %r12
+    jbe 9f
+    lea (, %r12, 8), %rdi
+    call tmp_alloc
+    mov %rax, %r13                  /* offsets */
+    xor %r14d, %r14d                /* total */
+    xor %ecx, %ecx
+1:  mov %r14, (%r13, %rcx, 8)
+    mov (%rbx, %rcx, 8), %rax
+    add TS_N(%rax), %r14
+    inc %rcx
+    cmp %r12, %rcx
+    jb 1b
+    mov (%rbx), %rax
+    mov TS_W(%rax), %rdi
+    mov %r14, %rsi
+    call ts_new
+    mov %r14, TS_N(%rax)
+    mov %rbx, TC_SETS(%rsp)
+    mov %rax, TC_DST(%rsp)
+    mov %r13, TC_OFF(%rsp)
+    mov %r12, %rdi
+    mov %r12, %rsi
+    lea ts_cat_part(%rip), %rdx
+    lea 0(%rsp), %rcx
+    call par_run
+    mov TC_DST(%rsp), %rax
+9:  LEAVE
+ENDF ts_concat
+
+/* ts_cat_part(task rdi, part rsi, lo rdx, hi rcx): copies set lo */
+FUNC ts_cat_part
+    sub $8, %rsp
+    mov TC_SETS(%rdi), %rax
+    mov (%rax, %rdx, 8), %rsi       /* source set */
+    mov TC_DST(%rdi), %r8
+    mov TS_W(%r8), %rcx
+    shl $3, %rcx                    /* tuple bytes */
+    mov TC_OFF(%rdi), %rax
+    mov (%rax, %rdx, 8), %rdi
+    imul %rcx, %rdi
+    add TS_DATA(%r8), %rdi
+    mov TS_N(%rsi), %rdx
+    imul %rcx, %rdx
+    mov TS_DATA(%rsi), %rsi
+    call memcpy
+    add $8, %rsp
+    ret
+ENDF ts_cat_part
+
 /* ================================================================ row kernels
  * Batch kernels: ctx rdi (worker EvalCtx), tuples (W words each), n, W.
  * In vectorized mode they forward to the vector kernels of vec.S. */
@@ -628,19 +691,9 @@ FUNC pexec_scan
     lea scan_part(%rip), %rsi
     mov %r13, %rdx
     call par_for
-    mov %rax, %r14                  /* parts */
-    mov PT_OUT(%r13), %r15          /* part 0's set collects the others */
-    mov $1, %ebx
-1:  cmp %r14, %rbx
-    jae 9f
-    mov PT_OUT(%r13, %rbx, 8), %rax
-    mov %r15, %rdi
-    mov TS_DATA(%rax), %rsi
-    mov TS_N(%rax), %rdx
-    call ts_append
-    inc %rbx
-    jmp 1b
-9:  mov %r15, %rax
+    lea PT_OUT(%r13), %rdi          /* the parts' sets, in order */
+    mov %rax, %rsi
+    call ts_concat
     LEAVE
 ENDF pexec_scan
 
@@ -2973,21 +3026,13 @@ FUNC pexec_probe
     lea probe_part(%rip), %rsi
     mov %r13, %rdx
     call par_for
-    mov %rax, %r14                  /* parts */
-    mov PT_OUT(%r13), %r15
-    mov $1, %ebx
-3:  cmp %r14, %rbx
-    jae 9f
-    mov PT_OUT(%r13, %rbx, 8), %rax
-    mov %r15, %rdi
-    mov TS_DATA(%rax), %rsi
-    mov TS_N(%rax), %rdx
-    call ts_append
-    mov %r15, %rdi
+    lea PT_OUT(%r13), %rdi          /* the parts' sets, in order */
+    mov %rax, %rsi
+    call ts_concat
+    mov %rax, %r15
+    mov %rax, %rdi
     call check_join_rows
-    inc %rbx
-    jmp 3b
-9:  mov %r15, %rax
+    mov %r15, %rax
     LEAVE
 ENDF pexec_probe
 
@@ -3672,21 +3717,13 @@ FUNC pexec_nl
     lea nl_part(%rip), %rdx
     mov %r13, %rcx
     call par_run
-    mov %rax, %r14
-    mov PT_OUT(%r13), %r15
-    mov $1, %ebx
-2:  cmp %r14, %rbx
-    jae 9f
-    mov PT_OUT(%r13, %rbx, 8), %rax
-    mov %r15, %rdi
-    mov TS_DATA(%rax), %rsi
-    mov TS_N(%rax), %rdx
-    call ts_append
-    mov %r15, %rdi
+    lea PT_OUT(%r13), %rdi          /* the parts' sets, in order */
+    mov %rax, %rsi
+    call ts_concat
+    mov %rax, %r15
+    mov %rax, %rdi
     call check_join_rows
-    inc %rbx
-    jmp 2b
-9:  mov %r15, %rax
+    mov %r15, %rax
     LEAVE
 ENDF pexec_nl
 
