@@ -1,0 +1,2514 @@
+{
+ "schema": "polyquery-app-tests/1",
+ "app": "/srv/polyquery/runs/a-app-pqledger-x86_64-asm-engine-a1-20261014T170049Z/validate/implementations/x86_64-asm-engine/bin/pqledger",
+ "embed_demo": "implementations/x86_64-asm-engine/bin/pq-embed-demo",
+ "trace": true,
+ "summary": {
+  "cases": {
+   "total": 30,
+   "pass": 30
+  },
+  "embed": {
+   "total": 7,
+   "pass": 7
+  }
+ },
+ "results": [
+  {
+   "case": "budget-missing",
+   "steps": [
+    {
+     "step": 1,
+     "args": [
+      "init"
+     ],
+     "ok": true,
+     "seconds": 0.02,
+     "failures": []
+    },
+    {
+     "step": 2,
+     "args": [
+      "budget",
+      "--month",
+      "2026-01"
+     ],
+     "ok": true,
+     "seconds": 0.0,
+     "failures": []
+    }
+   ],
+   "verdict": "pass"
+  },
+  {
+   "case": "budget",
+   "steps": [
+    {
+     "step": 1,
+     "args": [
+      "init"
+     ],
+     "ok": true,
+     "seconds": 0.02,
+     "failures": []
+    },
+    {
+     "step": 2,
+     "args": [
+      "import",
+      "chk.csv",
+      "--account",
+      "checking"
+     ],
+     "ok": true,
+     "seconds": 0.01,
+     "failures": []
+    },
+    {
+     "step": 3,
+     "args": [
+      "import",
+      "card.csv",
+      "--account",
+      "card"
+     ],
+     "ok": true,
+     "seconds": 0.01,
+     "failures": []
+    },
+    {
+     "step": 4,
+     "args": [
+      "budget",
+      "--month",
+      "2026-01"
+     ],
+     "ok": true,
+     "seconds": 0.0,
+     "failures": []
+    },
+    {
+     "step": 5,
+     "args": [
+      "budget",
+      "--month",
+      "2026-02",
+      "--account",
+      "card"
+     ],
+     "ok": true,
+     "seconds": 0.0,
+     "failures": []
+    },
+    {
+     "step": 6,
+     "args": [
+      "budget",
+      "--month",
+      "2025-12"
+     ],
+     "ok": true,
+     "seconds": 0.0,
+     "failures": []
+    },
+    {
+     "step": 7,
+     "args": [
+      "--format",
+      "json",
+      "budget",
+      "--month",
+      "2026-01"
+     ],
+     "ok": true,
+     "seconds": 0.01,
+     "failures": []
+    }
+   ],
+   "verdict": "pass"
+  },
+  {
+   "case": "config-env",
+   "steps": [
+    {
+     "step": 1,
+     "args": [
+      "init"
+     ],
+     "ok": true,
+     "seconds": 0.02,
+     "failures": []
+    },
+    {
+     "step": 2,
+     "ledger": true,
+     "ok": true,
+     "failures": []
+    },
+    {
+     "step": 3,
+     "args": [
+      "--config",
+      "pqledger.conf",
+      "init"
+     ],
+     "ok": true,
+     "seconds": 0.02,
+     "failures": []
+    },
+    {
+     "step": 4,
+     "ledger": true,
+     "ok": true,
+     "failures": []
+    }
+   ],
+   "verdict": "pass"
+  },
+  {
+   "case": "config-errors",
+   "steps": [
+    {
+     "step": 1,
+     "args": [
+      "--config",
+      "unknown-key.conf",
+      "init"
+     ],
+     "ok": true,
+     "seconds": 0.01,
+     "failures": []
+    },
+    {
+     "step": 2,
+     "args": [
+      "--config",
+      "repeated-key.conf",
+      "init"
+     ],
+     "ok": true,
+     "seconds": 0.01,
+     "failures": []
+    },
+    {
+     "step": 3,
+     "args": [
+      "--config",
+      "before-section.conf",
+      "init"
+     ],
+     "ok": true,
+     "seconds": 0.01,
+     "failures": []
+    },
+    {
+     "step": 4,
+     "args": [
+      "--config",
+      "no-data-dir.conf",
+      "init"
+     ],
+     "ok": true,
+     "seconds": 0.01,
+     "failures": []
+    },
+    {
+     "step": 5,
+     "args": [
+      "--config",
+      "bad-format.conf",
+      "init"
+     ],
+     "ok": true,
+     "seconds": 0.01,
+     "failures": []
+    },
+    {
+     "step": 6,
+     "args": [
+      "--config",
+      "bad-header.conf",
+      "init"
+     ],
+     "ok": true,
+     "seconds": 0.01,
+     "failures": []
+    },
+    {
+     "step": 7,
+     "args": [
+      "--config",
+      "unknown-section.conf",
+      "init"
+     ],
+     "ok": true,
+     "seconds": 0.01,
+     "failures": []
+    },
+    {
+     "step": 8,
+     "args": [
+      "--config",
+      "same-separators.conf",
+      "init"
+     ],
+     "ok": true,
+     "seconds": 0.01,
+     "failures": []
+    },
+    {
+     "step": 9,
+     "args": [
+      "--config",
+      "ok.conf",
+      "init"
+     ],
+     "ok": true,
+     "seconds": 0.02,
+     "failures": []
+    },
+    {
+     "step": 10,
+     "args": [
+      "--config",
+      "ok.conf",
+      "report",
+      "monthly"
+     ],
+     "ok": true,
+     "seconds": 0.01,
+     "failures": []
+    },
+    {
+     "step": 11,
+     "args": [
+      "--config",
+      "ok2.conf",
+      "budget",
+      "--month",
+      "2026-01"
+     ],
+     "ok": true,
+     "seconds": 0.01,
+     "failures": []
+    }
+   ],
+   "verdict": "pass"
+  },
+  {
+   "case": "config-location",
+   "steps": [
+    {
+     "step": 1,
+     "args": [
+      "--config",
+      "conf/main.conf",
+      "init"
+     ],
+     "ok": true,
+     "seconds": 0.02,
+     "failures": []
+    },
+    {
+     "step": 2,
+     "ledger": true,
+     "ok": true,
+     "failures": []
+    },
+    {
+     "step": 3,
+     "args": [
+      "--config",
+      "conf/main.conf",
+      "import",
+      "sub/t.csv",
+      "--account",
+      "a"
+     ],
+     "ok": true,
+     "seconds": 0.03,
+     "failures": []
+    },
+    {
+     "step": 4,
+     "args": [
+      "init"
+     ],
+     "ok": true,
+     "seconds": 0.03,
+     "failures": []
+    },
+    {
+     "step": 5,
+     "ledger": true,
+     "ok": true,
+     "failures": []
+    },
+    {
+     "step": 6,
+     "args": [
+      "--config",
+      "../conf/main.conf",
+      "accounts"
+     ],
+     "ok": true,
+     "seconds": 0.01,
+     "failures": []
+    },
+    {
+     "step": 7,
+     "args": [
+      "--config",
+      "nope.conf",
+      "init"
+     ],
+     "ok": true,
+     "seconds": 0.01,
+     "failures": []
+    }
+   ],
+   "verdict": "pass"
+  },
+  {
+   "case": "empty-results",
+   "steps": [
+    {
+     "step": 1,
+     "args": [
+      "init"
+     ],
+     "ok": true,
+     "seconds": 0.02,
+     "failures": []
+    },
+    {
+     "step": 2,
+     "args": [
+      "report",
+      "monthly"
+     ],
+     "ok": true,
+     "seconds": 0.01,
+     "failures": []
+    },
+    {
+     "step": 3,
+     "args": [
+      "--format",
+      "csv",
+      "report",
+      "categories"
+     ],
+     "ok": true,
+     "seconds": 0.01,
+     "failures": []
+    },
+    {
+     "step": 4,
+     "args": [
+      "--format",
+      "json",
+      "list"
+     ],
+     "ok": true,
+     "seconds": 0.01,
+     "failures": []
+    },
+    {
+     "step": 5,
+     "args": [
+      "budget",
+      "--month",
+      "2026-01"
+     ],
+     "ok": true,
+     "seconds": 0.01,
+     "failures": []
+    }
+   ],
+   "verdict": "pass"
+  },
+  {
+   "case": "help-version",
+   "steps": [
+    {
+     "step": 1,
+     "args": [
+      "version"
+     ],
+     "ok": true,
+     "seconds": 0.01,
+     "failures": []
+    },
+    {
+     "step": 2,
+     "args": [
+      "help"
+     ],
+     "ok": true,
+     "seconds": 0.01,
+     "failures": []
+    }
+   ],
+   "verdict": "pass"
+  },
+  {
+   "case": "import-card",
+   "steps": [
+    {
+     "step": 1,
+     "args": [
+      "init"
+     ],
+     "ok": true,
+     "seconds": 0.03,
+     "failures": []
+    },
+    {
+     "step": 2,
+     "args": [
+      "import",
+      "card.csv",
+      "--account",
+      "card"
+     ],
+     "ok": true,
+     "seconds": 0.02,
+     "failures": []
+    },
+    {
+     "step": 3,
+     "ledger": true,
+     "ok": true,
+     "failures": []
+    },
+    {
+     "step": 4,
+     "args": [
+      "report",
+      "merchants",
+      "--top",
+      "5"
+     ],
+     "ok": true,
+     "seconds": 0.01,
+     "failures": []
+    }
+   ],
+   "verdict": "pass"
+  },
+  {
+   "case": "import-checking",
+   "steps": [
+    {
+     "step": 1,
+     "args": [
+      "init"
+     ],
+     "ok": true,
+     "seconds": 0.03,
+     "failures": []
+    },
+    {
+     "step": 2,
+     "args": [
+      "import",
+      "chk.csv",
+      "--account",
+      "checking"
+     ],
+     "ok": true,
+     "seconds": 0.02,
+     "failures": []
+    },
+    {
+     "step": 3,
+     "ledger": true,
+     "ok": true,
+     "failures": []
+    },
+    {
+     "step": 4,
+     "args": [
+      "import",
+      "chk.csv",
+      "--account",
+      "checking"
+     ],
+     "ok": true,
+     "seconds": 0.02,
+     "failures": []
+    },
+    {
+     "step": 5,
+     "ledger": true,
+     "ok": true,
+     "failures": []
+    },
+    {
+     "step": 6,
+     "args": [
+      "accounts"
+     ],
+     "ok": true,
+     "seconds": 0.01,
+     "failures": []
+    }
+   ],
+   "verdict": "pass"
+  },
+  {
+   "case": "import-errors",
+   "steps": [
+    {
+     "step": 1,
+     "args": [
+      "init"
+     ],
+     "ok": true,
+     "seconds": 0.04,
+     "failures": []
+    },
+    {
+     "step": 2,
+     "args": [
+      "import",
+      "good.csv",
+      "--account",
+      "checking"
+     ],
+     "ok": true,
+     "seconds": 0.02,
+     "failures": []
+    },
+    {
+     "step": 3,
+     "args": [
+      "import",
+      "bad-date.csv",
+      "--account",
+      "checking"
+     ],
+     "ok": true,
+     "seconds": 0.01,
+     "failures": []
+    },
+    {
+     "step": 4,
+     "args": [
+      "import",
+      "bad-amount.csv",
+      "--account",
+      "checking"
+     ],
+     "ok": true,
+     "seconds": 0.01,
+     "failures": []
+    },
+    {
+     "step": 5,
+     "args": [
+      "import",
+      "bad-fields.csv",
+      "--account",
+      "checking"
+     ],
+     "ok": true,
+     "seconds": 0.01,
+     "failures": []
+    },
+    {
+     "step": 6,
+     "args": [
+      "import",
+      "no-col.csv",
+      "--account",
+      "checking"
+     ],
+     "ok": true,
+     "seconds": 0.01,
+     "failures": []
+    },
+    {
+     "step": 7,
+     "args": [
+      "import",
+      "missing.csv",
+      "--account",
+      "checking"
+     ],
+     "ok": true,
+     "seconds": 0.01,
+     "failures": []
+    },
+    {
+     "step": 8,
+     "ledger": true,
+     "ok": true,
+     "failures": []
+    }
+   ],
+   "verdict": "pass"
+  },
+  {
+   "case": "import-giro",
+   "steps": [
+    {
+     "step": 1,
+     "args": [
+      "init"
+     ],
+     "ok": true,
+     "seconds": 0.03,
+     "failures": []
+    },
+    {
+     "step": 2,
+     "args": [
+      "import",
+      "giro.csv",
+      "--account",
+      "giro"
+     ],
+     "ok": true,
+     "seconds": 0.02,
+     "failures": []
+    },
+    {
+     "step": 3,
+     "ledger": true,
+     "ok": true,
+     "failures": []
+    },
+    {
+     "step": 4,
+     "args": [
+      "list",
+      "--month",
+      "2026-01"
+     ],
+     "ok": true,
+     "seconds": 0.0,
+     "failures": []
+    }
+   ],
+   "verdict": "pass"
+  },
+  {
+   "case": "import-overlap",
+   "steps": [
+    {
+     "step": 1,
+     "args": [
+      "init"
+     ],
+     "ok": true,
+     "seconds": 0.02,
+     "failures": []
+    },
+    {
+     "step": 2,
+     "args": [
+      "import",
+      "jan-feb.csv",
+      "--account",
+      "checking"
+     ],
+     "ok": true,
+     "seconds": 0.02,
+     "failures": []
+    },
+    {
+     "step": 3,
+     "args": [
+      "import",
+      "feb-mar.csv",
+      "--account",
+      "checking"
+     ],
+     "ok": true,
+     "seconds": 0.02,
+     "failures": []
+    },
+    {
+     "step": 4,
+     "ledger": true,
+     "ok": true,
+     "failures": []
+    },
+    {
+     "step": 5,
+     "args": [
+      "report",
+      "monthly"
+     ],
+     "ok": true,
+     "seconds": 0.0,
+     "failures": []
+    }
+   ],
+   "verdict": "pass"
+  },
+  {
+   "case": "init",
+   "steps": [
+    {
+     "step": 1,
+     "args": [
+      "init"
+     ],
+     "ok": true,
+     "seconds": 0.02,
+     "failures": []
+    },
+    {
+     "step": 2,
+     "ledger": true,
+     "ok": true,
+     "failures": []
+    },
+    {
+     "step": 3,
+     "args": [
+      "init"
+     ],
+     "ok": true,
+     "seconds": 0.0,
+     "failures": []
+    },
+    {
+     "step": 4,
+     "args": [
+      "accounts"
+     ],
+     "ok": true,
+     "seconds": 0.0,
+     "failures": []
+    },
+    {
+     "step": 5,
+     "args": [
+      "--format",
+      "json",
+      "accounts"
+     ],
+     "ok": true,
+     "seconds": 0.0,
+     "failures": []
+    }
+   ],
+   "verdict": "pass"
+  },
+  {
+   "case": "merchant-normalization",
+   "steps": [
+    {
+     "step": 1,
+     "args": [
+      "init"
+     ],
+     "ok": true,
+     "seconds": 0.02,
+     "failures": []
+    },
+    {
+     "step": 2,
+     "args": [
+      "import",
+      "m.csv",
+      "--account",
+      "x"
+     ],
+     "ok": true,
+     "seconds": 0.01,
+     "failures": []
+    },
+    {
+     "step": 3,
+     "args": [
+      "export"
+     ],
+     "ok": true,
+     "seconds": 0.0,
+     "failures": []
+    },
+    {
+     "step": 4,
+     "args": [
+      "--format",
+      "csv",
+      "export"
+     ],
+     "ok": true,
+     "seconds": 0.0,
+     "failures": []
+    },
+    {
+     "step": 5,
+     "args": [
+      "report",
+      "categories"
+     ],
+     "ok": true,
+     "seconds": 0.01,
+     "failures": []
+    }
+   ],
+   "verdict": "pass"
+  },
+  {
+   "case": "no-ledger",
+   "steps": [
+    {
+     "step": 1,
+     "args": [
+      "accounts"
+     ],
+     "ok": true,
+     "seconds": 0.0,
+     "failures": []
+    },
+    {
+     "step": 2,
+     "args": [
+      "report",
+      "monthly"
+     ],
+     "ok": true,
+     "seconds": 0.0,
+     "failures": []
+    },
+    {
+     "step": 3,
+     "args": [
+      "import",
+      "t.csv",
+      "--account",
+      "a"
+     ],
+     "ok": true,
+     "seconds": 0.0,
+     "failures": []
+    }
+   ],
+   "verdict": "pass"
+  },
+  {
+   "case": "output-formats",
+   "steps": [
+    {
+     "step": 1,
+     "args": [
+      "init"
+     ],
+     "ok": true,
+     "seconds": 0.02,
+     "failures": []
+    },
+    {
+     "step": 2,
+     "args": [
+      "import",
+      "x.csv",
+      "--account",
+      "a"
+     ],
+     "ok": true,
+     "seconds": 0.01,
+     "failures": []
+    },
+    {
+     "step": 3,
+     "args": [
+      "export"
+     ],
+     "ok": true,
+     "seconds": 0.0,
+     "failures": []
+    },
+    {
+     "step": 4,
+     "args": [
+      "--format",
+      "json",
+      "export"
+     ],
+     "ok": true,
+     "seconds": 0.0,
+     "failures": []
+    },
+    {
+     "step": 5,
+     "args": [
+      "--format",
+      "table",
+      "accounts"
+     ],
+     "ok": true,
+     "seconds": 0.01,
+     "failures": []
+    }
+   ],
+   "verdict": "pass"
+  },
+  {
+   "case": "query",
+   "steps": [
+    {
+     "step": 1,
+     "args": [
+      "init"
+     ],
+     "ok": true,
+     "seconds": 0.01,
+     "failures": []
+    },
+    {
+     "step": 2,
+     "args": [
+      "import",
+      "chk.csv",
+      "--account",
+      "checking"
+     ],
+     "ok": true,
+     "seconds": 0.01,
+     "failures": []
+    },
+    {
+     "step": 3,
+     "args": [
+      "set-category",
+      "3",
+      "gifts"
+     ],
+     "ok": true,
+     "seconds": 0.01,
+     "failures": []
+    },
+    {
+     "step": 4,
+     "args": [
+      "query",
+      "SELECT COUNT(*) AS n FROM transactions"
+     ],
+     "ok": true,
+     "seconds": 0.0,
+     "failures": []
+    },
+    {
+     "step": 5,
+     "args": [
+      "query",
+      "SELECT category, COUNT(*) AS n, SUM(amount) AS total FROM ledger GROUP BY category ORDER BY category"
+     ],
+     "ok": true,
+     "seconds": 0.0,
+     "failures": []
+    },
+    {
+     "step": 6,
+     "args": [
+      "--format",
+      "csv",
+      "query",
+      "SELECT rule_no, category, pattern FROM rules WHERE category = 'coffee' ORDER BY rule_no"
+     ],
+     "ok": true,
+     "seconds": 0.0,
+     "failures": []
+    },
+    {
+     "step": 7,
+     "args": [
+      "--format",
+      "json",
+      "query",
+      "SELECT category, amount FROM budgets WHERE amount > 100 ORDER BY category"
+     ],
+     "ok": true,
+     "seconds": 0.0,
+     "failures": []
+    },
+    {
+     "step": 8,
+     "args": [
+      "query",
+      "SELECT t.id, o.category FROM transactions t JOIN overrides o ON t.id = o.id ORDER BY t.id"
+     ],
+     "ok": true,
+     "seconds": 0.0,
+     "failures": []
+    },
+    {
+     "step": 9,
+     "args": [
+      "query",
+      "SELEC 1"
+     ],
+     "ok": true,
+     "seconds": 0.0,
+     "failures": []
+    },
+    {
+     "step": 10,
+     "args": [
+      "query",
+      "SELECT * FROM nowhere"
+     ],
+     "ok": true,
+     "seconds": 0.0,
+     "failures": []
+    }
+   ],
+   "verdict": "pass"
+  },
+  {
+   "case": "repeated-identical",
+   "steps": [
+    {
+     "step": 1,
+     "args": [
+      "init"
+     ],
+     "ok": true,
+     "seconds": 0.02,
+     "failures": []
+    },
+    {
+     "step": 2,
+     "args": [
+      "import",
+      "a.csv",
+      "--account",
+      "checking"
+     ],
+     "ok": true,
+     "seconds": 0.01,
+     "failures": []
+    },
+    {
+     "step": 3,
+     "args": [
+      "import",
+      "b.csv",
+      "--account",
+      "checking"
+     ],
+     "ok": true,
+     "seconds": 0.01,
+     "failures": []
+    },
+    {
+     "step": 4,
+     "args": [
+      "import",
+      "a.csv",
+      "--account",
+      "savings"
+     ],
+     "ok": true,
+     "seconds": 0.01,
+     "failures": []
+    },
+    {
+     "step": 5,
+     "ledger": true,
+     "ok": true,
+     "failures": []
+    },
+    {
+     "step": 6,
+     "args": [
+      "export"
+     ],
+     "ok": true,
+     "seconds": 0.0,
+     "failures": []
+    }
+   ],
+   "verdict": "pass"
+  },
+  {
+   "case": "reports-filters",
+   "steps": [
+    {
+     "step": 1,
+     "args": [
+      "init"
+     ],
+     "ok": true,
+     "seconds": 0.02,
+     "failures": []
+    },
+    {
+     "step": 2,
+     "args": [
+      "import",
+      "chk.csv",
+      "--account",
+      "checking"
+     ],
+     "ok": true,
+     "seconds": 0.02,
+     "failures": []
+    },
+    {
+     "step": 3,
+     "args": [
+      "import",
+      "card.csv",
+      "--account",
+      "card"
+     ],
+     "ok": true,
+     "seconds": 0.01,
+     "failures": []
+    },
+    {
+     "step": 4,
+     "args": [
+      "import",
+      "giro.csv",
+      "--account",
+      "giro"
+     ],
+     "ok": true,
+     "seconds": 0.01,
+     "failures": []
+    },
+    {
+     "step": 5,
+     "args": [
+      "report",
+      "monthly"
+     ],
+     "ok": true,
+     "seconds": 0.0,
+     "failures": []
+    },
+    {
+     "step": 6,
+     "args": [
+      "report",
+      "monthly",
+      "--account",
+      "card"
+     ],
+     "ok": true,
+     "seconds": 0.01,
+     "failures": []
+    },
+    {
+     "step": 7,
+     "args": [
+      "report",
+      "monthly",
+      "--from",
+      "2026-02"
+     ],
+     "ok": true,
+     "seconds": 0.01,
+     "failures": []
+    },
+    {
+     "step": 8,
+     "args": [
+      "report",
+      "monthly",
+      "--to",
+      "2026-01"
+     ],
+     "ok": true,
+     "seconds": 0.01,
+     "failures": []
+    },
+    {
+     "step": 9,
+     "args": [
+      "report",
+      "categories",
+      "--month",
+      "2026-02"
+     ],
+     "ok": true,
+     "seconds": 0.01,
+     "failures": []
+    },
+    {
+     "step": 10,
+     "args": [
+      "report",
+      "categories",
+      "--account",
+      "giro"
+     ],
+     "ok": true,
+     "seconds": 0.01,
+     "failures": []
+    },
+    {
+     "step": 11,
+     "args": [
+      "report",
+      "merchants"
+     ],
+     "ok": true,
+     "seconds": 0.0,
+     "failures": []
+    },
+    {
+     "step": 12,
+     "args": [
+      "report",
+      "merchants",
+      "--top",
+      "3",
+      "--month",
+      "2026-01"
+     ],
+     "ok": true,
+     "seconds": 0.01,
+     "failures": []
+    },
+    {
+     "step": 13,
+     "args": [
+      "report",
+      "monthly",
+      "--from",
+      "2027-01"
+     ],
+     "ok": true,
+     "seconds": 0.01,
+     "failures": []
+    },
+    {
+     "step": 14,
+     "args": [
+      "accounts"
+     ],
+     "ok": true,
+     "seconds": 0.0,
+     "failures": []
+    }
+   ],
+   "verdict": "pass"
+  },
+  {
+   "case": "rules-and-overrides",
+   "steps": [
+    {
+     "step": 1,
+     "args": [
+      "init"
+     ],
+     "ok": true,
+     "seconds": 0.02,
+     "failures": []
+    },
+    {
+     "step": 2,
+     "args": [
+      "import",
+      "chk.csv",
+      "--account",
+      "checking"
+     ],
+     "ok": true,
+     "seconds": 0.02,
+     "failures": []
+    },
+    {
+     "step": 3,
+     "args": [
+      "report",
+      "categories"
+     ],
+     "ok": true,
+     "seconds": 0.01,
+     "failures": []
+    },
+    {
+     "step": 4,
+     "args": [
+      "set-category",
+      "2",
+      "coffee"
+     ],
+     "ok": true,
+     "seconds": 0.02,
+     "failures": []
+    },
+    {
+     "step": 5,
+     "args": [
+      "set-category",
+      "5",
+      "shopping"
+     ],
+     "ok": true,
+     "seconds": 0.01,
+     "failures": []
+    },
+    {
+     "step": 6,
+     "ledger": true,
+     "ok": true,
+     "failures": []
+    },
+    {
+     "step": 7,
+     "args": [
+      "list",
+      "--category",
+      "coffee"
+     ],
+     "ok": true,
+     "seconds": 0.0,
+     "failures": []
+    },
+    {
+     "step": 8,
+     "args": [
+      "set-category",
+      "5",
+      "--clear"
+     ],
+     "ok": true,
+     "seconds": 0.02,
+     "failures": []
+    },
+    {
+     "step": 9,
+     "args": [
+      "set-category",
+      "7",
+      "--clear"
+     ],
+     "ok": true,
+     "seconds": 0.01,
+     "failures": []
+    },
+    {
+     "step": 11,
+     "args": [
+      "report",
+      "categories"
+     ],
+     "ok": true,
+     "seconds": 0.01,
+     "failures": []
+    },
+    {
+     "step": 13,
+     "args": [
+      "list",
+      "--uncategorized",
+      "--month",
+      "2026-02"
+     ],
+     "ok": true,
+     "seconds": 0.01,
+     "failures": []
+    }
+   ],
+   "verdict": "pass"
+  },
+  {
+   "case": "seeded-ledger",
+   "steps": [
+    {
+     "step": 1,
+     "args": [
+      "accounts"
+     ],
+     "ok": true,
+     "seconds": 0.01,
+     "failures": []
+    },
+    {
+     "step": 2,
+     "args": [
+      "import",
+      "chk.csv",
+      "--account",
+      "checking"
+     ],
+     "ok": true,
+     "seconds": 0.02,
+     "failures": []
+    },
+    {
+     "step": 3,
+     "ledger": true,
+     "ok": true,
+     "failures": []
+    },
+    {
+     "step": 4,
+     "args": [
+      "report",
+      "categories"
+     ],
+     "ok": true,
+     "seconds": 0.01,
+     "failures": []
+    },
+    {
+     "step": 5,
+     "args": [
+      "export",
+      "--to",
+      "2026-01"
+     ],
+     "ok": true,
+     "seconds": 0.01,
+     "failures": []
+    }
+   ],
+   "verdict": "pass"
+  },
+  {
+   "case": "set-category",
+   "steps": [
+    {
+     "step": 1,
+     "args": [
+      "init"
+     ],
+     "ok": true,
+     "seconds": 0.03,
+     "failures": []
+    },
+    {
+     "step": 2,
+     "args": [
+      "import",
+      "t.csv",
+      "--account",
+      "a"
+     ],
+     "ok": true,
+     "seconds": 0.03,
+     "failures": []
+    },
+    {
+     "step": 3,
+     "args": [
+      "set-category",
+      "2",
+      "gifts"
+     ],
+     "ok": true,
+     "seconds": 0.02,
+     "failures": []
+    },
+    {
+     "step": 4,
+     "args": [
+      "set-category",
+      "2",
+      "books"
+     ],
+     "ok": true,
+     "seconds": 0.02,
+     "failures": []
+    },
+    {
+     "step": 5,
+     "args": [
+      "set-category",
+      "9",
+      "gifts"
+     ],
+     "ok": true,
+     "seconds": 0.01,
+     "failures": []
+    },
+    {
+     "step": 6,
+     "ledger": true,
+     "ok": true,
+     "failures": []
+    },
+    {
+     "step": 7,
+     "args": [
+      "report",
+      "categories"
+     ],
+     "ok": true,
+     "seconds": 0.01,
+     "failures": []
+    },
+    {
+     "step": 8,
+     "args": [
+      "set-category",
+      "2",
+      "--clear"
+     ],
+     "ok": true,
+     "seconds": 0.02,
+     "failures": []
+    },
+    {
+     "step": 9,
+     "ledger": true,
+     "ok": true,
+     "failures": []
+    }
+   ],
+   "verdict": "pass"
+  },
+  {
+   "case": "share-rounding",
+   "steps": [
+    {
+     "step": 1,
+     "args": [
+      "init"
+     ],
+     "ok": true,
+     "seconds": 0.03,
+     "failures": []
+    },
+    {
+     "step": 2,
+     "args": [
+      "import",
+      "s.csv",
+      "--account",
+      "a"
+     ],
+     "ok": true,
+     "seconds": 0.03,
+     "failures": []
+    },
+    {
+     "step": 3,
+     "args": [
+      "report",
+      "categories"
+     ],
+     "ok": true,
+     "seconds": 0.01,
+     "failures": []
+    },
+    {
+     "step": 4,
+     "args": [
+      "--format",
+      "csv",
+      "report",
+      "categories"
+     ],
+     "ok": true,
+     "seconds": 0.01,
+     "failures": []
+    },
+    {
+     "step": 6,
+     "args": [
+      "import",
+      "s2.csv",
+      "--account",
+      "a"
+     ],
+     "ok": true,
+     "seconds": 0.03,
+     "failures": []
+    },
+    {
+     "step": 7,
+     "args": [
+      "report",
+      "categories",
+      "--month",
+      "2026-06"
+     ],
+     "ok": true,
+     "seconds": 0.01,
+     "failures": []
+    }
+   ],
+   "verdict": "pass"
+  },
+  {
+   "case": "usage-errors",
+   "steps": [
+    {
+     "step": 1,
+     "args": [
+      "init"
+     ],
+     "ok": true,
+     "seconds": 0.04,
+     "failures": []
+    },
+    {
+     "step": 2,
+     "args": [
+      "import",
+      "t.csv",
+      "--account",
+      "a"
+     ],
+     "ok": true,
+     "seconds": 0.03,
+     "failures": []
+    },
+    {
+     "step": 3,
+     "args": [
+      "frobnicate"
+     ],
+     "ok": true,
+     "seconds": 0.01,
+     "failures": []
+    },
+    {
+     "step": 4,
+     "args": [
+      "report"
+     ],
+     "ok": true,
+     "seconds": 0.01,
+     "failures": []
+    },
+    {
+     "step": 5,
+     "args": [
+      "report",
+      "weekly"
+     ],
+     "ok": true,
+     "seconds": 0.01,
+     "failures": []
+    },
+    {
+     "step": 6,
+     "args": [
+      "report",
+      "monthly",
+      "--month",
+      "2026-01",
+      "--from",
+      "2026-01"
+     ],
+     "ok": true,
+     "seconds": 0.01,
+     "failures": []
+    },
+    {
+     "step": 7,
+     "args": [
+      "report",
+      "monthly",
+      "--month",
+      "2026-13"
+     ],
+     "ok": true,
+     "seconds": 0.01,
+     "failures": []
+    },
+    {
+     "step": 8,
+     "args": [
+      "report",
+      "monthly",
+      "--from",
+      "2026-03",
+      "--to",
+      "2026-02"
+     ],
+     "ok": true,
+     "seconds": 0.01,
+     "failures": []
+    },
+    {
+     "step": 9,
+     "args": [
+      "report",
+      "monthly",
+      "--bogus"
+     ],
+     "ok": true,
+     "seconds": 0.01,
+     "failures": []
+    },
+    {
+     "step": 10,
+     "args": [
+      "import",
+      "t.csv"
+     ],
+     "ok": true,
+     "seconds": 0.02,
+     "failures": []
+    },
+    {
+     "step": 11,
+     "args": [
+      "import",
+      "t.csv",
+      "--account",
+      "Bad Name"
+     ],
+     "ok": true,
+     "seconds": 0.01,
+     "failures": []
+    },
+    {
+     "step": 12,
+     "args": [
+      "set-category",
+      "1",
+      "Groceries"
+     ],
+     "ok": true,
+     "seconds": 0.01,
+     "failures": []
+    },
+    {
+     "step": 13,
+     "args": [
+      "set-category",
+      "1",
+      "uncategorized"
+     ],
+     "ok": true,
+     "seconds": 0.01,
+     "failures": []
+    },
+    {
+     "step": 14,
+     "args": [
+      "report",
+      "merchants",
+      "--top",
+      "0"
+     ],
+     "ok": true,
+     "seconds": 0.01,
+     "failures": []
+    },
+    {
+     "step": 15,
+     "args": [
+      "--format",
+      "xml",
+      "accounts"
+     ],
+     "ok": true,
+     "seconds": 0.01,
+     "failures": []
+    },
+    {
+     "step": 16,
+     "args": [
+      "accounts",
+      "extra"
+     ],
+     "ok": true,
+     "seconds": 0.01,
+     "failures": []
+    },
+    {
+     "step": 17,
+     "args": [
+      "report",
+      "monthly",
+      "--month",
+      "2026-01",
+      "--month",
+      "2026-02"
+     ],
+     "ok": true,
+     "seconds": 0.01,
+     "failures": []
+    },
+    {
+     "step": 18,
+     "args": [
+      "help"
+     ],
+     "ok": true,
+     "seconds": 0.01,
+     "failures": []
+    },
+    {
+     "step": 19,
+     "args": [
+      "--help"
+     ],
+     "ok": true,
+     "seconds": 0.01,
+     "failures": []
+    }
+   ],
+   "verdict": "pass"
+  },
+  {
+   "case": "h-config-edge",
+   "steps": [
+    {
+     "step": 1,
+     "args": [
+      "--config",
+      "p.conf",
+      "init"
+     ],
+     "ok": true,
+     "seconds": 0.03,
+     "failures": []
+    },
+    {
+     "step": 2,
+     "args": [
+      "--config",
+      "p.conf",
+      "import",
+      "j.csv",
+      "--account",
+      "joint-1"
+     ],
+     "ok": true,
+     "seconds": 0.01,
+     "failures": []
+    },
+    {
+     "step": 4,
+     "args": [
+      "--config",
+      "p.conf",
+      "import",
+      "j.csv",
+      "--account",
+      "joint-1"
+     ],
+     "ok": true,
+     "seconds": 0.02,
+     "failures": []
+    },
+    {
+     "step": 5,
+     "args": [
+      "--config",
+      "p.conf",
+      "--format",
+      "csv",
+      "list"
+     ],
+     "ok": true,
+     "seconds": 0.01,
+     "failures": []
+    },
+    {
+     "step": 6,
+     "args": [
+      "--config",
+      "p.conf",
+      "report",
+      "categories"
+     ],
+     "ok": true,
+     "seconds": 0.01,
+     "failures": []
+    }
+   ],
+   "verdict": "pass"
+  },
+  {
+   "case": "h-errors",
+   "steps": [
+    {
+     "step": 1,
+     "args": [
+      "init"
+     ],
+     "ok": true,
+     "seconds": 0.03,
+     "failures": []
+    },
+    {
+     "step": 2,
+     "args": [
+      "import",
+      "q.csv",
+      "--account",
+      "a"
+     ],
+     "ok": true,
+     "seconds": 0.01,
+     "failures": []
+    },
+    {
+     "step": 3,
+     "args": [
+      "import",
+      "dc.csv",
+      "--account",
+      "a"
+     ],
+     "ok": true,
+     "seconds": 0.0,
+     "failures": []
+    },
+    {
+     "step": 4,
+     "args": [
+      "import",
+      "big.csv",
+      "--account",
+      "a"
+     ],
+     "ok": true,
+     "seconds": 0.01,
+     "failures": []
+    },
+    {
+     "step": 5,
+     "args": [
+      "import",
+      "ok.csv",
+      "--account",
+      "a"
+     ],
+     "ok": true,
+     "seconds": 0.03,
+     "failures": []
+    },
+    {
+     "step": 6,
+     "ledger": true,
+     "ok": true,
+     "failures": []
+    },
+    {
+     "step": 7,
+     "args": [
+      "set-category",
+      "0",
+      "x"
+     ],
+     "ok": true,
+     "seconds": 0.01,
+     "failures": []
+    },
+    {
+     "step": 8,
+     "args": [
+      "set-category",
+      "abc",
+      "x"
+     ],
+     "ok": true,
+     "seconds": 0.01,
+     "failures": []
+    },
+    {
+     "step": 9,
+     "args": [
+      "set-category",
+      "1",
+      "x",
+      "--clear"
+     ],
+     "ok": true,
+     "seconds": 0.01,
+     "failures": []
+    },
+    {
+     "step": 10,
+     "args": [
+      "budget"
+     ],
+     "ok": true,
+     "seconds": 0.0,
+     "failures": []
+    },
+    {
+     "step": 11,
+     "args": [
+      "report",
+      "merchants",
+      "--top",
+      "x"
+     ],
+     "ok": true,
+     "seconds": 0.01,
+     "failures": []
+    }
+   ],
+   "verdict": "pass"
+  },
+  {
+   "case": "h-formats",
+   "steps": [
+    {
+     "step": 1,
+     "args": [
+      "init"
+     ],
+     "ok": true,
+     "seconds": 0.02,
+     "failures": []
+    },
+    {
+     "step": 2,
+     "args": [
+      "import",
+      "tab.tsv",
+      "--account",
+      "main"
+     ],
+     "ok": true,
+     "seconds": 0.02,
+     "failures": []
+    },
+    {
+     "step": 3,
+     "args": [
+      "import",
+      "uk.csv",
+      "--account",
+      "uk"
+     ],
+     "ok": true,
+     "seconds": 0.01,
+     "failures": []
+    },
+    {
+     "step": 4,
+     "args": [
+      "import",
+      "uk2.csv",
+      "--account",
+      "uk"
+     ],
+     "ok": true,
+     "seconds": 0.02,
+     "failures": []
+    },
+    {
+     "step": 5,
+     "args": [
+      "import",
+      "ch.tsv",
+      "--account",
+      "ch"
+     ],
+     "ok": true,
+     "seconds": 0.02,
+     "failures": []
+    },
+    {
+     "step": 6,
+     "ledger": true,
+     "ok": true,
+     "failures": []
+    },
+    {
+     "step": 7,
+     "args": [
+      "--format",
+      "json",
+      "export"
+     ],
+     "ok": true,
+     "seconds": 0.0,
+     "failures": []
+    }
+   ],
+   "verdict": "pass"
+  },
+  {
+   "case": "h-mixed-accounts",
+   "steps": [
+    {
+     "step": 1,
+     "args": [
+      "init"
+     ],
+     "ok": true,
+     "seconds": 0.02,
+     "failures": []
+    },
+    {
+     "step": 2,
+     "args": [
+      "import",
+      "a.csv",
+      "--account",
+      "checking"
+     ],
+     "ok": true,
+     "seconds": 0.01,
+     "failures": []
+    },
+    {
+     "step": 3,
+     "args": [
+      "import",
+      "card.csv",
+      "--account",
+      "card"
+     ],
+     "ok": true,
+     "seconds": 0.01,
+     "failures": []
+    },
+    {
+     "step": 4,
+     "args": [
+      "import",
+      "b.csv",
+      "--account",
+      "checking"
+     ],
+     "ok": true,
+     "seconds": 0.02,
+     "failures": []
+    },
+    {
+     "step": 5,
+     "args": [
+      "import",
+      "giro.csv",
+      "--account",
+      "giro"
+     ],
+     "ok": true,
+     "seconds": 0.01,
+     "failures": []
+    },
+    {
+     "step": 6,
+     "args": [
+      "import",
+      "card.csv",
+      "--account",
+      "card"
+     ],
+     "ok": true,
+     "seconds": 0.01,
+     "failures": []
+    },
+    {
+     "step": 7,
+     "ledger": true,
+     "ok": true,
+     "failures": []
+    },
+    {
+     "step": 8,
+     "args": [
+      "accounts"
+     ],
+     "ok": true,
+     "seconds": 0.0,
+     "failures": []
+    },
+    {
+     "step": 9,
+     "args": [
+      "report",
+      "monthly"
+     ],
+     "ok": true,
+     "seconds": 0.0,
+     "failures": []
+    },
+    {
+     "step": 10,
+     "args": [
+      "--format",
+      "json",
+      "report",
+      "monthly",
+      "--account",
+      "checking"
+     ],
+     "ok": true,
+     "seconds": 0.0,
+     "failures": []
+    },
+    {
+     "step": 11,
+     "args": [
+      "report",
+      "categories",
+      "--from",
+      "2026-01",
+      "--to",
+      "2026-02"
+     ],
+     "ok": true,
+     "seconds": 0.0,
+     "failures": []
+    },
+    {
+     "step": 12,
+     "args": [
+      "report",
+      "merchants",
+      "--top",
+      "7",
+      "--account",
+      "card"
+     ],
+     "ok": true,
+     "seconds": 0.0,
+     "failures": []
+    },
+    {
+     "step": 13,
+     "args": [
+      "budget",
+      "--month",
+      "2026-02"
+     ],
+     "ok": true,
+     "seconds": 0.0,
+     "failures": []
+    },
+    {
+     "step": 14,
+     "args": [
+      "--format",
+      "csv",
+      "list",
+      "--month",
+      "2026-03"
+     ],
+     "ok": true,
+     "seconds": 0.0,
+     "failures": []
+    },
+    {
+     "step": 15,
+     "args": [
+      "export",
+      "--account",
+      "giro",
+      "--month",
+      "2025-12"
+     ],
+     "ok": true,
+     "seconds": 0.0,
+     "failures": []
+    }
+   ],
+   "verdict": "pass"
+  },
+  {
+   "case": "h-scale",
+   "steps": [
+    {
+     "step": 1,
+     "args": [
+      "init"
+     ],
+     "ok": true,
+     "seconds": 0.02,
+     "failures": []
+    },
+    {
+     "step": 2,
+     "args": [
+      "import",
+      "big.csv",
+      "--account",
+      "checking"
+     ],
+     "ok": true,
+     "seconds": 0.12,
+     "failures": []
+    },
+    {
+     "step": 3,
+     "args": [
+      "import",
+      "big.csv",
+      "--account",
+      "checking"
+     ],
+     "ok": true,
+     "seconds": 0.07,
+     "failures": []
+    },
+    {
+     "step": 4,
+     "args": [
+      "report",
+      "monthly",
+      "--from",
+      "2026-01"
+     ],
+     "ok": true,
+     "seconds": 0.02,
+     "failures": []
+    },
+    {
+     "step": 5,
+     "args": [
+      "report",
+      "categories"
+     ],
+     "ok": true,
+     "seconds": 0.04,
+     "failures": []
+    },
+    {
+     "step": 6,
+     "args": [
+      "report",
+      "merchants",
+      "--top",
+      "3"
+     ],
+     "ok": true,
+     "seconds": 0.03,
+     "failures": []
+    },
+    {
+     "step": 7,
+     "args": [
+      "budget",
+      "--month",
+      "2024-02"
+     ],
+     "ok": true,
+     "seconds": 0.04,
+     "failures": []
+    },
+    {
+     "step": 8,
+     "args": [
+      "accounts"
+     ],
+     "ok": true,
+     "seconds": 0.02,
+     "failures": []
+    },
+    {
+     "step": 9,
+     "args": [
+      "query",
+      "SELECT COUNT(*) AS n FROM transactions"
+     ],
+     "ok": true,
+     "seconds": 0.06,
+     "failures": []
+    }
+   ],
+   "verdict": "pass"
+  },
+  {
+   "case": "h-seeded-interop",
+   "steps": [
+    {
+     "step": 1,
+     "args": [
+      "import",
+      "g.csv",
+      "--account",
+      "giro"
+     ],
+     "ok": true,
+     "seconds": 0.02,
+     "failures": []
+    },
+    {
+     "step": 2,
+     "ledger": true,
+     "ok": true,
+     "failures": []
+    },
+    {
+     "step": 3,
+     "args": [
+      "report",
+      "monthly"
+     ],
+     "ok": true,
+     "seconds": 0.0,
+     "failures": []
+    },
+    {
+     "step": 4,
+     "args": [
+      "list",
+      "--category",
+      "bonus"
+     ],
+     "ok": true,
+     "seconds": 0.0,
+     "failures": []
+    },
+    {
+     "step": 5,
+     "args": [
+      "query",
+      "SELECT id, merchant, amount FROM transactions WHERE amount <= -1000 ORDER BY id"
+     ],
+     "ok": true,
+     "seconds": 0.01,
+     "failures": []
+    },
+    {
+     "step": 6,
+     "args": [
+      "--format",
+      "csv",
+      "query",
+      "SELECT batch, file, imported FROM batches ORDER BY batch"
+     ],
+     "ok": true,
+     "seconds": 0.0,
+     "failures": []
+    }
+   ],
+   "verdict": "pass"
+  }
+ ],
+ "embed": [
+  {
+   "case": "embed-aggregate",
+   "verdict": "pass",
+   "failures": []
+  },
+  {
+   "case": "embed-error",
+   "verdict": "pass",
+   "failures": []
+  },
+  {
+   "case": "embed-select",
+   "verdict": "pass",
+   "failures": []
+  },
+  {
+   "case": "h-embed-float",
+   "verdict": "pass",
+   "failures": []
+  },
+  {
+   "case": "h-embed-missing",
+   "verdict": "pass",
+   "failures": []
+  },
+  {
+   "case": "h-embed-parse",
+   "verdict": "pass",
+   "failures": []
+  },
+  {
+   "case": "h-embed-types",
+   "verdict": "pass",
+   "failures": []
+  }
+ ]
+}

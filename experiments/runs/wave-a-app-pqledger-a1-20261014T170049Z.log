@@ -1,0 +1,13 @@
+2026-10-14T17:00:54+00:00 wave wave-a-app-pqledger-a1-20261014T170049Z: order=['common-lisp', 'rust', 'java', 'clojure']
+2026-10-14T17:00:54+00:00 [a-app-pqledger-common-lisp-a1-20261014T170049Z] agent queued (usage gate, then launch)
+2026-10-14T17:00:59+00:00 [a-app-pqledger-rust-a1-20261014T170050Z] agent queued (usage gate, then launch)
+2026-10-14T17:01:04+00:00 [a-app-pqledger-java-a1-20261014T170051Z] agent queued (usage gate, then launch)
+2026-10-14T17:01:09+00:00 [a-app-pqledger-clojure-a1-20261014T170053Z] agent queued (usage gate, then launch)
+2026-10-14T17:24:24+00:00 [a-app-pqledger-clojure-a1-20261014T170053Z] agent finished; collecting telemetry
+2026-10-14T17:24:24+00:00 [a-app-pqledger-clojure-a1-20261014T170053Z] validating (clean clone, sandboxed)
+2026-10-14T17:24:27+00:00 [a-app-pqledger-common-lisp-a1-20261014T170049Z] agent finished; collecting telemetry
+2026-10-14T17:24:27+00:00 [a-app-pqledger-common-lisp-a1-20261014T170049Z] validating (clean clone, sandboxed)
+2026-10-14T17:24:27+00:00 [a-app-pqledger-java-a1-20261014T170051Z] agent finished; collecting telemetry
+2026-10-14T17:24:27+00:00 [a-app-pqledger-java-a1-20261014T170051Z] validating (clean clone, sandboxed)
+2026-10-14T17:24:46+00:00 [a-app-pqledger-rust-a1-20261014T170050Z] agent finished; collecting telemetry
+2026-10-14T17:24:46+00:00 [a-app-pqledger-rust-a1-20261014T170050Z] validating (clean clone, sandboxed)

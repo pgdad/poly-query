@@ -1,0 +1,83 @@
+{
+ "schema": "polyquery-telemetry/1",
+ "run_id": "a-app-pqledger-x86_64-asm-engine-a1-20261014T170049Z",
+ "language": "x86_64-asm-engine",
+ "task": "app-pqledger",
+ "track": "A",
+ "attempt": 1,
+ "model": "claude-opus-5-5",
+ "effort": "high",
+ "agent_harness_version": "2.1.299",
+ "prompt_id": "track-a-app-pqledger",
+ "prompt_sha256": "ac4cd07cad30f0b81f60152a473e8332311aa0e5a5c448c95f3e291a411a0263",
+ "session_id": "9b8e5e38-b5a6-47e8-9a65-bcb9a7c6fc80",
+ "tokens": {
+  "input": 370,
+  "output": 1994,
+  "cache_read": 26705418,
+  "cache_creation": 666734,
+  "thinking": null,
+  "thinking_estimated": 43540,
+  "source": "summed per-message usage (no final result event; output tokens are a lower bound)",
+  "api_messages": 185
+ },
+ "rate_limit": {
+  "events": 29,
+  "max_utilization": {
+   "seven_day": 0.75,
+   "five_hour": 0.29
+  },
+  "statuses": [
+   "allowed",
+   "allowed_warning"
+  ]
+ },
+ "cost_usd": null,
+ "cost_basis": "platform-reported list price (total_cost_usd)",
+ "agent_turns": null,
+ "result_segments": 0,
+ "assistant_messages": 381,
+ "tool_calls": {
+  "Bash": 161,
+  "Write": 18,
+  "Agent": 3,
+  "Read": 2,
+  "SendMessage": 2,
+  "ScheduleWakeup": 1,
+  "Edit": 1
+ },
+ "tool_calls_total": 188,
+ "tool_failures": 8,
+ "build_invocations": 37,
+ "build_failures_heuristic": 9,
+ "conformance_runs": 2,
+ "conformance_progress": [],
+ "repair_iterations": 0,
+ "time": {
+  "wall_seconds": 1414.9,
+  "model_api_seconds": null,
+  "tool_seconds": 132.2,
+  "waiting_seconds": null,
+  "human_seconds": 0
+ },
+ "human_interventions": 0,
+ "git": {
+  "commits": 6,
+  "files_changed": 26,
+  "lines_added": 10121,
+  "lines_removed": 10,
+  "uncommitted_changes": false,
+  "paths_outside_language_dir": []
+ },
+ "agent_exit_code": -15,
+ "result_subtype": null,
+ "is_error": null,
+ "stop_reason": null,
+ "final_message": "",
+ "notes": {
+  "human_seconds": "0 by construction: unattended run, no human input after launch",
+  "waiting_seconds": "not exposed by the platform",
+  "build_failures_heuristic": "Bash build commands whose output matched compiler-error patterns",
+  "repair_iterations": "conformance runner invocations after the first one reporting failures"
+ }
+}

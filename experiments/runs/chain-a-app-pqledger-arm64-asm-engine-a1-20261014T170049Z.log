@@ -1,0 +1,9 @@
+2026-10-14T17:00:49+00:00 chain chain-a-app-pqledger-arm64-asm-engine-a1-20261014T170049Z: session 1 -> a-app-pqledger-arm64-asm-engine-a1-20261014T170049Z (budget $60.00)
+2026-10-14T17:00:49+00:00 [a-app-pqledger-arm64-asm-engine-a1-20261014T170049Z] agent queued (usage gate, then launch)
+2026-10-14T17:24:30+00:00 [a-app-pqledger-arm64-asm-engine-a1-20261014T170049Z] agent finished; collecting telemetry
+2026-10-14T17:24:30+00:00 [a-app-pqledger-arm64-asm-engine-a1-20261014T170049Z] validating (clean clone, sandboxed)
+2026-10-14T17:24:54+00:00 [a-app-pqledger-arm64-asm-engine-a1-20261014T170049Z] outcome=tests_failed cost=$None turns=None wall=1418.7s
+2026-10-14T17:24:54+00:00 chain chain-a-app-pqledger-arm64-asm-engine-a1-20261014T170049Z: session 2 -> a-app-pqledger-arm64-asm-engine-a1-s2-20261014T172454Z (budget $60.00)
+2026-10-14T17:24:54+00:00 [a-app-pqledger-arm64-asm-engine-a1-s2-20261014T172454Z] agent queued (usage gate, then launch)
+2026-10-14T17:24:59+00:00 [a-app-pqledger-arm64-asm-engine-a1-s2-20261014T172454Z] agent finished; collecting telemetry
+2026-10-14T17:25:00+00:00 [a-app-pqledger-arm64-asm-engine-a1-s2-20261014T172454Z] validating (clean clone, sandboxed)
