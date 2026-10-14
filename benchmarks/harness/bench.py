@@ -382,6 +382,10 @@ def bench_engine(lang: str, launcher: str, info: dict, workload: dict, scale: st
             if resp.get("ok"):
                 st["file_bytes"] = (scale_dir / rel).stat().st_size
                 st["csv_bytes"] = (scale_dir / "transactions.csv").stat().st_size
+                # Index names are catalog-global (protocol.md §5.7): the file's indexes cannot be recreated by
+                # open while the live table still holds them, so drop them (storage is the session's last step).
+                for name in res.get("index_build", {}):
+                    eng.request({"op": "query", "sql": f"DROP INDEX IF EXISTS {name}", "options": {}})
                 for label, cold in (("cold", True), ("warm", False)):
                     if cold:
                         st["cold_cache_dropped"] = drop_caches()
@@ -391,10 +395,12 @@ def bench_engine(lang: str, launcher: str, info: dict, workload: dict, scale: st
                         r1 = eng.request({"op": "open", "table": tab, "path": rel, "options": {"mmap": mm}}, timeout=3600)
                         t_open = time.monotonic() - t0
                         t0 = time.monotonic()
-                        r2 = eng.request({"op": "query", "sql": f"SELECT COUNT(*), SUM(amount) FROM {tab}"}, timeout=3600)
+                        r2 = eng.request({"op": "query", "sql": f"SELECT COUNT(*), SUM(amount) FROM {tab}", "options": {}}, timeout=3600)
                         t_q = time.monotonic() - t0
                         st[f"open_{label}_mmap{int(mm)}"] = {"open_seconds": t_open, "first_query_seconds": t_q,
-                                                             "ok": bool(r1.get("ok") and r2.get("ok"))}
+                                                             "ok": bool(r1.get("ok") and r2.get("ok")),
+                                                             "error": None if r1.get("ok") and r2.get("ok") else
+                                                             ((r1 if not r1.get("ok") else r2).get("error") or {}).get("code")}
                         eng.request({"op": "drop", "table": tab})
                         if cold:
                             drop_caches()
