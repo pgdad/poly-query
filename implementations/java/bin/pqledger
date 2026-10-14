@@ -1,0 +1,15 @@
+#!/bin/sh
+# pqledger launcher (APP.md). Works from any current directory. Runs the application in-process
+# on the engine's embedding API: one JVM, the modules pqledger and polyquery.
+SELF=$0
+if command -v readlink >/dev/null 2>&1; then
+    RESOLVED=$(readlink -f "$0" 2>/dev/null) && SELF=$RESOLVED
+fi
+HERE=$(cd "$(dirname "$SELF")/.." && pwd)
+. "$HERE/bin/jvm-options"
+APP_JAR="$HERE/build/pqledger.jar"
+if [ ! -f "$APP_JAR" ] || [ ! -f "$JAR" ]; then
+    echo "pqledger: error: $APP_JAR not found; run 'make -C $HERE build' first" >&2
+    exit 7
+fi
+exec "$JAVA" $JVM_OPTS -Xshare:auto $PQLEDGER_JAVA_OPTS --module-path "$JAR:$APP_JAR" -m pqledger/pqledger.Main "$@"
