@@ -118,6 +118,8 @@ x86 (six engines and the x86-64 assembly engine):
 [`20261013T111035Z-10m-main-and-asm-x86`](../../results/performance/20261013T111035Z-10m-main-and-asm-x86/summary.json).
 AArch64 engine on spark:
 [`20261013T111147Z-10m-asm-arm`](../../results/performance/20261013T111147Z-10m-asm-arm/summary.json).
+Common Lisp after its large-data fix (same settings, quiet host):
+[`20261014T113554Z-10m-common-lisp-fix-large-data`](../../results/performance/20261014T113554Z-10m-common-lisp-fix-large-data/summary.json).
 
 | engine | queries ok | geomean latency 1m → 10m | growth | peak RSS 1m → 10m | load 9 tables 1m → 10m | HTTP q/s, 16 clients, 1m → 10m |
 |---|---:|---:|---:|---:|---:|---:|
@@ -126,7 +128,7 @@ AArch64 engine on spark:
 | Java | 20/20 | 3.4 → 19.5 ms | 5.7× | 3.1 → 31.0 GiB | 5 → 40 s | 1,160 → 30 |
 | Clojure | 20/20 | 5.5 → 39.6 ms | 7.2× | 8.7 → 29.3 GiB | 10 → 94 s | 1,016 → 57 |
 | Python | 20/20 | 24.7 → 246.2 ms | 10.0× | 15.8 → 171.1 GiB | 25 → 325 s | 11 → 1.3 |
-| Common Lisp | **0/20** | 6.9 ms → — | — | 1.7 GiB → — | crashed while loading | 96 → — |
+| Common Lisp (after fix-large-data) | 20/20 | 6.9 → 70.3 ms | 10.2× | 1.7 → 9.7 GiB | 27 s at 10m | 96 → 8.6 |
 | *x86-64 assembly (cohort)* | 20/20 | 2.9 → 70.7 ms | 24.8× | 1.6 → 11.0 GiB | 1 → 15 s | 232 → 17 |
 | *AArch64 assembly (cohort, ARM host)* | 20/20 | 2.7 → 24.6 ms | 9.2× | 0.7 → 7.5 GiB | 2 → 24 s | 881 → 59 |
 
@@ -142,17 +144,30 @@ different machine.
   FLOAT64 value printed as `79` instead of `79.0`, which the spec allows, and the harness's digest
   treated as different
   ([`q16-digest-recheck.json`](../../results/performance/20261013T111035Z-10m-main-and-asm-x86/q16-digest-recheck.json)).
-* **Common Lisp cannot run at 10m.** Its build fixes the SBCL heap at 8 GiB (`--dynamic-space-size 8192`
-  in its Makefile), and SBCL dies with "Heap exhausted, game over" while parsing the first 10m-row CSV
-  (`transactions`). The whole process exits instead of returning `RESOURCE_LIMIT`
+* **Common Lisp crashed at 10m, and an agent task fixed it.** Its build fixed the SBCL heap at 8 GiB, and
+  SBCL died with "Heap exhausted, game over" while parsing the first 10m-row CSV instead of returning
+  `RESOURCE_LIMIT`
   ([stderr](../../results/performance/20261013T111035Z-10m-main-and-asm-x86/common-lisp-10m-stderr.txt)).
-  Not fixed by hand; it is an engine limitation and a robustness defect at this scale.
+  The `fix-large-data` run (`a-fix-large-data-common-lisp-a1-20261013T234442Z`, $8.37, 47 min, first
+  attempt) streams CSV into typed column builders, raises the heap to 64 GiB and adds a heap guard that
+  answers `RESOURCE_LIMIT` (`--max-memory-mb`). It passes the new large-data probe
+  (`tests/regression/large_data_probe.py`: 10m workload, a 64 MiB query budget, an ingest limit, six
+  10m tables in one process) and conformance 731/731. At 10m it is the slowest engine after Python (70.3 ms,
+  10× its 1m time; sorts and joins 250-540 ms), and its HTTP throughput falls to 8.6 q/s at 16 clients.
 * **The ranking at 1m holds for the six engines**: Go, Rust, Java, Clojure, then Python. Most grow
   6-7× for 10× the data, because many queries are top-N, filtered or grouped down to small results.
   Python grows linearly (10×) and needs 171 GiB.
-* **The x86-64 assembly engine does not scale like the others.** It grows 25× (`q01_filter_selective`
-  427×, 0.06 → 27 ms; most joins and sorts 26-30×). At 1m it was faster than Java (2.85 vs 3.41 ms); at
-  10m it is 3.6× slower (70.7 vs 19.5 ms). The AArch64 engine grows a more ordinary 9×.
+* **The x86-64 assembly engine did not scale like the others, and an agent task fixed most of it.** It
+  grew 25× (`q01_filter_selective` 427×, 0.06 → 27 ms): its 1 GiB pool of reusable query memory was too
+  small at 10m, so the next request unmapped the excess and the next query faulted it back in (2.1 M page
+  faults per round of 20 queries, much of it outside the engine's own timer), and the HTTP server
+  recomputed column statistics in every forked query process. The `optimize-scaling` run
+  (`a-optimize-scaling-x86_64-asm-engine-a1-20261013T235906Z`, $17.53, 91 min, first attempt) sized the pool
+  by peak use. Back to back: 10m geomean 63.7 → 27.4 ms (2.33×), 1m unchanged, growth 22.9× → 10.0×,
+  HTTP at 10m 3-4× higher, peak RSS +12 %, identical digests (see
+  [`x86-asm-10m-scaling.md`](../../results/performance/x86-asm-10m-scaling.md) and the assembly cohort
+  section). Sorts, million-group aggregations and the large join probe still grow faster than the data.
+  The AArch64 engine grows a more ordinary 9×.
 * **HTTP throughput drops 8-40×.** The HTTP benchmark sends workload queries, and at 10m they are
   heavier.
 
@@ -523,7 +538,7 @@ these is verified yet. No ABI violation was found
 
 ## Harness incidents
 
-Ten harness defects were found during the runs and fixed; each is logged with
+Twelve harness defects were found during the runs and fixed; each is logged with
 its impact in [`experiments/telemetry/harness-incidents.jsonl`](../../experiments/telemetry/harness-incidents.jsonl).
 HI-002 (the runner overwrote explicit request ids) was visible to the Phase 1
 agents as two spurious failures. HI-005 (a CR-1 case expected DECIMAL from an
@@ -540,7 +555,11 @@ record-only runs were re-validated and all passed native conformance. HI-009: th
 before/after benchmark script kept stray files from HEAD in the measured trees;
 all before/after sets were re-measured. HI-010: the benchmark's result digest treated a
 FLOAT64 printed as `79` and as `79.0` as different results; at 10m it flagged a false
-`q16` disagreement for both assembly engines (re-checked; all engines agree).
+`q16` disagreement for both assembly engines (re-checked; all engines agree). HI-011: the new large-data
+probe could not generate its data inside the sandbox (fixed; one run re-validated). HI-012: the storage
+benchmark reopened a saved table while its indexes still existed, so every engine correctly refused with
+`ALREADY_EXISTS` and every open time recorded before commit `9edc603` is invalid (save times and file sizes
+are valid; no document quoted open times).
 
 ## Reproducibility
 

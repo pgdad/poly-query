@@ -99,6 +99,7 @@ x86_64-asm-engine,change-expression-limits,1,success,10.737601600000007,135808,2
 x86_64-asm-engine,change-union-all,1,success,3.2606727999999996,46029,5747910,56,474.5,55,2,1,4,2,491,experiments/runs/a-change-union-all-x86_64-asm-engine-a1-20261012T090413Z/manifest.json
 x86_64-asm-engine,debug-mutant,1,success,0.3684982,3187,474863,17,47.5,16,0,1,2,1,9,experiments/runs/a-debug-mutant-x86_64-asm-engine-a1-20261012T090418Z/manifest.json
 x86_64-asm-engine,optimize-latency,1,success,18.981732999999995,275959,49417885,195,3087.7,194,3,2,0,22,3436,experiments/runs/a-optimize-latency-x86_64-asm-engine-a1-20261012T100759Z/manifest.json
+x86_64-asm-engine,optimize-scaling,1,success,17.528893000000007,226232,47765556,195,5449.4,194,3,0,7,11,1321,experiments/runs/a-optimize-scaling-x86_64-asm-engine-a1-20261013T235906Z/manifest.json
 x86_64-asm-engine,phase1,1,success,20.987464199999987,207804,14340134,71,2216.4,179,1,5,5,6,14544,experiments/runs/a-phase1-x86_64-asm-engine-a1-20261011T164036Z/manifest.json
 x86_64-asm-engine,phase2,1,success,16.038120000000003,175552,19836679,85,1496.4,143,1,2,11,10,6331,experiments/runs/a-phase2-x86_64-asm-engine-a1-20261011T175416Z/manifest.json
 x86_64-asm-engine,phase3,1,success,14.795773600000002,237295,33239016,125,2143.7,124,2,1,13,10,5829,experiments/runs/a-phase3-x86_64-asm-engine-a1-20261011T183247Z/manifest.json
