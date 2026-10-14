@@ -1,0 +1,9 @@
+[package]
+name = "pqledger"
+version = "0.1.0"
+edition = "2024"
+description = "Personal-finance ledger on the embedded PolyQuery engine (spec/apps/pqledger.md)"
+publish = false
+
+[dependencies]
+polyquery = { path = ".." }

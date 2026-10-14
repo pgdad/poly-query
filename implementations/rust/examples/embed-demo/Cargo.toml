@@ -1,0 +1,9 @@
+[package]
+name = "pq-embed-demo"
+version = "0.1.0"
+edition = "2024"
+description = "Minimal program embedding the PolyQuery engine (spec/apps/embedding.md §5)"
+publish = false
+
+[dependencies]
+polyquery = { path = "../.." }
