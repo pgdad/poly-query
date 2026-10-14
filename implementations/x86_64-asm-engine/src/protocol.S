@@ -838,7 +838,10 @@ FUNC op_query
     je 5f
     cmp $STMT_EXPLAIN, %rax
     je 6f
-    mov %r14, %rdi
+    cmpq $2, g_api_capture(%rip)    /* pq_create_table needs a query */
+    jne 54f
+    RAISE E_UNSUPPORTED, "pq_create_table requires a SELECT statement"
+54: mov %r14, %rdi
     cmp $STMT_CREATE_INDEX, %rax
     jne 51f
     call idx_create_stmt
@@ -850,7 +853,20 @@ FUNC op_query
 5:  mov ST_QUERY(%r14), %rdi
     call bind_statement
     mov %rax, %r13
-    lea g_out(%rip), %rdi
+    cmpq $0, g_api_capture(%rip)    /* embedding API: typed result / table */
+    je 50f
+    mov %r13, %rdi
+    mov 0(%rsp), %rsi
+    call exec_query_result
+    mov %rax, %rsi
+    mov %r13, %rdi
+    cmpq $2, g_api_capture(%rip)
+    je 53f
+    call api_capture_result
+    jmp 9f
+53: call api_capture_table
+    jmp 9f
+50: lea g_out(%rip), %rdi
     mov $',', %esi
     call buf_putc
     mov %r13, %rdi
@@ -868,7 +884,18 @@ FUNC op_query
     mov %r13, %rdi
     lea 16(%rsp), %rsi
     call explain_plan
-    lea g_out(%rip), %r15
+    cmpq $0, g_api_capture(%rip)    /* embedding API: one STRING value */
+    je 61f
+    cmpq $2, g_api_capture(%rip)
+    jne 62f
+    RAISE E_UNSUPPORTED, "pq_create_table requires a SELECT statement"
+62: mov 16+BUF_DATA(%rsp), %rdi
+    mov 16+BUF_LEN(%rsp), %rsi
+    call api_capture_text
+    lea 16(%rsp), %rdi
+    call buf_free
+    jmp 9f
+61: lea g_out(%rip), %r15
     PUTS %r15, ",\"columns\":[{\"name\":\"plan\",\"type\":\"STRING\"}]"
     cmpq $0, 8(%rsp)
     jne 7f
