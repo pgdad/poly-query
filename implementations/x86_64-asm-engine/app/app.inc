@@ -202,6 +202,46 @@
  * import.S
  *   cmd_import(file rdi, account rsi)   the whole import command; appends
  *        "batch B: imported N, duplicates D\n" to g_out.
+ *
+ * ------------------------------------------------------------ additional exports
+ *
+ * main.S
+ *   g_format (u64 0 table / 1 csv / 2 json: --format, else [output] format)
+ *   parsed command line: g_opt_month, g_opt_from, g_opt_to, g_opt_account,
+ *        g_opt_category (char* or 0), g_opt_uncat, g_opt_clear (0/1),
+ *        g_opt_top (u64), g_pos[2], g_npos, g_report_kind, g_setcat_id.
+ *
+ * util.S
+ *   read_file appends to an initialized or zeroed ABUF (a zeroed ABUF is a
+ *        valid empty buffer for every ab_* function).
+ *   xstrdup(s) / xstrndup(p, n) -> malloc'd C string (exit 7 on OOM)
+ *   ab_put_sqlstr(ab, s)  appends 'SQL literal' ('' doubled)
+ *   ab_put_csvstr(ab, s)  appends "CSV field" ("" doubled, always quoted)
+ *   trim_span(p, n) -> rax p', rdx n'  without leading/trailing space/tab
+ *   is_name(s) / is_category(s) -> eax 1/0  ([a-z0-9_-]{1,32}; category:
+ *        also not "uncategorized")
+ *   parse_u64(s, max_digits) -> rax value or -1 unless [0-9]{1,max}
+ *   path_dirname(path) / path_join(dir, path) -> malloc'd path
+ *
+ * config.S
+ *   g_cfg_path (configuration file as given), g_cfg_dir (its directory)
+ *   word_index(s, list) -> eax index in a NUL-separated word list ending
+ *        with an empty word, or -1
+ *
+ * ledger.S
+ *   g_schema_transactions (7), g_schema_batches (5), g_schema_overrides (2):
+ *        pq_column_def arrays of the ledger tables (§4).
+ *   g_qopts: pq_query_options used for every query (threads, max_rows -1)
+ *   ledger_create()        instance only (init: no tables yet)
+ *   ledger_exists() -> eax 1 if <data_dir>/transactions.pqcf exists
+ *   ledger_load_csv(table, ABUF*, schema, ncols)  replaces `table` with
+ *        the header-less CSV text of the ABUF (exit 7 on engine error)
+ *   ledger_load_rules() / ledger_load_budgets()  the `rules` / `budgets`
+ *        tables from g_rules / g_budgets (ledger_open loads `rules`)
+ *   ledger_try_query(sql) -> rax pq_result* or 0 (error left in g_db)
+ *   ledger_create_table(table, sql)  replaces `table` by the query result
+ *   ledger_cte(ab)  appends "WITH ..., ledger AS (...) " (category
+ *        resolution, §5.1); note `date` is a reserved word: write "date".
  */
 
 #endif
