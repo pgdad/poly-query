@@ -1261,15 +1261,8 @@ FUNC cmd_query
     ENTER 0
     sub  sp, sp, #16
     mov  w0, #LO_BUDGET_OPT
-    bl   ledger_open
-    LDR_G x9, g_cfg_budget_file     // without a budget file: empty budgets
-    cbnz x9, 1f
-    ADR_L x0, h_budgets
-    bl   tmp_reset
-    ADR_L x0, n_budgets
-    ADR_L x1, lo_budgets
-    bl   load_tmp
-1:  bl   sql_reset                  // ledger = transactions + category
+    bl   ledger_open                // (budgets empty without a budget file)
+    bl   sql_reset                  // ledger = transactions + category
     bl   put_cte
     S "SELECT id, account, \"date\", description, merchant, amount, batch, category FROM pql_l ORDER BY id"
     ADR_L x0, n_ledger
