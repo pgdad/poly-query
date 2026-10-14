@@ -57,4 +57,4 @@
                (case kind
                  :section {:line (inc i) :where where :kind :section :name a}
                  :assign {:line (inc i) :where where :kind :assign :key a :value b})))))
-        (text/lines content)))
+        (text/lines (cond-> content (str/starts-with? content "\uFEFF") (subs 1)))))

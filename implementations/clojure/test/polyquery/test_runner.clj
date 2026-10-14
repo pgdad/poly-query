@@ -30,6 +30,7 @@
     polyquery.storage.storage-test
     polyquery.storage.pqcf-test
     polyquery.protocol-test
+    polyquery.api-test
     polyquery.server-test])
 
 (defn -main [& _]
