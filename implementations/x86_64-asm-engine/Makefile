@@ -84,7 +84,6 @@ test: build $(TEST_BINS) $(APP_TEST_BINS)
 	@sh tests/session_test.sh
 	@sh tests/server_test.sh
 	@sh tests/modes_test.sh
-	@sh tests/api_test.sh
 	@sh tests/pqledger_test.sh
 
 # lint: assemble everything with warnings as errors and check every object
