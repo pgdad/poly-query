@@ -182,5 +182,7 @@
  "finished": "2026-10-14T01:05:36+00:00",
  "wall_seconds": 2813.0,
  "agent_exit_code": 0,
- "outcome": "success"
+ "outcome": "success",
+ "import_branch": "track-a/common-lisp/fix-large-data/a1",
+ "merged_into": "master"
 }

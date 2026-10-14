@@ -1,0 +1,461 @@
+{
+ "schema": "polyquery-large-data-probe/1",
+ "engine": "/srv/polyquery/runs/a-fix-large-data-common-lisp-a1-20261013T234442Z/validate/implementations/common-lisp/bin/polyquery",
+ "scale": "10m",
+ "copies": 6,
+ "guard_gib": 120.0,
+ "verdict": "pass",
+ "checks": [
+  {
+   "check": "workload",
+   "args": [],
+   "steps": [
+    {
+     "table": "transactions",
+     "ok": true,
+     "code": null,
+     "rows": 10000000,
+     "seconds": 5.7
+    },
+    {
+     "table": "customers",
+     "ok": true,
+     "code": null,
+     "rows": 1000000,
+     "seconds": 0.9
+    },
+    {
+     "table": "orders",
+     "ok": true,
+     "code": null,
+     "rows": 2500000,
+     "seconds": 0.6
+    },
+    {
+     "table": "order_items",
+     "ok": true,
+     "code": null,
+     "rows": 10000000,
+     "seconds": 2.6
+    },
+    {
+     "table": "products",
+     "ok": true,
+     "code": null,
+     "rows": 100000,
+     "seconds": 0.0
+    },
+    {
+     "table": "sensor_readings",
+     "ok": true,
+     "code": null,
+     "rows": 10000000,
+     "seconds": 3.5
+    },
+    {
+     "table": "sort_keys",
+     "ok": true,
+     "code": null,
+     "rows": 10000000,
+     "seconds": 6.6
+    },
+    {
+     "table": "wide",
+     "ok": true,
+     "code": null,
+     "rows": 1000000,
+     "seconds": 5.3
+    },
+    {
+     "table": "nulls_heavy",
+     "ok": true,
+     "code": null,
+     "rows": 10000000,
+     "seconds": 2.3
+    },
+    {
+     "query": "q01_filter_selective",
+     "ok": true,
+     "code": null,
+     "seconds": 0.034
+    },
+    {
+     "query": "q02_filter_low_selectivity",
+     "ok": true,
+     "code": null,
+     "seconds": 0.063
+    },
+    {
+     "query": "q03_range_filter_time",
+     "ok": true,
+     "code": null,
+     "seconds": 0.061
+    },
+    {
+     "query": "q04_arith_aggregate",
+     "ok": true,
+     "code": null,
+     "seconds": 0.061
+    },
+    {
+     "query": "q05_groupby_low_card",
+     "ok": true,
+     "code": null,
+     "seconds": 0.028
+    },
+    {
+     "query": "q06_groupby_high_card",
+     "ok": true,
+     "code": null,
+     "seconds": 0.159
+    },
+    {
+     "query": "q07_groupby_skewed",
+     "ok": true,
+     "code": null,
+     "seconds": 0.169
+    },
+    {
+     "query": "q08_groupby_uniform_multi",
+     "ok": true,
+     "code": null,
+     "seconds": 0.076
+    },
+    {
+     "query": "q09_distinct_count",
+     "ok": true,
+     "code": null,
+     "seconds": 0.178
+    },
+    {
+     "query": "q10_join_customers",
+     "ok": true,
+     "code": null,
+     "seconds": 0.253
+    },
+    {
+     "query": "q11_join_star",
+     "ok": true,
+     "code": null,
+     "seconds": 0.297
+    },
+    {
+     "query": "q12_left_join_anti",
+     "ok": true,
+     "code": null,
+     "seconds": 0.326
+    },
+    {
+     "query": "q13_sort_topn",
+     "ok": true,
+     "code": null,
+     "seconds": 0.037
+    },
+    {
+     "query": "q14_sort_full_string",
+     "ok": true,
+     "code": null,
+     "seconds": 3.544
+    },
+    {
+     "query": "q15_sort_multi_key",
+     "ok": true,
+     "code": null,
+     "seconds": 6.529
+    },
+    {
+     "query": "q16_timeseries_hourly",
+     "ok": true,
+     "code": null,
+     "seconds": 0.355
+    },
+    {
+     "query": "q17_wide_projection",
+     "ok": true,
+     "code": null,
+     "seconds": 0.007
+    },
+    {
+     "query": "q18_nulls",
+     "ok": true,
+     "code": null,
+     "seconds": 0.095
+    },
+    {
+     "query": "q19_cte_subquery",
+     "ok": true,
+     "code": null,
+     "seconds": 0.226
+    },
+    {
+     "query": "q20_string_functions",
+     "ok": true,
+     "code": null,
+     "seconds": 0.097
+    }
+   ],
+   "engine_alive_at_end": true,
+   "peak_rss_gib": 5.9,
+   "memory_guard_tripped": false,
+   "verdict": "pass"
+  },
+  {
+   "check": "query_budget",
+   "args": [
+    "--max-query-memory-mb",
+    "64"
+   ],
+   "steps": [
+    {
+     "table": "transactions",
+     "ok": true,
+     "code": null,
+     "rows": 10000000,
+     "seconds": 5.7
+    },
+    {
+     "table": "customers",
+     "ok": true,
+     "code": null,
+     "rows": 1000000,
+     "seconds": 0.8
+    },
+    {
+     "table": "orders",
+     "ok": true,
+     "code": null,
+     "rows": 2500000,
+     "seconds": 0.6
+    },
+    {
+     "table": "order_items",
+     "ok": true,
+     "code": null,
+     "rows": 10000000,
+     "seconds": 2.6
+    },
+    {
+     "table": "products",
+     "ok": true,
+     "code": null,
+     "rows": 100000,
+     "seconds": 0.1
+    },
+    {
+     "table": "sensor_readings",
+     "ok": true,
+     "code": null,
+     "rows": 10000000,
+     "seconds": 3.6
+    },
+    {
+     "table": "sort_keys",
+     "ok": true,
+     "code": null,
+     "rows": 10000000,
+     "seconds": 6.7
+    },
+    {
+     "table": "wide",
+     "ok": true,
+     "code": null,
+     "rows": 1000000,
+     "seconds": 5.7
+    },
+    {
+     "table": "nulls_heavy",
+     "ok": true,
+     "code": null,
+     "rows": 10000000,
+     "seconds": 3.1
+    },
+    {
+     "query": "q01_filter_selective",
+     "ok": true,
+     "code": null
+    },
+    {
+     "query": "q02_filter_low_selectivity",
+     "ok": true,
+     "code": null
+    },
+    {
+     "query": "q03_range_filter_time",
+     "ok": true,
+     "code": null
+    },
+    {
+     "query": "q04_arith_aggregate",
+     "ok": true,
+     "code": null
+    },
+    {
+     "query": "q05_groupby_low_card",
+     "ok": true,
+     "code": null
+    },
+    {
+     "query": "q06_groupby_high_card",
+     "ok": false,
+     "code": "RESOURCE_LIMIT"
+    },
+    {
+     "query": "q07_groupby_skewed",
+     "ok": false,
+     "code": "RESOURCE_LIMIT"
+    },
+    {
+     "query": "q08_groupby_uniform_multi",
+     "ok": true,
+     "code": null
+    },
+    {
+     "query": "q09_distinct_count",
+     "ok": true,
+     "code": null
+    },
+    {
+     "query": "q10_join_customers",
+     "ok": false,
+     "code": "RESOURCE_LIMIT"
+    },
+    {
+     "query": "q11_join_star",
+     "ok": true,
+     "code": null
+    },
+    {
+     "query": "q12_left_join_anti",
+     "ok": false,
+     "code": "RESOURCE_LIMIT"
+    },
+    {
+     "query": "q13_sort_topn",
+     "ok": false,
+     "code": "RESOURCE_LIMIT"
+    },
+    {
+     "query": "q14_sort_full_string",
+     "ok": false,
+     "code": "RESOURCE_LIMIT"
+    },
+    {
+     "query": "q15_sort_multi_key",
+     "ok": false,
+     "code": "RESOURCE_LIMIT"
+    },
+    {
+     "query": "q16_timeseries_hourly",
+     "ok": true,
+     "code": null
+    },
+    {
+     "query": "q17_wide_projection",
+     "ok": true,
+     "code": null
+    },
+    {
+     "query": "q18_nulls",
+     "ok": true,
+     "code": null
+    },
+    {
+     "query": "q19_cte_subquery",
+     "ok": false,
+     "code": "RESOURCE_LIMIT"
+    },
+    {
+     "query": "q20_string_functions",
+     "ok": true,
+     "code": null
+    }
+   ],
+   "engine_alive_at_end": true,
+   "peak_rss_gib": 4.6,
+   "memory_guard_tripped": false,
+   "verdict": "pass"
+  },
+  {
+   "check": "ingest_limit",
+   "args": [
+    "--max-ingest-bytes",
+    "100000000"
+   ],
+   "steps": [
+    {
+     "table": "t",
+     "ok": false,
+     "code": "RESOURCE_LIMIT",
+     "rows": null,
+     "seconds": 0.0
+    }
+   ],
+   "engine_alive_at_end": true,
+   "peak_rss_gib": 0.0,
+   "memory_guard_tripped": false,
+   "verdict": "pass"
+  },
+  {
+   "check": "exhaustion",
+   "args": [],
+   "steps": [
+    {
+     "table": "t1",
+     "ok": true,
+     "code": null,
+     "rows": 10000000,
+     "seconds": 5.6
+    },
+    {
+     "table": "t2",
+     "ok": true,
+     "code": null,
+     "rows": 10000000,
+     "seconds": 5.7
+    },
+    {
+     "table": "t3",
+     "ok": true,
+     "code": null,
+     "rows": 10000000,
+     "seconds": 5.7
+    },
+    {
+     "table": "t4",
+     "ok": true,
+     "code": null,
+     "rows": 10000000,
+     "seconds": 5.6
+    },
+    {
+     "table": "t5",
+     "ok": true,
+     "code": null,
+     "rows": 10000000,
+     "seconds": 5.7
+    },
+    {
+     "table": "t6",
+     "ok": true,
+     "code": null,
+     "rows": 10000000,
+     "seconds": 5.7
+    },
+    {
+     "query": "SELECT COUNT(*) FROM t1",
+     "ok": true,
+     "code": null,
+     "rows": [
+      [
+       10000000
+      ]
+     ]
+    }
+   ],
+   "engine_alive_at_end": true,
+   "peak_rss_gib": 4.1,
+   "memory_guard_tripped": false,
+   "verdict": "pass"
+  }
+ ]
+}

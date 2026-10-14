@@ -74,6 +74,7 @@ common-lisp,change-decimal38,1,success,7.4481686,76437,18483412,103,1346.3,102,1
 common-lisp,change-expression-limits,1,success,14.967314799999997,167347,41772659,166,5338.3,165,4,4,0,5,1080,experiments/runs/a-change-expression-limits-common-lisp-a1-20261012T235412Z/manifest.json
 common-lisp,change-union-all,1,success,4.5721582,50836,10626468,85,2935.8,83,1,4,6,1,483,experiments/runs/a-change-union-all-common-lisp-a1-20261011T053529Z/manifest.json
 common-lisp,debug-mutant,1,success,0.3427072,3099,401506,14,62.9,13,0,3,0,1,1,experiments/runs/a-debug-mutant-common-lisp-a1-20261011T054106Z/manifest.json
+common-lisp,fix-large-data,1,success,8.374953400000003,115867,20020065,115,2813.0,114,2,1,0,3,1458,experiments/runs/a-fix-large-data-common-lisp-a1-20261013T234442Z/manifest.json
 common-lisp,native,1,success,12.352338800000004,171053,30145561,135,4785.8,134,1,1,0,9,1902,experiments/runs/a-native-common-lisp-a1-20261011T034930Z/manifest.json
 common-lisp,optimize-latency,1,success,18.6142822,209590,54720055,207,3407.1,206,3,0,10,16,1814,experiments/runs/a-optimize-latency-common-lisp-a1-20261011T071620Z/manifest.json
 common-lisp,optimize-latency,2,success,17.604139200000017,201551,51698398,223,6293.1,221,1,5,0,13,3946,experiments/runs/a-optimize-latency-common-lisp-a2-20261011T124904Z/manifest.json

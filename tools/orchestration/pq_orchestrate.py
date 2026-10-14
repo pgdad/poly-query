@@ -1103,7 +1103,8 @@ def record(run_id: str) -> Path:
     dest = RECORDS / run_id
     dest.mkdir(parents=True, exist_ok=True)
     for f in ["manifest.json", "telemetry.json", "validation.json", "conformance.json", "conformance-http.json",
-              "conformance-modes.json", "http-suite.json", "kernel-bench.json", "compliance.json"]:
+              "conformance-modes.json", "http-suite.json", "kernel-bench.json", "compliance.json",
+              "expression-limits.json", "large-data.json"]:
         if (rd / f).exists():
             shutil.copy(rd / f, dest / f)
     if (rd / "native-arm").is_dir():

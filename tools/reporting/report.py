@@ -528,7 +528,12 @@ def scale_rows(scale: str) -> int:
 def scale_charts(R: dict, lbl: dict) -> list[str]:
     """Latency and memory at each larger scale (latest benchmark per scale), with the reason an engine has no data."""
     out = []
-    by_scale = {p["scale"]: p for p in R["3_runtime_performance"]}
+    # Benchmarks of one scale are merged, latest per engine (e.g. a single-engine re-run fills a gap).
+    by_scale: dict[str, dict] = {}
+    for p in R["3_runtime_performance"]:
+        m = by_scale.setdefault(p["scale"], {"bench_id": p["bench_id"], "engines": {}})
+        m["engines"].update(p["engines"])
+        m["bench_id"] = ", ".join(dict.fromkeys([*m["bench_id"].split(", "), p["bench_id"]]))
     asm_by = R.get("3_runtime_performance_asm_engine_cohort_by_scale") or {}
     for s in sorted((s for s in by_scale if scale_rows(s) > scale_rows(PRIMARY_SCALE)), key=scale_rows):
         p = by_scale[s]
