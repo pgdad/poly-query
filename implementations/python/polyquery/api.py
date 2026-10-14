@@ -365,6 +365,7 @@ class Database:
         PQCF file ``path`` (relative to the data directory); returns its size
         in bytes."""
         engine = self._live()
+        _check_name(table)
 
         def run() -> int:
             full = resolve_data_path(engine.config.data_dir, os.fspath(path))
@@ -389,6 +390,7 @@ class Database:
     def drop(self, table: str) -> None:
         """Removes ``table`` (``NOT_FOUND`` if it does not exist)."""
         engine = self._live()
+        _check_name(table)
         _call(lambda: engine.catalog.drop(table))
 
     def tables(self) -> list[TableInfo]:
@@ -399,10 +401,13 @@ class Database:
     def schema(self, table: str) -> TableInfo:
         """Name, row count and columns of ``table`` (``NOT_FOUND`` if absent)."""
         engine = self._live()
+        _check_name(table)
         return _call(lambda: _info(engine.catalog.require(table)))
 
     def exists(self, table: str) -> bool:
-        return self._live().catalog.exists(table)
+        engine = self._live()
+        _check_name(table)
+        return engine.catalog.exists(table)
 
     def __repr__(self) -> str:
         state = "closed" if self.closed else "open"
