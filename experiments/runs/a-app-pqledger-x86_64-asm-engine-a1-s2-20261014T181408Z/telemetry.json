@@ -1,0 +1,84 @@
+{
+ "schema": "polyquery-telemetry/1",
+ "run_id": "a-app-pqledger-x86_64-asm-engine-a1-s2-20261014T181408Z",
+ "language": "x86_64-asm-engine",
+ "task": "app-pqledger",
+ "track": "A",
+ "attempt": 1,
+ "model": "claude-opus-5-5",
+ "effort": "high",
+ "agent_harness_version": "2.1.299",
+ "prompt_id": "track-a-app-pqledger",
+ "prompt_sha256": "7721978934a2ed4cffbf14f537b21d290b3a66f6aada210964d69fa357b19483",
+ "session_id": "53d7614a-0f78-4cad-a712-f4808f1bca69",
+ "tokens": {
+  "input": 116,
+  "output": 41975,
+  "cache_read": 4848771,
+  "cache_creation": 126926,
+  "thinking": null,
+  "thinking_estimated": 11812,
+  "source": "result events (summed over 2 segments)",
+  "api_messages": 128
+ },
+ "rate_limit": {
+  "events": 7,
+  "max_utilization": {
+   "five_hour": 0.35,
+   "seven_day": 0.76
+  },
+  "statuses": [
+   "allowed_warning"
+  ]
+ },
+ "cost_usd": 6.2736506,
+ "cost_basis": "platform-reported list price (total_cost_usd)",
+ "agent_turns": 59,
+ "result_segments": 2,
+ "assistant_messages": 247,
+ "tool_calls": {
+  "Bash": 125,
+  "Agent": 1,
+  "Read": 1,
+  "Write": 1
+ },
+ "tool_calls_total": 128,
+ "tool_failures": 3,
+ "build_invocations": 20,
+ "build_failures_heuristic": 7,
+ "conformance_runs": 2,
+ "conformance_progress": [
+  [
+   660,
+   660
+  ]
+ ],
+ "repair_iterations": 0,
+ "time": {
+  "wall_seconds": 955.1,
+  "model_api_seconds": 1020.5,
+  "tool_seconds": 92.0,
+  "waiting_seconds": null,
+  "human_seconds": 0
+ },
+ "human_interventions": 0,
+ "git": {
+  "commits": 4,
+  "files_changed": 9,
+  "lines_added": 839,
+  "lines_removed": 8,
+  "uncommitted_changes": false,
+  "paths_outside_language_dir": []
+ },
+ "agent_exit_code": 0,
+ "result_subtype": "success",
+ "is_error": false,
+ "stop_reason": "completed",
+ "final_message": "Every check in the Definition of Done now passes, and all work is committed.\n\n**Test results** (after a clean rebuild):\n- `make build test` succeeds; the app unit test reports `test_import: 111 checks, 0 failed` and `pqledger_test: ok`.\n- pqledger runner with `--trace`: `pqledger cases: 24/24 pass; embed-demo cases: 3/3 pass`.\n- Conformance: `TOTAL: 660/660 pass`; with `--modes` `TOTAL: 3870/3870 pass`; with `--transport http` `TOTAL: 660/660 pass`.\n- `http suite: 19/19 passed`, `expression_limits: pass`.\n- The engine claims the same capabilities as before.\n\n**What this session added.** Session 1 had built the library, the app and the demo, and they already passed the public tests. This session:\n- **`APP.md`**, the user guide, was missing. It covers building and installing, the full configuration reference with an example for three bank formats, the rules and budget files, every command with real output, output formats, exit codes and troubleshooting. `README.md` already linked it.\n- **Edge-case fixes** from an agent that probed the app against the spec:\n  - Invalid UTF-8 in an imported record now gives exit 4 with `FILE:LINE`; it used to give exit 7.\n  - Invalid UTF-8 in the configuration, rules or budget file now gives exit 2 with the line number.\n  - `set-category` ids and `--top` values of 19 digits are now accepted.\n  - Unit and end-to-end tests cover all of these.\n- **Scale check:** on a 1,011,875-transaction ledger every command finishes in under 1 s. Importing 100k records takes about 0.6 s, and `list`/`export` peak at about 1.5 GB.\n- **Docs:** the minimal program in `EMBEDDING.md` assembles, links and runs as documented. `NOTES.md` is up to date.\n\n**Library API:** a C-ABI library, `lib/libpolyquery.a`, plus `include/polyquery.h` for C and `include/polyquery.inc` for assembly.\n- **Functions:** `pq_create`/`pq_close`, `pq_load_file`/`pq_load_text`, `pq_query` (returns a typed `pq_result`, freed with `pq_result_free`), `pq_create_table`, `pq_save`/`pq_open`, `pq_drop`, `pq_tables`, `pq_schema`, and `pq_errcode`/`pq_errmsg`/`pq_error_name`.\n- **Values:** results are typed native values. Decimals are the unscaled integer plus the scale; dates and timestamps are days or microseconds since 1970-01-01.\n- **Packaging:** only the `pq_*` symbols are global, so the engine's internal names can't clash with a client program's.\n\n**How pqledger is structured:** seven assembly modules in `app/` (main, util, config, ledger, import, report, output). It links the library the way an external program would. Category resolution is a SQL query (rule wildcards become `LIKE`, the lowest-numbered matching rule wins, then overrides are applied), and every report, list and budget is SQL run by the embedded engine. The host program only parses files, detects duplicates, formats output and computes `share`.\n\n**Known limitations:**\n- **`[engine] memory_mb` covers pqledger's own queries too**, because the limit is set per instance. They need roughly 1\u20131.5 KB per transaction (about 128 MiB for 100k), so a smaller limit makes commands fail with exit 7. Fixing this would need an engine/API change; it is documented in `APP.md` instead.\n- **The ledger is saved one table at a time.** A crash between writing `transactions` and `batches` could leave them inconsistent. A failing command leaves the ledger unchanged.",
+ "notes": {
+  "human_seconds": "0 by construction: unattended run, no human input after launch",
+  "waiting_seconds": "not exposed by the platform",
+  "build_failures_heuristic": "Bash build commands whose output matched compiler-error patterns",
+  "repair_iterations": "conformance runner invocations after the first one reporting failures"
+ }
+}

@@ -1,0 +1,6 @@
+2026-10-14T18:14:08+00:00 chain chain-a-app-pqledger-arm64-asm-engine-a1-20261014T181408Z: session 2 -> a-app-pqledger-arm64-asm-engine-a1-s2-20261014T181408Z (budget $25.00)
+2026-10-14T18:14:08+00:00 [a-app-pqledger-arm64-asm-engine-a1-s2-20261014T181408Z] agent queued (usage gate, then launch)
+2026-10-14T18:21:44+00:00 [a-app-pqledger-arm64-asm-engine-a1-s2-20261014T181408Z] agent finished; collecting telemetry
+2026-10-14T18:21:44+00:00 [a-app-pqledger-arm64-asm-engine-a1-s2-20261014T181408Z] validating (clean clone, sandboxed)
+2026-10-14T18:22:08+00:00 [a-app-pqledger-arm64-asm-engine-a1-s2-20261014T181408Z] outcome=success cost=$2.9146264 turns=59 wall=454.4s
+2026-10-14T18:22:08+00:00 chain chain-a-app-pqledger-arm64-asm-engine-a1-20261014T181408Z finished: outcome=success sessions=1 spent=$2.91

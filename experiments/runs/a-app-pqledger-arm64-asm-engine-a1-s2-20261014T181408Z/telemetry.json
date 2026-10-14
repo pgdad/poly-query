@@ -1,0 +1,77 @@
+{
+ "schema": "polyquery-telemetry/1",
+ "run_id": "a-app-pqledger-arm64-asm-engine-a1-s2-20261014T181408Z",
+ "language": "arm64-asm-engine",
+ "task": "app-pqledger",
+ "track": "A",
+ "attempt": 1,
+ "model": "claude-opus-5-5",
+ "effort": "high",
+ "agent_harness_version": "2.1.299",
+ "prompt_id": "track-a-app-pqledger",
+ "prompt_sha256": "50735945b0a36cc6eee853db3f29614c3689f972c953bee89d8551a429a72e69",
+ "session_id": "a6262101-18d9-4e5a-9bcc-a51a2ec9be36",
+ "tokens": {
+  "input": 112,
+  "output": 46649,
+  "cache_read": 4638872,
+  "cache_creation": 131678,
+  "thinking": null,
+  "thinking_estimated": 8490,
+  "source": "result events",
+  "api_messages": 56
+ },
+ "rate_limit": {
+  "events": 5,
+  "max_utilization": {
+   "seven_day": 0.76,
+   "five_hour": 0.33
+  },
+  "statuses": [
+   "allowed_warning"
+  ]
+ },
+ "cost_usd": 2.9146264,
+ "cost_basis": "platform-reported list price (total_cost_usd)",
+ "agent_turns": 59,
+ "result_segments": 1,
+ "assistant_messages": 110,
+ "tool_calls": {
+  "Bash": 56,
+  "Write": 2
+ },
+ "tool_calls_total": 58,
+ "tool_failures": 1,
+ "build_invocations": 7,
+ "build_failures_heuristic": 2,
+ "conformance_runs": 1,
+ "conformance_progress": [],
+ "repair_iterations": 0,
+ "time": {
+  "wall_seconds": 454.4,
+  "model_api_seconds": 406.8,
+  "tool_seconds": 43.0,
+  "waiting_seconds": null,
+  "human_seconds": 0
+ },
+ "human_interventions": 0,
+ "git": {
+  "commits": 3,
+  "files_changed": 7,
+  "lines_added": 1147,
+  "lines_removed": 67,
+  "uncommitted_changes": false,
+  "paths_outside_language_dir": []
+ },
+ "agent_exit_code": 0,
+ "result_subtype": "success",
+ "is_error": false,
+ "stop_reason": "completed",
+ "final_message": "Everything in the definition of done now passes and all work is committed. Session 1 had left the library and app nearly complete; this session fixed two bugs, wrote the two guides and checked behaviour beyond the public tests.\n\n## Test results\n- `make build test`: passes, including the app's module tests (bankcsv 306, config 150, output 22).\n- pqledger runner with `--trace`: **`pqledger cases: 24/24 pass; embed-demo cases: 3/3 pass`**\n- Conformance: **660/660**; `--modes` **3870/3870**; `--transport http` **660/660**\n- `http_suite`: **19/19 passed**\n- `robustness_probe --only expression_limits --require-pass`: **pass**\n- `ENGINE.json` is unchanged, so the engine claims the same capabilities as before. The conformance suites ran before this session's app and doc commits; none of those touched the engine source.\n\n## What this session did\n- **Fixed `make test`:** it failed to link the app's module tests because they needed variables defined in `main.S`. I moved those (and `parse_month`) into a new `app/options.S`.\n- **Fixed a `pqledger query` bug:** without a `budget_file` it loaded the `budgets` table twice and failed with `ALREADY_EXISTS`.\n- **Wrote APP.md** (user guide: build/install, full configuration reference with a three-bank example, rules and budget files, every command with real output, exit codes, troubleshooting) and **EMBEDDING.md** (developer guide: see below). Both are linked from README.md, and NOTES.md is up to date.\n- **Checked against an independent Python model of the spec** (kept outside the repo), on about 149k transactions from all three bankgen formats including overlapping re-imports. `export` matched it row for row. I also hand-tested header-less files, multi-line quoted fields, debit/credit, duplicate counting and error codes.\n- **Speed:** at about 900k transactions, an import takes about 1.5 s and every other command under 1.1 s; the spec's limit is 30 s.\n\n## Library API\n- `lib/libpolyquery.a`, declared in `include/polyquery.h` for C and `include/polyquery.inc` (constants and structure offsets) for assembly. Only the `pq_*` functions are exported.\n- Functions: `pq_create`/`pq_close`, `pq_load_file`/`pq_load_text`, `pq_query`/`pq_query_into`, `pq_save`/`pq_open`/`pq_drop`, `pq_tables`/`pq_schema`, `pq_value_at`/`pq_format_value`/`pq_result_free`, and errors via `pq_errcode`/`pq_errname`/`pq_errmsg`.\n- Results are one block the caller frees. Values are typed:\n  - DECIMAL is an exact 128-bit unscaled integer plus the column's scale.\n  - DATE is days and TIMESTAMP is microseconds since 1970-01-01.\n  - NULL has its own flag.\n- EMBEDDING.md includes a complete minimal assembly program, which I built and ran against the library.\n\n## How pqledger is structured\n`app/` has `main.S` (arguments), `options.S`, `config.S` (config, rules, budgets), `bankcsv.S` (bank CSV, dates, amounts, merchant names), `commands.S`, `output.S` (table/csv/json) and `util.S`.\n- Reports, lists, budgets and category lookup all run as SQL inside the embedded engine. Rule wildcards (`*`, `?`) are translated to SQL `LIKE` patterns.\n- Updates write the whole new table and save it atomically (temporary file, then rename), so a failed command leaves the ledger unchanged.\n\n## Main design decisions and known limitations\n- **API calls run one at a time across the whole process.** Calling from any thread is safe, and one query can still use several threads internally, but two API calls never run in parallel. EMBEDDING.md says so.\n- **The library reuses the engine's existing request handler.** That keeps it identical to the CLI in errors, limits and path safety. The spec's optional wish that `bin/polyquery` itself become a client of the library was not done.\n- **There is only a static library** (`.a`), no `.so`; the spec allows either.\n- **In table output, a description containing a line break is printed as is**, so it spans two lines. The spec doesn't cover this case.",
+ "notes": {
+  "human_seconds": "0 by construction: unattended run, no human input after launch",
+  "waiting_seconds": "not exposed by the platform",
+  "build_failures_heuristic": "Bash build commands whose output matched compiler-error patterns",
+  "repair_iterations": "conformance runner invocations after the first one reporting failures"
+ }
+}

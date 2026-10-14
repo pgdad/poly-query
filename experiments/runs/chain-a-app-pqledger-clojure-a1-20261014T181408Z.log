@@ -1,0 +1,6 @@
+2026-10-14T18:14:08+00:00 chain chain-a-app-pqledger-clojure-a1-20261014T181408Z: session 2 -> a-app-pqledger-clojure-a1-s2-20261014T181408Z (budget $20.00)
+2026-10-14T18:14:08+00:00 [a-app-pqledger-clojure-a1-s2-20261014T181408Z] agent queued (usage gate, then launch)
+2026-10-14T18:24:49+00:00 [a-app-pqledger-clojure-a1-s2-20261014T181408Z] agent finished; collecting telemetry
+2026-10-14T18:24:49+00:00 [a-app-pqledger-clojure-a1-s2-20261014T181408Z] validating (clean clone, sandboxed)
+2026-10-14T18:26:49+00:00 [a-app-pqledger-clojure-a1-s2-20261014T181408Z] outcome=success cost=$2.7425198000000006 turns=54 wall=640.6s
+2026-10-14T18:26:49+00:00 chain chain-a-app-pqledger-clojure-a1-20261014T181408Z finished: outcome=success sessions=1 spent=$2.74

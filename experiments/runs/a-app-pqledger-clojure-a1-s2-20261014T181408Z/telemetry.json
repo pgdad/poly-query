@@ -1,0 +1,83 @@
+{
+ "schema": "polyquery-telemetry/1",
+ "run_id": "a-app-pqledger-clojure-a1-s2-20261014T181408Z",
+ "language": "clojure",
+ "task": "app-pqledger",
+ "track": "A",
+ "attempt": 1,
+ "model": "claude-opus-5-5",
+ "effort": "high",
+ "agent_harness_version": "2.1.299",
+ "prompt_id": "track-a-app-pqledger",
+ "prompt_sha256": "2b37febe47e2ce2a2481273760a8525928f81864278d279ae5c3a2e27c4a1909",
+ "session_id": "ed8789f9-c67f-40d1-8bfd-eeb826c343dc",
+ "tokens": {
+  "input": 98,
+  "output": 41108,
+  "cache_read": 4427239,
+  "cache_creation": 129315,
+  "thinking": null,
+  "thinking_estimated": 8240,
+  "source": "result events",
+  "api_messages": 49
+ },
+ "rate_limit": {
+  "events": 7,
+  "max_utilization": {
+   "five_hour": 0.34,
+   "seven_day": 0.76
+  },
+  "statuses": [
+   "allowed_warning"
+  ]
+ },
+ "cost_usd": 2.7425198000000006,
+ "cost_basis": "platform-reported list price (total_cost_usd)",
+ "agent_turns": 54,
+ "result_segments": 1,
+ "assistant_messages": 108,
+ "tool_calls": {
+  "Bash": 50,
+  "Write": 2,
+  "Edit": 1
+ },
+ "tool_calls_total": 53,
+ "tool_failures": 1,
+ "build_invocations": 36,
+ "build_failures_heuristic": 8,
+ "conformance_runs": 2,
+ "conformance_progress": [
+  [
+   660,
+   660
+  ]
+ ],
+ "repair_iterations": 0,
+ "time": {
+  "wall_seconds": 640.6,
+  "model_api_seconds": 419.9,
+  "tool_seconds": 217.4,
+  "waiting_seconds": null,
+  "human_seconds": 0
+ },
+ "human_interventions": 0,
+ "git": {
+  "commits": 2,
+  "files_changed": 6,
+  "lines_added": 1083,
+  "lines_removed": 4,
+  "uncommitted_changes": false,
+  "paths_outside_language_dir": []
+ },
+ "agent_exit_code": 0,
+ "result_subtype": "success",
+ "is_error": false,
+ "stop_reason": "completed",
+ "final_message": "Every check in the definition of done now passes, and all work is committed (two commits this session).\n\nSession 1 had already built the library, the app and the example, and all tests passed when I re-ran them. The deliverables still missing were the documentation, so most of this session went into APP.md, EMBEDDING.md, NOTES.md and the README links. The one code change was a small fix to merchant names, described below.\n\n## Test results\n- `make build` succeeds; `make test`: engine/API 125 tests, 1534 assertions, 0 failures; pqledger 26 tests, 199 assertions, 0 failures.\n- pqledger runner with `--trace`: `pqledger cases: 24/24 pass; embed-demo cases: 3/3 pass`.\n- Conformance: `TOTAL: 660/660 pass` (default, run again after the final build), `3870/3870` with `--modes`, `660/660` with `--transport http`.\n- `http_suite.py`: `19/19 passed`; `robustness_probe --only expression_limits --require-pass`: `pass`.\n- The engine's code is unchanged this session, so it claims the same capabilities as before.\n\n## Library API (`polyquery.api`)\n- **Operations:** `create` (data dir, memory limit, threads and the other CLI limits), `load!` (from a file or in-memory text, with schema, header, delimiter, replace), `load-rows!` (build a table directly from Clojure values), `query`, `save!`, `open!`, `drop!`, `tables`, `schema`, `close`. An instance also closes automatically inside `with-open`.\n- **Results:** `query` returns column names, column types, row count and the rows, with accessors such as `rows` and `row-maps`.\n- **Values:** numbers come back as Long, BigDecimal (exact) or Double; text as String; dates and timestamps as `LocalDate` and `LocalDateTime`; NULL as `nil`.\n- **Errors:** thrown as `ex-info` carrying the spec's error code; the instance stays usable afterwards.\n- **Threads:** one instance can safely be used from several threads at once.\n- **Packaging:** another project can depend on it through `deps.edn` `:local/root`, pointing either at the source directory or at `target/polyquery.jar`. I checked both from a separate project outside the repo.\n- `bin/polyquery` and the API share one implementation.\n\n## How pqledger is structured\n`app/` is its own deps.edn project that depends on the engine. It is split into files for argument parsing, configuration, rules and budgets, bank-CSV reading, import with duplicate detection, ledger storage, reports, output formatting and exit codes.\n\nEvery report, list, budget and category lookup is a SQL query run by the embedded engine. Category rules are translated into SQL `LIKE` patterns. Only the `share` percentage is computed in Clojure, as the spec requires.\n\n## Done this session\n- **Fix:** merchant names could lose a line break that was part of a quoted bank description, because the code trimmed all whitespace instead of only spaces and tabs. Fixed, with a unit test.\n- **Docs:** wrote APP.md, EMBEDDING.md and NOTES.md and linked them from the README. The example output in the docs is real output from generated statements.\n- **Speed:** on a ledger of about 1,000,000 transactions, every command finishes in about 0.3\u20135 s (a full `export` of all rows takes 5.1 s). Importing a 100,000-row file takes 0.8\u20132.9 s. The spec's target is 30 s.\n\n## Known limitations\n- Each import rewrites the whole transactions file, so import time grows with the ledger (about 1 s per 100k rows).\n- `query` results are loaded fully into memory; there is no streaming.\n- If an `[import]` section uses column names with `header = false`, the config is rejected (exit 2) for every command, even ones that don't import. The spec leaves this open.",
+ "notes": {
+  "human_seconds": "0 by construction: unattended run, no human input after launch",
+  "waiting_seconds": "not exposed by the platform",
+  "build_failures_heuristic": "Bash build commands whose output matched compiler-error patterns",
+  "repair_iterations": "conformance runner invocations after the first one reporting failures"
+ }
+}

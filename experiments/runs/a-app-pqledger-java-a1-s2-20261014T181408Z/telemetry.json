@@ -1,0 +1,79 @@
+{
+ "schema": "polyquery-telemetry/1",
+ "run_id": "a-app-pqledger-java-a1-s2-20261014T181408Z",
+ "language": "java",
+ "task": "app-pqledger",
+ "track": "A",
+ "attempt": 1,
+ "model": "claude-opus-5-5",
+ "effort": "high",
+ "agent_harness_version": "2.1.299",
+ "prompt_id": "track-a-app-pqledger",
+ "prompt_sha256": "a32396c296c13f843a6ae691f21014208cbc44516ac2932212d37794e2983743",
+ "session_id": "4371402d-0ad3-449b-955b-05f2c8291dbd",
+ "tokens": {
+  "input": 110,
+  "output": 38855,
+  "cache_read": 5280744,
+  "cache_creation": 142269,
+  "thinking": null,
+  "thinking_estimated": 8914,
+  "source": "result events (summed over 3 segments)",
+  "api_messages": 118
+ },
+ "rate_limit": {
+  "events": 6,
+  "max_utilization": {
+   "seven_day": 0.76,
+   "five_hour": 0.34
+  },
+  "statuses": [
+   "allowed_warning"
+  ]
+ },
+ "cost_usd": 6.680131400000002,
+ "cost_basis": "platform-reported list price (total_cost_usd)",
+ "agent_turns": 57,
+ "result_segments": 3,
+ "assistant_messages": 236,
+ "tool_calls": {
+  "Bash": 111,
+  "Agent": 1,
+  "Write": 3,
+  "Edit": 5
+ },
+ "tool_calls_total": 120,
+ "tool_failures": 3,
+ "build_invocations": 28,
+ "build_failures_heuristic": 16,
+ "conformance_runs": 3,
+ "conformance_progress": [],
+ "repair_iterations": 0,
+ "time": {
+  "wall_seconds": 861.0,
+  "model_api_seconds": 953.6,
+  "tool_seconds": 123.0,
+  "waiting_seconds": null,
+  "human_seconds": 0
+ },
+ "human_interventions": 0,
+ "git": {
+  "commits": 2,
+  "files_changed": 14,
+  "lines_added": 2417,
+  "lines_removed": 5,
+  "uncommitted_changes": false,
+  "paths_outside_language_dir": []
+ },
+ "agent_exit_code": 0,
+ "result_subtype": "success",
+ "is_error": false,
+ "stop_reason": "completed",
+ "final_message": "The task is done: every definition-of-done check passes on a clean rebuild, and all work is committed (the working tree is clean).\n\n**Test results** (summary lines from the final run):\n- `make build test`: engine tests \"114 passed, 0 failed\"; app tests \"pqledger: 21 passed, 0 failed\". My log didn't capture make's own exit code, but the test step runs after a successful build and both suites passed.\n- pqledger runner with `--trace`: \"pqledger cases: 24/24 pass; embed-demo cases: 3/3 pass\".\n- Conformance: 660/660; with `--modes` 3870/3870; with `--transport http` 660/660.\n- `http_suite.py`: 19/19 passed. Robustness probe: \"expression_limits: pass\".\n- The engine claims exactly the same capabilities as before, and nothing outside `implementations/java/` was changed.\n\n**What this session added.** The previous session had already built the library, pqledger and embed-demo, and all public cases passed when I started. Still missing were unit tests (the app suite ran 0 tests), the two guides, the notes file and the README links. This session added:\n- Unit tests for the app (importer, config, command line, output formats, end-to-end runs) and for the library API.\n- `APP.md` and `EMBEDDING.md`, written by a helper agent. Their example output comes from real runs, and every way of depending on the jar it describes was actually compiled: javac/java as a module, plain class path, and Maven. I reviewed and corrected them.\n- `NOTES.md`, and links to both guides from `README.md`.\n- One small fix: when a ledger file such as `batches.pqcf` is missing, the error now names the file.\n\n**Library API** (`polyquery.api`; `module-info` exports only this package, packaged as the modular jar `build/polyquery.jar`):\n- `Database`: create, load CSV from a file or from text, query, create tables, save/open PQCF files, drop, list tables, read a schema, close.\n- Supporting types: `DatabaseConfig`, `LoadOptions`, `QueryOptions`, `Result`, `Column`/`ColumnType`, `TableSchema`, `TableInfo`.\n- Results hold typed Java values: `Long`, `BigDecimal`, `Double`, `String`, `Boolean`, `LocalDate`, `LocalDateTime`, and `null` for NULL.\n- Errors are `DatabaseException` carrying the spec's `ErrorCode`, and the instance stays usable afterwards. Instances are thread-safe and closed with try-with-resources.\n\n**How pqledger is structured** (`app/`):\n- `cli` parses arguments; `config` reads the configuration, rules and budget files.\n- `importer` reads bank CSVs and converts amounts and dates, normalizes merchants and finds duplicates.\n- `ledger` manages the PQCF files and holds every SQL statement.\n- `commands` and `output` (table, csv, json) do the rest.\n\n**Main design decisions:**\n- Every report, list and budget, and every category lookup, is a SQL query run by the embedded engine. Rules become a `COALESCE(override, CASE WHEN merchant LIKE \u2026 END, 'uncategorized')`.\n- Only duplicate decisions and the `share` column are computed in Java, as the spec allows.\n- Output goes to stdout only when a command succeeds, so failing commands print nothing there.\n\n**Performance:** importing a 100k-row statement takes 0.6\u20130.9 s. On a ledger of about 1M transactions, every command takes 0.3\u20131.1 s, against the spec's 30 s target.\n\n**Known limitations** (also in `NOTES.md`):\n- `import` saves two files one after the other. Each save is atomic, but if the second one failed the ledger would be partly changed, which goes against the spec's rule that a failing command leaves the ledger unchanged.\n- Nothing stops two pqledger processes from changing the same ledger at once.\n- A column given by header name while `header = false` is only reported when you run `import` (exit 2), not when the config is loaded.\n- The launchers don't check the Java version. An older `java` on the PATH fails with exit status 1, which looks like a usage error.",
+ "notes": {
+  "human_seconds": "0 by construction: unattended run, no human input after launch",
+  "waiting_seconds": "not exposed by the platform",
+  "build_failures_heuristic": "Bash build commands whose output matched compiler-error patterns",
+  "repair_iterations": "conformance runner invocations after the first one reporting failures"
+ }
+}
