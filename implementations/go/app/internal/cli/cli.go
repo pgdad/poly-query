@@ -82,7 +82,6 @@ func exitStatus(err error) int {
 
 // app holds what a command needs.
 type app struct {
-	inv    *invocation
 	cfg    *config.Config
 	format string
 	out    io.Writer
@@ -110,16 +109,9 @@ func run(ctx context.Context, args []string, out io.Writer) (int, error) {
 	if err != nil {
 		return 0, err
 	}
-	a := &app{inv: inv, cfg: cfg, format: cfg.Format, out: out}
+	a := &app{cfg: cfg, format: cfg.Format, out: out}
 	if inv.format != "" {
 		a.format = inv.format
-	}
-	if inv.command == "init" {
-		if err := ledger.Init(cfg.DataDir, a.settings()); err != nil {
-			return 0, err
-		}
-		_, err := io.WriteString(out, "initialized ledger\n")
-		return exitOK, err
 	}
 	return exec(ctx, a)
 }
@@ -175,15 +167,15 @@ type commandFunc func(ctx context.Context, a *app) (int, error)
 func prepare(inv *invocation) (commandFunc, error) {
 	switch inv.command {
 	case "init":
-		return nil, nil
+		return runInit, nil
 	case "import":
 		return prepareImport(inv)
-	case "report monthly", "report categories", "export":
-		f, err := inv.filter()
-		if err != nil {
-			return nil, err
-		}
-		return report(inv.command, f), nil
+	case "report monthly":
+		return filtered(inv, false, (*ledger.Ledger).Monthly)
+	case "report categories":
+		return filtered(inv, true, (*ledger.Ledger).Categories)
+	case "export":
+		return filtered(inv, true, (*ledger.Ledger).Export)
 	case "report merchants":
 		return prepareMerchants(inv)
 	case "budget":
@@ -221,14 +213,23 @@ func withLedger(categories bool, q func(*ledger.Ledger, context.Context) (*polyq
 	}
 }
 
-func report(cmd string, f ledger.Filter) commandFunc {
-	switch cmd {
-	case "report monthly":
-		return withLedger(false, func(l *ledger.Ledger, ctx context.Context) (*polyquery.Result, error) { return l.Monthly(ctx, f) })
-	case "report categories":
-		return withLedger(true, func(l *ledger.Ledger, ctx context.Context) (*polyquery.Result, error) { return l.Categories(ctx, f) })
+// filtered is withLedger for a query taking the common filter options.
+func filtered(inv *invocation, categories bool, q func(*ledger.Ledger, context.Context, ledger.Filter) (*polyquery.Result, error)) (commandFunc, error) {
+	f, err := inv.filter()
+	if err != nil {
+		return nil, err
 	}
-	return withLedger(true, func(l *ledger.Ledger, ctx context.Context) (*polyquery.Result, error) { return l.Export(ctx, f) })
+	return withLedger(categories, func(l *ledger.Ledger, ctx context.Context) (*polyquery.Result, error) {
+		return q(l, ctx, f)
+	}), nil
+}
+
+func runInit(ctx context.Context, a *app) (int, error) {
+	if err := ledger.Init(a.cfg.DataDir, a.settings()); err != nil {
+		return 0, err
+	}
+	_, err := io.WriteString(a.out, "initialized ledger\n")
+	return exitOK, err
 }
 
 func prepareMerchants(inv *invocation) (commandFunc, error) {
