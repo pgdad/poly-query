@@ -41,8 +41,8 @@ FUNC fail
     mov  w19, w0
     GOT_LOAD x0, stdout             // nothing reaches stdout on failure
     bl   fflush
-    GOT_LOAD x0, stderr
-    ADR_L x1, s_prefix
+    ADR_L x0, s_prefix
+    GOT_LOAD x1, stderr
     bl   fputs
     GOT_LOAD x0, stderr
     ldp  x1, x2, [sp, #32]
