@@ -1,6 +1,6 @@
-make: Entering directory '/srv/pqrunner/jobs/engines-20261013T005755Z-939274/repo/native-kernels'
+make: Entering directory '/srv/pqrunner/jobs/engines-20261014T183220Z-1232707/repo/native-kernels'
 mkdir -p build/aarch64
 cc -O2 -g -std=c17 -Wall -Wextra -Werror -Wno-unused-parameter -Iinclude -Ireference-c -fPIC -shared -o build/aarch64/libpqkernels.so reference-c/pq_kernels_ref.c reference-c/pq_dispatch.c arm64/pq_a64_neon.S arm64/pq_a64_scalar.S arm64/pq_a64_sve.S
 cc -O2 -g -std=c17 -Wall -Wextra -Werror -Wno-unused-parameter -Iinclude -Ireference-c -o build/aarch64/kernel_test tests/kernel_test.c reference-c/pq_kernels_ref.c reference-c/pq_dispatch.c arm64/pq_a64_neon.S arm64/pq_a64_scalar.S arm64/pq_a64_sve.S -lm
 cc -O3 -std=c17 -Wall -Wextra -Werror -Wno-unused-parameter -Iinclude -Ireference-c -o build/aarch64/kernel_bench tests/kernel_bench.c reference-c/pq_kernels_ref.c reference-c/pq_dispatch.c arm64/pq_a64_neon.S arm64/pq_a64_scalar.S arm64/pq_a64_sve.S -lm
-make: Leaving directory '/srv/pqrunner/jobs/engines-20261013T005755Z-939274/repo/native-kernels'
+make: Leaving directory '/srv/pqrunner/jobs/engines-20261014T183220Z-1232707/repo/native-kernels'
