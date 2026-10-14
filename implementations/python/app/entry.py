@@ -8,7 +8,7 @@ import sys
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path[:0] = [HERE, os.path.dirname(HERE)]
 
-from pqledger.cli import main  # noqa: E402
+from pqledger.main import main  # noqa: E402
 
 if __name__ == "__main__":
     sys.stdout.reconfigure(encoding="utf-8", newline="\n")

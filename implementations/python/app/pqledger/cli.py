@@ -1,19 +1,14 @@
-"""Command-line parsing (pqledger.md §2) and the program's entry point."""
+"""Command-line parsing (pqledger.md §2)."""
 
 from __future__ import annotations
 
 import calendar
 import datetime as dt
-import io
 import re
-import sys
-from collections.abc import Callable
 from dataclasses import dataclass, field
-from typing import Any, TextIO
 
-from . import errors
 from .config import FORMATS
-from .errors import AppError, UsageError
+from .errors import UsageError
 from .names import UNCATEGORIZED, is_account_name, is_category_name
 from .sql import Filters
 
@@ -195,35 +190,3 @@ def _check_arity(inv: Invocation, spec: CommandSpec) -> None:
     if len(inv.positionals) < wanted:
         missing = spec.positionals[len(inv.positionals)]
         raise UsageError(f"'{inv.command}' needs {missing}")
-
-
-# ------------------------------------------------------------ entry point
-
-
-def main(argv: list[str], stdout: TextIO | None = None, stderr: TextIO | None = None) -> int:
-    """Runs one invocation; returns the exit status (§10)."""
-    from . import commands
-
-    stdout = stdout or sys.stdout
-    stderr = stderr or sys.stderr
-    try:
-        inv = parse_args(argv)
-        handler: Callable[[Invocation, TextIO], Any] = commands.HANDLERS[inv.command]
-        # the output is written only once the command has succeeded (§10)
-        buffer = io.StringIO()
-        status = handler(inv, buffer)
-        stdout.write(buffer.getvalue())
-        stdout.flush()
-        return errors.OK if status is None else status
-    except AppError as e:
-        stderr.write(f"pqledger: error: {e.message}\n")
-        return e.exit_status
-    except MemoryError:
-        stderr.write("pqledger: error: out of memory\n")
-        return errors.OTHER
-    except OSError as e:
-        stderr.write(f"pqledger: error: {e.strerror or e}\n")
-        return errors.OTHER
-    except Exception as e:  # noqa: BLE001 - a bug: still exit 7 with a message
-        stderr.write(f"pqledger: error: internal error: {e!r}\n")
-        return errors.OTHER

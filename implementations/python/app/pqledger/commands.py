@@ -4,8 +4,6 @@ statement executed by the embedded engine; the host only formats the result
 
 from __future__ import annotations
 
-import os
-from collections import defaultdict
 from collections.abc import Callable
 from decimal import Decimal
 from typing import TextIO
@@ -17,9 +15,10 @@ from .bankcsv import parse_statement, read_file
 from .cli import USAGE, INT64_MAX, Invocation, category_name, positive_int
 from .config import Config
 from .errors import ConfigError, LedgerStateError, QueryError
+from .importer import import_records
 from .ledger import Ledger
 from .rules import Budget, Rule, load_budgets, load_rules
-from .sql import BUDGETS_COLUMNS, RULES_COLUMNS, date_literal, literal, where, with_ledger
+from .sql import BUDGETS_COLUMNS, RULES_COLUMNS, literal, where, with_ledger
 
 LIST_COLUMNS = 'id, "date", account, description, amount, category'
 EXPORT_COLUMNS = 'id, account, "date", description, merchant, amount, category, batch'
@@ -78,49 +77,9 @@ def cmd_import(inv: Invocation, out: TextIO) -> None:
     account = inv.account(required=True)
     path = inv.positionals[0]
     with Context(inv) as ctx:
-        source = path
-        records = parse_statement(read_file(path, source), ctx.config.settings_for(account), source)
-        ledger = ctx.ledger
-
-        # duplicates (§6.4): per key (date, amount, merchant) of this account,
-        # the ledger's l transactions match the first l of the file's f records
-        existing: dict[tuple, int] = {}
-        if records:
-            first = min(r.date for r in records)
-            last = max(r.date for r in records)
-            result = ctx.query(
-                'SELECT "date", amount, merchant, COUNT(*) AS n FROM transactions'
-                + where(f"account = {literal(account)}", f'"date" >= {date_literal(first)}', f'"date" <= {date_literal(last)}')
-                + ' GROUP BY "date", amount, merchant'
-            )
-            for day, amount, merchant, n in result:
-                existing[(day, int(amount.scaleb(2)), merchant)] = n
-        by_key: dict[tuple, list[int]] = defaultdict(list)
-        for i, r in enumerate(records):
-            by_key[(r.date, r.cents, r.merchant)].append(i)
-        keep = [False] * len(records)
-        for key, indexes in by_key.items():
-            new = max(0, len(indexes) - existing.get(key, 0))
-            for i in indexes[len(indexes) - new:]:
-                keep[i] = True
-
-        max_id, max_tx_batch = ctx.query("SELECT MAX(id), MAX(batch) FROM transactions").rows[0]
-        max_batch = ctx.query("SELECT MAX(batch) FROM batches").scalar()
-        next_id = (max_id or 0) + 1
-        batch = max(max_batch or 0, max_tx_batch or 0) + 1
-        rows = []
-        for r, kept in zip(records, keep):
-            if kept:
-                amount = Decimal(r.cents).scaleb(-2)
-                rows.append((next_id + len(rows), account, r.date, r.description, r.merchant, amount, batch))
-        duplicates = len(records) - len(rows)
-        if rows:
-            ledger.append("transactions", rows)
-        ledger.append("batches", [(batch, account, os.path.basename(path), len(rows), duplicates)])
-        if rows:
-            ledger.save("transactions")
-        ledger.save("batches")
-    out.write(f"batch {batch}: imported {len(rows)}, duplicates {duplicates}\n")
+        records = parse_statement(read_file(path, path), ctx.config.settings_for(account), path)
+        result = import_records(ctx.ledger, account, path, records)
+    out.write(f"batch {result.batch}: imported {result.imported}, duplicates {result.duplicates}\n")
 
 
 # ------------------------------------------------------------ reports

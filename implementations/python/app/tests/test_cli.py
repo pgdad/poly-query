@@ -9,7 +9,8 @@ from decimal import Decimal
 import polyquery
 
 from pqledger import errors
-from pqledger.cli import main, parse_args
+from pqledger.cli import parse_args
+from pqledger.main import main
 from pqledger.commands import share_of
 from pqledger.errors import UsageError
 
@@ -179,3 +180,19 @@ class EndToEndTest(unittest.TestCase):
         os.remove("pqledger.conf")
         self.assertIn("usage: pqledger", self.ok("help"))
         self.assertTrue(self.ok("version").startswith("pqledger "))
+
+
+class SelectNewTest(unittest.TestCase):
+    def test_last_records_of_a_key_are_new(self) -> None:
+        import datetime as dt
+
+        from pqledger.bankcsv import Record
+        from pqledger.importer import select_new
+
+        day = dt.date(2026, 3, 2)
+        coffee = [Record(n, day, "Starbucks", "STARBUCKS", -450) for n in (2, 3, 4, 5)]
+        other = Record(6, day, "Starbucks", "STARBUCKS", -500)
+        records = [*coffee, other]
+        self.assertEqual(select_new(records, {}), [True] * 5)
+        self.assertEqual(select_new(records, {(day, -450, "STARBUCKS"): 3}), [False, False, False, True, True])
+        self.assertEqual(select_new(records, {(day, -450, "STARBUCKS"): 9, (day, -500, "STARBUCKS"): 1}), [False] * 5)
