@@ -221,10 +221,13 @@
  *   is_name(s) / is_category(s) -> eax 1/0  ([a-z0-9_-]{1,32}; category:
  *        also not "uncategorized")
  *   parse_u64(s, max_digits) -> rax value or -1 unless [0-9]{1,max}
+ *   utf8_check(p, n) -> rax -1 if well-formed UTF-8, else the offset of
+ *        the first ill-formed sequence
  *   path_dirname(path) / path_join(dir, path) -> malloc'd path
  *
  * config.S
  *   g_cfg_path (configuration file as given), g_cfg_dir (its directory)
+ *   check_utf8(ab, path)  exit 2 ("PATH:LINE: ...") unless the text is UTF-8
  *   word_index(s, list) -> eax index in a NUL-separated word list ending
  *        with an empty word, or -1
  *

@@ -312,7 +312,7 @@ FUNC check_command
     mov g_opt_top_text(%rip), %rdi
     test %rdi, %rdi
     jz 5f
-    mov $18, %esi
+    mov $19, %esi
     call parse_u64
     test %rax, %rax
     jle cc_top
@@ -365,7 +365,7 @@ cc_setcat:
     cmp $2, %rax
     jne cc_setcat_args
     mov g_pos(%rip), %rdi
-    mov $18, %esi
+    mov $19, %esi
     call parse_u64
     test %rax, %rax
     jle cc_setcat_id

@@ -9,6 +9,7 @@
  *   - imp_parse_amount: signs, parentheses, currency symbols, separators,
  *     digit limits, empty fields
  *   - out_result: table / csv / json of a hand-built pq_result
+ *   - utf8_check (util.S): well-formed and ill-formed UTF-8
  * Prints one line per failure and a summary; exit status 1 on failure.
  */
 #include "app.inc"
@@ -190,6 +191,36 @@ t_days:
     .quad 99991231, 2932896
     .quad 19691231, -1
     .quad 20240229, 19782
+    .quad 0
+
+/* UTF-8: text (octal escapes), expected utf8_check result */
+t_utf8:
+    T "plain ascii"
+    .quad -1
+    T "caf\303\251 \360\237\230\200 \357\277\277 \364\217\277\277 \355\237\277"
+    .quad -1
+    T "ab\377"
+    .quad 2
+    T "a\303"
+    .quad 1
+    T "x\303(y"
+    .quad 1
+    T "\300\257"
+    .quad 0
+    T "\301\277"
+    .quad 0
+    T "ok\340\200\200"
+    .quad 2
+    T "\355\240\200"
+    .quad 0
+    T "\360\200\200\200"
+    .quad 0
+    T "\364\220\200\200"
+    .quad 0
+    T "\365\200\200\200"
+    .quad 0
+    T "\200"
+    .quad 0
     .quad 0
 
 /* amounts: text, settings, expected cents, expected status */
@@ -398,6 +429,32 @@ test_merchants:
     jmp 1b
 9:  LEAVE
 
+/* test_utf8(): t_utf8 */
+test_utf8:
+    ENTER
+    lea t_utf8(%rip), %rbx
+1:  mov (%rbx), %r12
+    test %r12, %r12
+    jz 9f
+    incq t_run(%rip)
+    mov %r12, %rdi
+    call strlen
+    mov %r12, %rdi
+    mov %rax, %rsi
+    call utf8_check
+    cmp 8(%rbx), %rax
+    je 2f
+    call t_fail
+    CSTR %rdi, "FAIL utf8_check(\"%s\") = %ld, expected %ld\n"
+    mov %r12, %rsi
+    mov %rax, %rdx
+    mov 8(%rbx), %rcx
+    xor %eax, %eax
+    call printf
+2:  add $16, %rbx
+    jmp 1b
+9:  LEAVE
+
 /* test_dates(): t_dates */
 test_dates:
     ENTER
@@ -550,6 +607,7 @@ FUNC main
     call test_dates
     call test_days
     call test_amounts
+    call test_utf8
     call test_output
     CSTR %rdi, "test_import: %ld checks, %ld failed\n"
     mov t_run(%rip), %rsi

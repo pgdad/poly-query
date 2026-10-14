@@ -169,6 +169,32 @@ cfg_text:           .zero AB_SIZE
  * Line iteration (shared by the three files)
  * ====================================================================== */
 
+/* check_utf8(ab rdi, path rsi): exits 2 ("PATH:LINE: not valid UTF-8")
+ * unless the ABUF's text is well-formed UTF-8 (§3.2). */
+FUNC check_utf8
+    ENTER
+    mov %rdi, %rbx
+    mov %rsi, %r12
+    mov AB_DATA(%rbx), %rdi
+    mov AB_LEN(%rbx), %rsi
+    call utf8_check
+    test %rax, %rax
+    js 9f
+    mov AB_DATA(%rbx), %rdi           /* line = 1 + newlines before it */
+    lea (%rdi,%rax), %rsi
+    mov $1, %ecx
+1:  cmp %rsi, %rdi
+    jae 2f
+    cmpb $'\n', (%rdi)
+    jne 3f
+    inc %rcx
+3:  inc %rdi
+    jmp 1b
+2:  mov %r12, %rdx
+    DIE EX_CONFIG, "%s:%ld: the text is not valid UTF-8"
+9:  LEAVE
+ENDF check_utf8
+
 /* lines_init(it rdi, ab rsi): iterate over the ABUF's text, BOM skipped */
 FUNC lines_init
     mov AB_DATA(%rsi), %rax
@@ -554,7 +580,10 @@ FUNC cfg_load
     mov %rax, %rcx
     mov g_cfg_path(%rip), %rdx
     DIE EX_CONFIG, "cannot read configuration file %s: %s"
-3:  lea 0(%rsp), %rdi
+3:  lea cfg_text(%rip), %rdi
+    mov g_cfg_path(%rip), %rsi
+    call check_utf8
+    lea 0(%rsp), %rdi
     lea cfg_text(%rip), %rsi
     call lines_init
     xor %r14d, %r14d                  /* current SEC* (0 before any section) */
@@ -873,7 +902,10 @@ FUNC rules_load
     mov %rax, %rcx
     mov g_cfg_rules_file(%rip), %rdx
     DIE EX_CONFIG, "cannot read rules file %s: %s"
-1:  lea 0(%rsp), %rdi
+1:  lea 48(%rsp), %rdi
+    mov g_cfg_rules_file(%rip), %rsi
+    call check_utf8
+    lea 0(%rsp), %rdi
     lea 48(%rsp), %rsi
     call lines_init
 rl_line:
@@ -1039,7 +1071,10 @@ FUNC budget_load
     mov %rax, %rcx
     mov g_cfg_budget_file(%rip), %rdx
     DIE EX_CONFIG, "cannot read budget file %s: %s"
-1:  lea 0(%rsp), %rdi
+1:  lea 48(%rsp), %rdi
+    mov g_cfg_budget_file(%rip), %rsi
+    call check_utf8
+    lea 0(%rsp), %rdi
     lea 48(%rsp), %rsi
     call lines_init
 bl_line:

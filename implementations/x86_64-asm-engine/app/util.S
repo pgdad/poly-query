@@ -472,7 +472,8 @@ FUNC is_category
 ENDF is_category
 
 /* parse_u64(s rdi, max_digits esi) -> rax value, or -1 if s is not
- * [0-9]{1,max_digits} (max_digits <= 18) */
+ * [0-9]{1,max_digits} (max_digits <= 19; with 19 digits the value may
+ * exceed INT64_MAX and then reads as negative) */
 FUNC parse_u64
     xor %eax, %eax
     xor %ecx, %ecx
@@ -494,6 +495,77 @@ FUNC parse_u64
 7:  mov $-1, %rax
     ret
 ENDF parse_u64
+
+/* utf8_check(p rdi, n rsi) -> rax -1 if p[0..n) is well-formed UTF-8
+ * (no overlong forms, surrogates or code points above U+10FFFF), else the
+ * offset of the first ill-formed sequence.  Leaf function. */
+FUNC utf8_check
+    mov %rdi, %r9                     /* start */
+    add %rdi, %rsi                    /* end */
+1:  cmp %rsi, %rdi
+    jae 8f
+    movzbl (%rdi), %eax
+    cmp $0x80, %eax
+    jae 2f
+    inc %rdi                          /* ASCII */
+    jmp 1b
+2:  mov %rdi, %r10                    /* start of the sequence */
+    mov $0x80, %ecx                   /* range of the second byte */
+    mov $0xBF, %edx
+    cmp $0xC2, %eax
+    jb 9f
+    cmp $0xDF, %eax
+    ja 3f
+    mov $1, %r8d                      /* C2..DF: 2 bytes */
+    jmp 5f
+3:  cmp $0xEF, %eax
+    ja 4f
+    mov $2, %r8d                      /* E0..EF: 3 bytes */
+    cmp $0xE0, %eax
+    jne 31f
+    mov $0xA0, %ecx                   /* no overlong forms */
+    jmp 5f
+31: cmp $0xED, %eax
+    jne 5f
+    mov $0x9F, %edx                   /* no surrogates */
+    jmp 5f
+4:  cmp $0xF4, %eax
+    ja 9f
+    mov $3, %r8d                      /* F0..F4: 4 bytes */
+    cmp $0xF0, %eax
+    jne 41f
+    mov $0x90, %ecx                   /* no overlong forms */
+    jmp 5f
+41: cmp $0xF4, %eax
+    jne 5f
+    mov $0x8F, %edx                   /* <= U+10FFFF */
+5:  inc %rdi
+    mov %rsi, %rax
+    sub %rdi, %rax
+    cmp %r8, %rax
+    jb 9f
+    movzbl (%rdi), %eax
+    cmp %ecx, %eax
+    jb 9f
+    cmp %edx, %eax
+    ja 9f
+    inc %rdi
+    dec %r8
+6:  test %r8, %r8
+    jz 1b
+    movzbl (%rdi), %eax
+    and $0xC0, %eax
+    cmp $0x80, %eax
+    jne 9f
+    inc %rdi
+    dec %r8
+    jmp 6b
+8:  mov $-1, %rax
+    ret
+9:  mov %r10, %rax
+    sub %r9, %rax
+    ret
+ENDF utf8_check
 
 /* path_dirname(path rdi) -> rax malloc'd directory part ("." if none,
  * "/" for files in the root) */

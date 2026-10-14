@@ -66,6 +66,14 @@ expect 1 - set-category 2 Bad
 expect 5 - query "SELEC 1"
 expect 6 - set-category 99 travel
 expect 2 - --config missing.conf accounts
+# invalid UTF-8: import data error naming the record's line; rules file: configuration error
+printf 'Date,Description,Amount\n2026-03-01,"two\nlines \377",-1.00\n' > bad.csv
+expect 4 - import bad.csv --account chk
+grep -q '^pqledger: error: bad.csv:2: ' "$TMP/err" || { echo "FAIL utf8 import message"; FAILS=$((FAILS + 1)); }
+printf '[ledger]\ndata_dir = books\nrules_file = bad-rules.conf\n' > bad.conf
+printf 'x = CAF\311\n' > bad-rules.conf
+expect 2 - --config bad.conf accounts
+expect 6 - set-category 9223372036854775807 travel
 # the version line needs no configuration
 "$APP" version | grep -q '^pqledger ' || { echo "FAIL version line"; FAILS=$((FAILS + 1)); }
 

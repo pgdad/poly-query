@@ -987,7 +987,20 @@ i_csv_record:
 .Lr_done:
     mov %r12, i_pos(%rip)
     mov %r15, i_line(%rip)
-    mov %rbx, %rax
+    xor %r13d, %r13d            /* every field must be UTF-8 (§6.2 step 1) */
+1:  cmp %rbx, %r13
+    jae 2f
+    mov %r13, %rcx
+    shl $4, %rcx
+    add i_fields(%rip), %rcx
+    mov (%rcx), %rdi
+    mov 8(%rcx), %rsi
+    call utf8_check
+    test %rax, %rax
+    jns .Lr_bad_utf8
+    inc %r13
+    jmp 1b
+2:  mov %rbx, %rax
     LEAVE
 .Lr_eof:
     mov %r12, i_pos(%rip)
@@ -998,6 +1011,10 @@ i_csv_record:
     mov i_path(%rip), %rdx
     mov i_rec_line(%rip), %rcx
     DIE EX_IMPORT, "%s:%ld: unterminated quoted field"
+.Lr_bad_utf8:
+    mov i_path(%rip), %rdx
+    mov i_rec_line(%rip), %rcx
+    DIE EX_IMPORT, "%s:%ld: the record is not valid UTF-8"
 
 /* i_field(index rdi) -> rax ptr, rdx len of field `index` */
 i_field:
