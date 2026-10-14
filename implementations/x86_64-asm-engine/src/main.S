@@ -26,8 +26,6 @@
 opt_request: .quad 0
 cur_mode:    .quad 0
 opt_threads: .quad 0                /* --threads N, 0 = automatic */
-    .globl g_threads_auto
-g_threads_auto: .quad 0             /* 1 = default threads not given (--threads) */
 
     .section .rodata
 /* options taking a value; the value is stored by index in option handling */
