@@ -1,0 +1,113 @@
+{
+ "name": "import-errors",
+ "description": "a bad record rejects the whole file",
+ "files": {
+  "pqledger.conf": "[ledger]\ndata_dir = ledger\nrules_file = rules.conf\nbudget_file = budgets.conf\n\n[account card]\ndate_column = Transaction Date\ndate_format = MM/DD/YYYY\ncurrency_symbol = $\nthousands_separator = ,\ninvert_sign = true\n\n[account giro]\ndelimiter = ;\nskip_lines = 2\ndate_column = Buchungstag\ndate_format = DD.MM.YYYY\ndescription_column = Verwendungszweck\namount_mode = debit_credit\ndebit_column = Soll\ncredit_column = Haben\ndecimal_separator = ,\nthousands_separator = .\n",
+  "rules.conf": "# first match wins\ngroceries = WHOLE FOODS*, TRADER JOE*, SAFEWAY, REWE*, EDEKA*, LIDL*\ncoffee = SQ *BLUE BOTTLE*, STARBUCKS*, CAFé*\ntransport = SHELL*, CHEVRON*, UBER*, LYFT*, ARAL*, DB VERTRIEB*\nhousing = RENT*, MIETE*\nincome = PAYROLL*, GEHALT*\nshopping = AMAZON*, HOME DEPOT, REI\nutilities = PACIFIC GAS*, COMCAST*, STADTWERKE*, TELEKOM*\n",
+  "budgets.conf": "groceries = 600\ncoffee = 30.00\ntransport = 200\nshopping = 150.5\n",
+  "good.csv": "Date,Description,Amount\n2026-01-05,Lunch,-12.00\n",
+  "bad-date.csv": "Date,Description,Amount\n2026-01-05,Lunch,-12.00\n2026-02-30,Dinner,-30.00\n",
+  "bad-amount.csv": "Date,Description,Amount\n2026-01-05,Lunch,-12.005\n",
+  "bad-fields.csv": "Date,Description,Amount\n2026-01-05,Lunch,-12.00\n\n\"2026-01-06\",\"Multi\nline\",-1.00\n2026-01-07,Extra,1.00,x\n",
+  "no-col.csv": "Day,Description,Amount\n2026-01-05,Lunch,-12.00\n"
+ },
+ "steps": [
+  {
+   "args": [
+    "init"
+   ],
+   "exit": 0,
+   "stdout": "initialized ledger\n"
+  },
+  {
+   "args": [
+    "import",
+    "good.csv",
+    "--account",
+    "checking"
+   ],
+   "exit": 0,
+   "stdout": "batch 1: imported 1, duplicates 0\n"
+  },
+  {
+   "args": [
+    "import",
+    "bad-date.csv",
+    "--account",
+    "checking"
+   ],
+   "exit": 4,
+   "stderr_contains": [
+    "bad-date.csv:3:"
+   ]
+  },
+  {
+   "args": [
+    "import",
+    "bad-amount.csv",
+    "--account",
+    "checking"
+   ],
+   "exit": 4,
+   "stderr_contains": [
+    "bad-amount.csv:2:"
+   ]
+  },
+  {
+   "args": [
+    "import",
+    "bad-fields.csv",
+    "--account",
+    "checking"
+   ],
+   "exit": 4,
+   "stderr_contains": [
+    "bad-fields.csv:6:"
+   ]
+  },
+  {
+   "args": [
+    "import",
+    "no-col.csv",
+    "--account",
+    "checking"
+   ],
+   "exit": 4
+  },
+  {
+   "args": [
+    "import",
+    "missing.csv",
+    "--account",
+    "checking"
+   ],
+   "exit": 4
+  },
+  {
+   "ledger": {
+    "dir": "ledger",
+    "transactions": [
+     [
+      1,
+      "checking",
+      "2026-01-05",
+      "Lunch",
+      "LUNCH",
+      "-12.00",
+      1
+     ]
+    ],
+    "batches": [
+     [
+      1,
+      "checking",
+      "good.csv",
+      1,
+      0
+     ]
+    ],
+    "overrides": []
+   }
+  }
+ ]
+}

@@ -26,6 +26,8 @@ The key words MUST, MUST NOT, SHOULD, SHOULD NOT and MAY are used as in RFC 2119
 | Native kernel ABI | [../native-kernels/include/pq_kernels.h](../native-kernels/include/pq_kernels.h), [phases/native-kernels.md](phases/native-kernels.md) |
 | Phase definitions & capability strings | [phases/README.md](phases/README.md) |
 | Acceptance criteria for engines and milestones | [acceptance/README.md](acceptance/README.md) |
+| Example application pqledger (CLI on the embedded engine) | [apps/pqledger.md](apps/pqledger.md) |
+| Embedding API (engine as an in-process library) | [apps/embedding.md](apps/embedding.md) |
 
 ## Change control
 

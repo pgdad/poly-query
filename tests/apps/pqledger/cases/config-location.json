@@ -1,0 +1,74 @@
+{
+ "name": "config-location",
+ "description": "--config, PQLEDGER_CONFIG and ./pqledger.conf",
+ "files": {
+  "conf/main.conf": "[ledger]\ndata_dir = ../books\n",
+  "conf/env.conf": "[ledger]\ndata_dir = envbooks\n",
+  "pqledger.conf": "[ledger]\ndata_dir = cwdbooks\n",
+  "sub/t.csv": "Date,Description,Amount\n2026-01-01,X,1.00\n"
+ },
+ "steps": [
+  {
+   "args": [
+    "--config",
+    "conf/main.conf",
+    "init"
+   ],
+   "exit": 0,
+   "stdout": "initialized ledger\n"
+  },
+  {
+   "ledger": {
+    "dir": "books",
+    "transactions": [],
+    "batches": [],
+    "overrides": []
+   }
+  },
+  {
+   "args": [
+    "--config",
+    "conf/main.conf",
+    "import",
+    "sub/t.csv",
+    "--account",
+    "a"
+   ],
+   "exit": 0,
+   "stdout": "batch 1: imported 1, duplicates 0\n"
+  },
+  {
+   "args": [
+    "init"
+   ],
+   "exit": 0,
+   "stdout": "initialized ledger\n"
+  },
+  {
+   "ledger": {
+    "dir": "cwdbooks",
+    "transactions": [],
+    "batches": [],
+    "overrides": []
+   }
+  },
+  {
+   "args": [
+    "--config",
+    "../conf/main.conf",
+    "accounts"
+   ],
+   "exit": 0,
+   "cwd": "sub",
+   "stdout": "account  transactions  balance  first       last\n-------  ------------  -------  ----------  ----------\na                   1     1.00  2026-01-01  2026-01-01\n(1 row)\n"
+  },
+  {
+   "args": [
+    "--config",
+    "nope.conf",
+    "init"
+   ],
+   "exit": 2
+  }
+ ]
+}

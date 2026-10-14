@@ -1,0 +1,160 @@
+{
+ "name": "repeated-identical",
+ "description": "identical rows within one file are real transactions",
+ "files": {
+  "pqledger.conf": "[ledger]\ndata_dir = ledger\nrules_file = rules.conf\nbudget_file = budgets.conf\n\n[account card]\ndate_column = Transaction Date\ndate_format = MM/DD/YYYY\ncurrency_symbol = $\nthousands_separator = ,\ninvert_sign = true\n\n[account giro]\ndelimiter = ;\nskip_lines = 2\ndate_column = Buchungstag\ndate_format = DD.MM.YYYY\ndescription_column = Verwendungszweck\namount_mode = debit_credit\ndebit_column = Soll\ncredit_column = Haben\ndecimal_separator = ,\nthousands_separator = .\n",
+  "rules.conf": "# first match wins\ngroceries = WHOLE FOODS*, TRADER JOE*, SAFEWAY, REWE*, EDEKA*, LIDL*\ncoffee = SQ *BLUE BOTTLE*, STARBUCKS*, CAFé*\ntransport = SHELL*, CHEVRON*, UBER*, LYFT*, ARAL*, DB VERTRIEB*\nhousing = RENT*, MIETE*\nincome = PAYROLL*, GEHALT*\nshopping = AMAZON*, HOME DEPOT, REI\nutilities = PACIFIC GAS*, COMCAST*, STADTWERKE*, TELEKOM*\n",
+  "budgets.conf": "groceries = 600\ncoffee = 30.00\ntransport = 200\nshopping = 150.5\n",
+  "a.csv": "Date,Description,Amount\n2026-03-02,Starbucks Store 12,-4.50\n2026-03-02,Starbucks Store 12,-4.50\n2026-03-02,Starbucks Store 12,-4.50\n",
+  "b.csv": "Date,Description,Amount\n2026-03-02,STARBUCKS STORE 12,-4.50\n2026-03-02,Starbucks  Store 12,-4.50\n2026-03-02,Starbucks Store 12,-4.50\n2026-03-02,Starbucks Store 12,-4.50\n2026-03-03,Starbucks Store 12,-4.50\n"
+ },
+ "steps": [
+  {
+   "args": [
+    "init"
+   ],
+   "exit": 0,
+   "stdout": "initialized ledger\n"
+  },
+  {
+   "args": [
+    "import",
+    "a.csv",
+    "--account",
+    "checking"
+   ],
+   "exit": 0,
+   "stdout": "batch 1: imported 3, duplicates 0\n"
+  },
+  {
+   "args": [
+    "import",
+    "b.csv",
+    "--account",
+    "checking"
+   ],
+   "exit": 0,
+   "stdout": "batch 2: imported 2, duplicates 3\n"
+  },
+  {
+   "args": [
+    "import",
+    "a.csv",
+    "--account",
+    "savings"
+   ],
+   "exit": 0,
+   "stdout": "batch 3: imported 3, duplicates 0\n"
+  },
+  {
+   "ledger": {
+    "dir": "ledger",
+    "transactions": [
+     [
+      1,
+      "checking",
+      "2026-03-02",
+      "Starbucks Store 12",
+      "STARBUCKS STORE 12",
+      "-4.50",
+      1
+     ],
+     [
+      2,
+      "checking",
+      "2026-03-02",
+      "Starbucks Store 12",
+      "STARBUCKS STORE 12",
+      "-4.50",
+      1
+     ],
+     [
+      3,
+      "checking",
+      "2026-03-02",
+      "Starbucks Store 12",
+      "STARBUCKS STORE 12",
+      "-4.50",
+      1
+     ],
+     [
+      4,
+      "checking",
+      "2026-03-02",
+      "Starbucks Store 12",
+      "STARBUCKS STORE 12",
+      "-4.50",
+      2
+     ],
+     [
+      5,
+      "checking",
+      "2026-03-03",
+      "Starbucks Store 12",
+      "STARBUCKS STORE 12",
+      "-4.50",
+      2
+     ],
+     [
+      6,
+      "savings",
+      "2026-03-02",
+      "Starbucks Store 12",
+      "STARBUCKS STORE 12",
+      "-4.50",
+      3
+     ],
+     [
+      7,
+      "savings",
+      "2026-03-02",
+      "Starbucks Store 12",
+      "STARBUCKS STORE 12",
+      "-4.50",
+      3
+     ],
+     [
+      8,
+      "savings",
+      "2026-03-02",
+      "Starbucks Store 12",
+      "STARBUCKS STORE 12",
+      "-4.50",
+      3
+     ]
+    ],
+    "batches": [
+     [
+      1,
+      "checking",
+      "a.csv",
+      3,
+      0
+     ],
+     [
+      2,
+      "checking",
+      "b.csv",
+      2,
+      3
+     ],
+     [
+      3,
+      "savings",
+      "a.csv",
+      3,
+      0
+     ]
+    ],
+    "overrides": []
+   }
+  },
+  {
+   "args": [
+    "export"
+   ],
+   "exit": 0,
+   "stdout": "id  account   date        description         merchant            amount  category  batch\n--  --------  ----------  ------------------  ------------------  ------  --------  -----\n 1  checking  2026-03-02  Starbucks Store 12  STARBUCKS STORE 12   -4.50  coffee        1\n 2  checking  2026-03-02  Starbucks Store 12  STARBUCKS STORE 12   -4.50  coffee        1\n 3  checking  2026-03-02  Starbucks Store 12  STARBUCKS STORE 12   -4.50  coffee        1\n 4  checking  2026-03-02  Starbucks Store 12  STARBUCKS STORE 12   -4.50  coffee        2\n 5  checking  2026-03-03  Starbucks Store 12  STARBUCKS STORE 12   -4.50  coffee        2\n 6  savings   2026-03-02  Starbucks Store 12  STARBUCKS STORE 12   -4.50  coffee        3\n 7  savings   2026-03-02  Starbucks Store 12  STARBUCKS STORE 12   -4.50  coffee        3\n 8  savings   2026-03-02  Starbucks Store 12  STARBUCKS STORE 12   -4.50  coffee        3\n(8 rows)\n"
+  }
+ ]
+}

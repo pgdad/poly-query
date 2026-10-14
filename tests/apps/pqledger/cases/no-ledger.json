@@ -1,0 +1,34 @@
+{
+ "name": "no-ledger",
+ "description": "commands before init exit 6",
+ "files": {
+  "pqledger.conf": "[ledger]\ndata_dir = ledger\nrules_file = rules.conf\nbudget_file = budgets.conf\n\n[account card]\ndate_column = Transaction Date\ndate_format = MM/DD/YYYY\ncurrency_symbol = $\nthousands_separator = ,\ninvert_sign = true\n\n[account giro]\ndelimiter = ;\nskip_lines = 2\ndate_column = Buchungstag\ndate_format = DD.MM.YYYY\ndescription_column = Verwendungszweck\namount_mode = debit_credit\ndebit_column = Soll\ncredit_column = Haben\ndecimal_separator = ,\nthousands_separator = .\n",
+  "rules.conf": "# first match wins\ngroceries = WHOLE FOODS*, TRADER JOE*, SAFEWAY, REWE*, EDEKA*, LIDL*\ncoffee = SQ *BLUE BOTTLE*, STARBUCKS*, CAFé*\ntransport = SHELL*, CHEVRON*, UBER*, LYFT*, ARAL*, DB VERTRIEB*\nhousing = RENT*, MIETE*\nincome = PAYROLL*, GEHALT*\nshopping = AMAZON*, HOME DEPOT, REI\nutilities = PACIFIC GAS*, COMCAST*, STADTWERKE*, TELEKOM*\n",
+  "budgets.conf": "groceries = 600\ncoffee = 30.00\ntransport = 200\nshopping = 150.5\n",
+  "t.csv": "Date,Description,Amount\n2026-01-01,X,1.00\n"
+ },
+ "steps": [
+  {
+   "args": [
+    "accounts"
+   ],
+   "exit": 6
+  },
+  {
+   "args": [
+    "report",
+    "monthly"
+   ],
+   "exit": 6
+  },
+  {
+   "args": [
+    "import",
+    "t.csv",
+    "--account",
+    "a"
+   ],
+   "exit": 6
+  }
+ ]
+}

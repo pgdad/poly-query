@@ -1,0 +1,12 @@
+{
+ "name": "h-embed-missing",
+ "files": {},
+ "args": [
+  "none.csv",
+  "SELECT 1"
+ ],
+ "exit": 1,
+ "stderr_contains": [
+  "error: "
+ ]
+}

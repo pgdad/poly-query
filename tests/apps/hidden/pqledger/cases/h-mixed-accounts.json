@@ -1,0 +1,1819 @@
+{
+ "name": "h-mixed-accounts",
+ "description": "three formats, overlapping statements, every report",
+ "files": {
+  "pqledger.conf": "[ledger]\ndata_dir = ledger\nrules_file = rules.conf\nbudget_file = budgets.conf\n\n[account card]\ndate_column = Transaction Date\ndate_format = MM/DD/YYYY\ncurrency_symbol = $\nthousands_separator = ,\ninvert_sign = true\n\n[account giro]\ndelimiter = ;\nskip_lines = 2\ndate_column = Buchungstag\ndate_format = DD.MM.YYYY\ndescription_column = Verwendungszweck\namount_mode = debit_credit\ndebit_column = Soll\ncredit_column = Haben\ndecimal_separator = ,\nthousands_separator = .\n",
+  "rules.conf": "# first match wins\ngroceries = WHOLE FOODS*, TRADER JOE*, SAFEWAY, REWE*, EDEKA*, LIDL*\ncoffee = SQ *BLUE BOTTLE*, STARBUCKS*, CAFé*\ntransport = SHELL*, CHEVRON*, UBER*, LYFT*, ARAL*, DB VERTRIEB*\nhousing = RENT*, MIETE*\nincome = PAYROLL*, GEHALT*\nshopping = AMAZON*, HOME DEPOT, REI\nutilities = PACIFIC GAS*, COMCAST*, STADTWERKE*, TELEKOM*\n",
+  "budgets.conf": "groceries = 600\ncoffee = 30.00\ntransport = 200\nshopping = 150.5\n",
+  "a.csv": "Date,Description,Amount\n2025-11-01,\"RENT - OAKWOOD APTS\",-1850.00\n2025-11-04,\"AMAZON.COM*2TU5J2 AMZN.COM/BILL\",-115.59\n2025-11-08,\"Netflix.com\",-15.31\n2025-11-08,\"7-Eleven 12\",-8.60\n2025-11-10,\"Trader Joe's #8304\",-41.81\n2025-11-11,\"Trader Joe's #7040\",-82.80\n2025-11-15,\"PAYROLL ACME CORP\",4250.00\n2025-11-17,\"Pacific Gas & Electric\",-86.94\n2025-11-18,\"Spotify USA\",-11.02\n2025-11-19,\"Home Depot #5694\",-271.89\n2025-11-19,\"SQ *Blue Bottle Coffee 4440\",-6.71\n2025-11-20,\"Chipotle 9574\",-14.44\n2025-11-23,\"AMAZON.COM*B44CVR AMZN.COM/BILL\",-72.62\n2025-11-25,\"Spotify USA\",-11.37\n2025-11-29,\"Chevron #576\",-66.23\n2025-11-30,\"Chevron #4365\",-83.54\n2025-12-01,\"RENT - OAKWOOD APTS\",-1850.00\n2025-12-04,\"Spotify USA\",-11.55\n2025-12-06,\"Chevron #3922\",-48.45\n2025-12-06,\"Comcast Cable\",-70.80\n2025-12-07,\"Pacific Gas & Electric\",-72.51\n2025-12-08,\"Trader Joe's #5404\",-41.17\n2025-12-08,\"Spotify USA\",-11.75\n2025-12-09,\"Lyft Ride 8321\",-20.49\n2025-12-10,\"Lyft Ride 7047\",-25.59\n2025-12-10,\"Trader Joe's #4543\",-103.65\n2025-12-15,\"PAYROLL ACME CORP\",4250.00\n2025-12-20,\"7-Eleven 12\",-17.01\n2025-12-22,\"7-Eleven 12\",17.01\n2025-12-23,\"SAFEWAY 9497\",-140.69\n2025-12-24,\"7-Eleven 12\",-7.52\n2025-12-24,\"Whole Foods Market #4778\",-75.34\n2025-12-31,\"UBER   *TRIP 62PZ56\",-16.08\n2026-01-01,\"RENT - OAKWOOD APTS\",-1850.00\n2026-01-01,\"Chevron #6169\",-76.94\n2026-01-03,\"CVS/PHARMACY #7134\",-54.95\n2026-01-07,\"Whole Foods Market #1490\",-74.66\n2026-01-09,\"7-Eleven 12\",-6.14\n2026-01-11,\"AMAZON.COM*FW6MFX AMZN.COM/BILL\",-159.85\n2026-01-11,\"SQ *Blue Bottle Coffee 4102\",-14.41\n2026-01-14,\"Pacific Gas & Electric\",-113.92\n2026-01-15,\"PAYROLL ACME CORP\",4250.00\n2026-01-16,\"REI #4373\",-242.74\n2026-01-18,\"Home Depot #4907\",-132.57\n2026-01-23,\"Whole Foods Market #4050\",-169.21\n2026-01-24,\"Starbucks Store 116\",-4.34\n2026-01-25,\"AMAZON.COM*96QJWH AMZN.COM/BILL\",-69.58\n2026-01-27,\"UBER   *TRIP 2BFDD2\",-44.93\n2026-01-30,\"Netflix.com\",-15.00\n2026-02-01,\"RENT - OAKWOOD APTS\",-1850.00\n2026-02-01,\"UBER   *TRIP MQT6M6\",-15.37\n2026-02-03,\"REI #2404\",-86.65\n2026-02-03,\"SQ *Blue Bottle Coffee 5940\",-5.28\n2026-02-03,\"UBER   *TRIP MQT6M6\",15.37\n2026-02-04,\"Starbucks Store 5476\",-7.62\n2026-02-04,\"SAFEWAY 6182\",-56.43\n2026-02-04,\"Shell Oil 3521\",-73.35\n2026-02-08,\"SQ *Blue Bottle Coffee 4901\",-4.30\n2026-02-10,\"7-Eleven 12\",-7.03\n2026-02-13,\"SAFEWAY 3783\",-140.78\n2026-02-15,\"PAYROLL ACME CORP\",4250.00\n2026-02-15,\"Pacific Gas & Electric\",-212.15\n2026-02-17,\"Home Depot #4238\",-233.10\n2026-02-19,\"CVS/PHARMACY #129\",-36.08\n2026-02-20,\"Netflix.com\",-15.39\n2026-02-24,\"Lyft Ride 1613\",-10.88\n",
+  "b.csv": "Date,Description,Amount\n2026-01-01,\"RENT - OAKWOOD APTS\",-1850.00\n2026-01-01,\"Chevron #6169\",-76.94\n2026-01-03,\"CVS/PHARMACY #7134\",-54.95\n2026-01-07,\"Whole Foods Market #1490\",-74.66\n2026-01-09,\"7-Eleven 12\",-6.14\n2026-01-11,\"AMAZON.COM*FW6MFX AMZN.COM/BILL\",-159.85\n2026-01-11,\"SQ *Blue Bottle Coffee 4102\",-14.41\n2026-01-14,\"Pacific Gas & Electric\",-113.92\n2026-01-15,\"PAYROLL ACME CORP\",4250.00\n2026-01-16,\"REI #4373\",-242.74\n2026-01-18,\"Home Depot #4907\",-132.57\n2026-01-23,\"Whole Foods Market #4050\",-169.21\n2026-01-24,\"Starbucks Store 116\",-4.34\n2026-01-25,\"AMAZON.COM*96QJWH AMZN.COM/BILL\",-69.58\n2026-01-27,\"UBER   *TRIP 2BFDD2\",-44.93\n2026-01-30,\"Netflix.com\",-15.00\n2026-02-01,\"RENT - OAKWOOD APTS\",-1850.00\n2026-02-01,\"UBER   *TRIP MQT6M6\",-15.37\n2026-02-03,\"REI #2404\",-86.65\n2026-02-03,\"SQ *Blue Bottle Coffee 5940\",-5.28\n2026-02-03,\"UBER   *TRIP MQT6M6\",15.37\n2026-02-04,\"Starbucks Store 5476\",-7.62\n2026-02-04,\"SAFEWAY 6182\",-56.43\n2026-02-04,\"Shell Oil 3521\",-73.35\n2026-02-08,\"SQ *Blue Bottle Coffee 4901\",-4.30\n2026-02-10,\"7-Eleven 12\",-7.03\n2026-02-13,\"SAFEWAY 3783\",-140.78\n2026-02-15,\"PAYROLL ACME CORP\",4250.00\n2026-02-15,\"Pacific Gas & Electric\",-212.15\n2026-02-17,\"Home Depot #4238\",-233.10\n2026-02-19,\"CVS/PHARMACY #129\",-36.08\n2026-02-20,\"Netflix.com\",-15.39\n2026-02-24,\"Lyft Ride 1613\",-10.88\n2026-03-01,\"RENT - OAKWOOD APTS\",-1850.00\n2026-03-02,\"Comcast Cable\",-90.84\n2026-03-04,\"Spotify USA\",-11.87\n2026-03-06,\"AMAZON.COM*KFP24T AMZN.COM/BILL\",-142.14\n2026-03-13,\"Chipotle 1699\",-10.90\n2026-03-15,\"PAYROLL ACME CORP\",4250.00\n2026-03-17,\"REI #6255\",-33.72\n2026-03-18,\"Chevron #6309\",-28.62\n2026-03-18,\"Starbucks Store 2955\",-5.81\n2026-03-20,\"Whole Foods Market #709\",-153.77\n2026-03-21,\"REI #805\",-261.82\n2026-03-22,\"Lyft Ride 747\",-22.51\n2026-03-22,\"Starbucks Store 2728\",-6.68\n2026-03-22,\"Whole Foods Market #709\",153.77\n2026-03-23,\"Chevron #3510\",-63.22\n2026-03-24,\"Chipotle 3995\",-19.28\n2026-03-25,\"Comcast Cable\",-76.13\n2026-04-01,\"RENT - OAKWOOD APTS\",-1850.00\n2026-04-01,\"Trader Joe's #889\",-76.64\n2026-04-01,\"REI #5465\",-269.79\n2026-04-03,\"Pacific Gas & Electric\",-136.97\n2026-04-03,\"SAFEWAY 4978\",-42.38\n2026-04-07,\"SQ *Blue Bottle Coffee 1145\",-6.42\n2026-04-11,\"Spotify USA\",-11.83\n2026-04-12,\"Chipotle 6788\",-18.41\n2026-04-13,\"Trader Joe's #5658\",-42.35\n2026-04-15,\"PAYROLL ACME CORP\",4250.00\n2026-04-19,\"7-Eleven 12\",-3.49\n2026-04-25,\"7-Eleven 12\",-15.73\n2026-04-27,\"SAFEWAY 7484\",-134.13\n2026-04-28,\"Trader Joe's #4867\",-82.62\n2026-04-29,\"Home Depot #8459\",-310.29\n2026-04-29,\"Netflix.com\",-15.87\n2026-04-29,\"SAFEWAY 7484\",134.13\n",
+  "card.csv": "\"Transaction Date\",\"Description\",\"Amount\"\n12/04/2025,\"AMAZON.COM*CKJWK6 AMZN.COM/BILL\",\"$213.13\"\n12/06/2025,\"AMAZON.COM*CKJWK6 AMZN.COM/BILL\",\"($213.13)\"\n12/07/2025,\"Home Depot #7337\",\"$167.92\"\n12/12/2025,\"CVS/PHARMACY #9598\",\"$33.74\"\n12/17/2025,\"UBER   *TRIP TJJ9SN\",\"$22.05\"\n12/19/2025,\"Spotify USA\",\"$11.37\"\n12/21/2025,\"Lyft Ride 3799\",\"$14.26\"\n12/22/2025,\"Chipotle 606\",\"$15.91\"\n12/23/2025,\"Comcast Cable\",\"$102.09\"\n12/28/2025,\"SQ *Blue Bottle Coffee 6398\",\"$8.75\"\n12/31/2025,\"SQ *Blue Bottle Coffee 6651\",\"$5.54\"\n01/04/2026,\"Shell Oil 2354\",\"$49.23\"\n01/05/2026,\"SQ *Blue Bottle Coffee 6560\",\"$9.81\"\n01/06/2026,\"UBER   *TRIP MZJGLM\",\"$13.82\"\n01/07/2026,\"Home Depot #8312\",\"$220.51\"\n01/10/2026,\"7-Eleven 12\",\"$17.07\"\n01/11/2026,\"AMAZON.COM*U59E7F AMZN.COM/BILL\",\"$180.15\"\n01/20/2026,\"Home Depot #1393\",\"$222.83\"\n01/25/2026,\"AMAZON.COM*9ZNSQG AMZN.COM/BILL\",\"$10.37\"\n01/28/2026,\"Chipotle 7534\",\"$18.72\"\n01/30/2026,\"Shell Oil 5637\",\"$78.18\"\n02/01/2026,\"REI #7678\",\"$106.16\"\n02/01/2026,\"Starbucks Store 2182\",\"$8.50\"\n02/12/2026,\"SAFEWAY 730\",\"$144.24\"\n02/13/2026,\"AMAZON.COM*8J4PPP AMZN.COM/BILL\",\"$155.57\"\n02/14/2026,\"Trader Joe's #4253\",\"$115.78\"\n02/17/2026,\"Starbucks Store 9957\",\"$7.26\"\n02/18/2026,\"Starbucks Store 2867\",\"$4.95\"\n02/18/2026,\"Comcast Cable\",\"$106.70\"\n02/27/2026,\"Comcast Cable\",\"$74.98\"\n02/28/2026,\"SAFEWAY 9994\",\"$45.46\"\n02/28/2026,\"SAFEWAY 9994\",\"($45.46)\"\n03/01/2026,\"SAFEWAY 8521\",\"$42.46\"\n03/02/2026,\"Starbucks Store 7709\",\"$7.40\"\n03/13/2026,\"SAFEWAY 6421\",\"$90.33\"\n03/16/2026,\"CVS/PHARMACY #9465\",\"$47.80\"\n03/18/2026,\"7-Eleven 12\",\"$4.78\"\n03/18/2026,\"Comcast Cable\",\"$70.33\"\n03/20/2026,\"Spotify USA\",\"$11.16\"\n03/22/2026,\"UBER   *TRIP N93THR\",\"$21.02\"\n03/26/2026,\"SAFEWAY 7609\",\"$146.91\"\n03/27/2026,\"Spotify USA\",\"$11.75\"\n",
+  "giro.csv": "Kontoumsätze Girokonto;;;\r\nZeitraum;;;\r\nBuchungstag;Verwendungszweck;Soll;Haben\r\n01.12.2025;Miete Hausverwaltung;1.120,00;\r\n03.12.2025;Bäckerei Schäfer;5,03;\r\n08.12.2025;REWE Markt GmbH 2152;29,04;\r\n12.12.2025;Bäckerei Schäfer;10,24;\r\n12.12.2025;Aral Tankstelle 6086;53,98;\r\n15.12.2025;Gehalt ACME GmbH;;3.810,55\r\n15.12.2025;Lidl Dienstleistung 4176;27,01;\r\n15.12.2025;REWE Markt GmbH 6226;42,63;\r\n16.12.2025;Lidl Dienstleistung 2486;44,47;\r\n20.12.2025;Stadtwerke München;100,90;\r\n27.12.2025;Stadtwerke München;83,64;\r\n27.12.2025;Stadtwerke München;89,53;\r\n01.01.2026;Miete Hausverwaltung;1.120,00;\r\n03.01.2026;REWE Markt GmbH 4934;100,77;\r\n05.01.2026;DB Vertrieb GmbH;30,63;\r\n13.01.2026;Telekom Deutschland;38,00;\r\n13.01.2026;Telekom Deutschland;58,08;\r\n15.01.2026;Gehalt ACME GmbH;;3.810,55\r\n20.01.2026;EDEKA Center 4958;21,96;\r\n20.01.2026;Bäckerei Schäfer;14,53;\r\n20.01.2026;DB Vertrieb GmbH;121,41;\r\n21.01.2026;EDEKA Center 9053;22,22;\r\n22.01.2026;DB Vertrieb GmbH;;121,41\r\n25.01.2026;Telekom Deutschland;51,01;\r\n30.01.2026;Bäckerei Schäfer;13,80;\r\n01.02.2026;Miete Hausverwaltung;1.120,00;\r\n04.02.2026;EDEKA Center 6227;77,14;\r\n05.02.2026;DB Vertrieb GmbH;66,78;\r\n06.02.2026;EDEKA Center 6227;;77,14\r\n12.02.2026;Aral Tankstelle 9530;70,38;\r\n15.02.2026;Gehalt ACME GmbH;;3.810,55\r\n16.02.2026;Lidl Dienstleistung 2448;48,53;\r\n18.02.2026;Stadtwerke München;67,78;\r\n23.02.2026;REWE Markt GmbH 2853;104,06;\r\n24.02.2026;REWE Markt GmbH 9981;72,57;\r\n25.02.2026;REWE Markt GmbH 5736;70,97;\r\n26.02.2026;Lidl Dienstleistung 1926;26,93;\r\n27.02.2026;Aral Tankstelle 581;87,38;\r\n"
+ },
+ "steps": [
+  {
+   "args": [
+    "init"
+   ],
+   "exit": 0,
+   "stdout": "initialized ledger\n"
+  },
+  {
+   "args": [
+    "import",
+    "a.csv",
+    "--account",
+    "checking"
+   ],
+   "exit": 0,
+   "stdout": "batch 1: imported 66, duplicates 0\n"
+  },
+  {
+   "args": [
+    "import",
+    "card.csv",
+    "--account",
+    "card"
+   ],
+   "exit": 0,
+   "stdout": "batch 2: imported 42, duplicates 0\n"
+  },
+  {
+   "args": [
+    "import",
+    "b.csv",
+    "--account",
+    "checking"
+   ],
+   "exit": 0,
+   "stdout": "batch 3: imported 34, duplicates 33\n"
+  },
+  {
+   "args": [
+    "import",
+    "giro.csv",
+    "--account",
+    "giro"
+   ],
+   "exit": 0,
+   "stdout": "batch 4: imported 38, duplicates 0\n"
+  },
+  {
+   "args": [
+    "import",
+    "card.csv",
+    "--account",
+    "card"
+   ],
+   "exit": 0,
+   "stdout": "batch 5: imported 0, duplicates 42\n"
+  },
+  {
+   "ledger": {
+    "dir": "ledger",
+    "transactions": [
+     [
+      1,
+      "checking",
+      "2025-11-01",
+      "RENT - OAKWOOD APTS",
+      "RENT - OAKWOOD APTS",
+      "-1850.00",
+      1
+     ],
+     [
+      2,
+      "checking",
+      "2025-11-04",
+      "AMAZON.COM*2TU5J2 AMZN.COM/BILL",
+      "AMAZON.COM*2TU5J2 AMZN.COM/BILL",
+      "-115.59",
+      1
+     ],
+     [
+      3,
+      "checking",
+      "2025-11-08",
+      "Netflix.com",
+      "NETFLIX.COM",
+      "-15.31",
+      1
+     ],
+     [
+      4,
+      "checking",
+      "2025-11-08",
+      "7-Eleven 12",
+      "7-ELEVEN 12",
+      "-8.60",
+      1
+     ],
+     [
+      5,
+      "checking",
+      "2025-11-10",
+      "Trader Joe's #8304",
+      "TRADER JOE'S",
+      "-41.81",
+      1
+     ],
+     [
+      6,
+      "checking",
+      "2025-11-11",
+      "Trader Joe's #7040",
+      "TRADER JOE'S",
+      "-82.80",
+      1
+     ],
+     [
+      7,
+      "checking",
+      "2025-11-15",
+      "PAYROLL ACME CORP",
+      "PAYROLL ACME CORP",
+      "4250.00",
+      1
+     ],
+     [
+      8,
+      "checking",
+      "2025-11-17",
+      "Pacific Gas & Electric",
+      "PACIFIC GAS & ELECTRIC",
+      "-86.94",
+      1
+     ],
+     [
+      9,
+      "checking",
+      "2025-11-18",
+      "Spotify USA",
+      "SPOTIFY USA",
+      "-11.02",
+      1
+     ],
+     [
+      10,
+      "checking",
+      "2025-11-19",
+      "Home Depot #5694",
+      "HOME DEPOT",
+      "-271.89",
+      1
+     ],
+     [
+      11,
+      "checking",
+      "2025-11-19",
+      "SQ *Blue Bottle Coffee 4440",
+      "SQ *BLUE BOTTLE COFFEE",
+      "-6.71",
+      1
+     ],
+     [
+      12,
+      "checking",
+      "2025-11-20",
+      "Chipotle 9574",
+      "CHIPOTLE",
+      "-14.44",
+      1
+     ],
+     [
+      13,
+      "checking",
+      "2025-11-23",
+      "AMAZON.COM*B44CVR AMZN.COM/BILL",
+      "AMAZON.COM*B44CVR AMZN.COM/BILL",
+      "-72.62",
+      1
+     ],
+     [
+      14,
+      "checking",
+      "2025-11-25",
+      "Spotify USA",
+      "SPOTIFY USA",
+      "-11.37",
+      1
+     ],
+     [
+      15,
+      "checking",
+      "2025-11-29",
+      "Chevron #576",
+      "CHEVRON",
+      "-66.23",
+      1
+     ],
+     [
+      16,
+      "checking",
+      "2025-11-30",
+      "Chevron #4365",
+      "CHEVRON",
+      "-83.54",
+      1
+     ],
+     [
+      17,
+      "checking",
+      "2025-12-01",
+      "RENT - OAKWOOD APTS",
+      "RENT - OAKWOOD APTS",
+      "-1850.00",
+      1
+     ],
+     [
+      18,
+      "checking",
+      "2025-12-04",
+      "Spotify USA",
+      "SPOTIFY USA",
+      "-11.55",
+      1
+     ],
+     [
+      19,
+      "checking",
+      "2025-12-06",
+      "Chevron #3922",
+      "CHEVRON",
+      "-48.45",
+      1
+     ],
+     [
+      20,
+      "checking",
+      "2025-12-06",
+      "Comcast Cable",
+      "COMCAST CABLE",
+      "-70.80",
+      1
+     ],
+     [
+      21,
+      "checking",
+      "2025-12-07",
+      "Pacific Gas & Electric",
+      "PACIFIC GAS & ELECTRIC",
+      "-72.51",
+      1
+     ],
+     [
+      22,
+      "checking",
+      "2025-12-08",
+      "Trader Joe's #5404",
+      "TRADER JOE'S",
+      "-41.17",
+      1
+     ],
+     [
+      23,
+      "checking",
+      "2025-12-08",
+      "Spotify USA",
+      "SPOTIFY USA",
+      "-11.75",
+      1
+     ],
+     [
+      24,
+      "checking",
+      "2025-12-09",
+      "Lyft Ride 8321",
+      "LYFT RIDE",
+      "-20.49",
+      1
+     ],
+     [
+      25,
+      "checking",
+      "2025-12-10",
+      "Lyft Ride 7047",
+      "LYFT RIDE",
+      "-25.59",
+      1
+     ],
+     [
+      26,
+      "checking",
+      "2025-12-10",
+      "Trader Joe's #4543",
+      "TRADER JOE'S",
+      "-103.65",
+      1
+     ],
+     [
+      27,
+      "checking",
+      "2025-12-15",
+      "PAYROLL ACME CORP",
+      "PAYROLL ACME CORP",
+      "4250.00",
+      1
+     ],
+     [
+      28,
+      "checking",
+      "2025-12-20",
+      "7-Eleven 12",
+      "7-ELEVEN 12",
+      "-17.01",
+      1
+     ],
+     [
+      29,
+      "checking",
+      "2025-12-22",
+      "7-Eleven 12",
+      "7-ELEVEN 12",
+      "17.01",
+      1
+     ],
+     [
+      30,
+      "checking",
+      "2025-12-23",
+      "SAFEWAY 9497",
+      "SAFEWAY",
+      "-140.69",
+      1
+     ],
+     [
+      31,
+      "checking",
+      "2025-12-24",
+      "7-Eleven 12",
+      "7-ELEVEN 12",
+      "-7.52",
+      1
+     ],
+     [
+      32,
+      "checking",
+      "2025-12-24",
+      "Whole Foods Market #4778",
+      "WHOLE FOODS MARKET",
+      "-75.34",
+      1
+     ],
+     [
+      33,
+      "checking",
+      "2025-12-31",
+      "UBER   *TRIP 62PZ56",
+      "UBER *TRIP 62PZ56",
+      "-16.08",
+      1
+     ],
+     [
+      34,
+      "checking",
+      "2026-01-01",
+      "RENT - OAKWOOD APTS",
+      "RENT - OAKWOOD APTS",
+      "-1850.00",
+      1
+     ],
+     [
+      35,
+      "checking",
+      "2026-01-01",
+      "Chevron #6169",
+      "CHEVRON",
+      "-76.94",
+      1
+     ],
+     [
+      36,
+      "checking",
+      "2026-01-03",
+      "CVS/PHARMACY #7134",
+      "CVS/PHARMACY",
+      "-54.95",
+      1
+     ],
+     [
+      37,
+      "checking",
+      "2026-01-07",
+      "Whole Foods Market #1490",
+      "WHOLE FOODS MARKET",
+      "-74.66",
+      1
+     ],
+     [
+      38,
+      "checking",
+      "2026-01-09",
+      "7-Eleven 12",
+      "7-ELEVEN 12",
+      "-6.14",
+      1
+     ],
+     [
+      39,
+      "checking",
+      "2026-01-11",
+      "AMAZON.COM*FW6MFX AMZN.COM/BILL",
+      "AMAZON.COM*FW6MFX AMZN.COM/BILL",
+      "-159.85",
+      1
+     ],
+     [
+      40,
+      "checking",
+      "2026-01-11",
+      "SQ *Blue Bottle Coffee 4102",
+      "SQ *BLUE BOTTLE COFFEE",
+      "-14.41",
+      1
+     ],
+     [
+      41,
+      "checking",
+      "2026-01-14",
+      "Pacific Gas & Electric",
+      "PACIFIC GAS & ELECTRIC",
+      "-113.92",
+      1
+     ],
+     [
+      42,
+      "checking",
+      "2026-01-15",
+      "PAYROLL ACME CORP",
+      "PAYROLL ACME CORP",
+      "4250.00",
+      1
+     ],
+     [
+      43,
+      "checking",
+      "2026-01-16",
+      "REI #4373",
+      "REI",
+      "-242.74",
+      1
+     ],
+     [
+      44,
+      "checking",
+      "2026-01-18",
+      "Home Depot #4907",
+      "HOME DEPOT",
+      "-132.57",
+      1
+     ],
+     [
+      45,
+      "checking",
+      "2026-01-23",
+      "Whole Foods Market #4050",
+      "WHOLE FOODS MARKET",
+      "-169.21",
+      1
+     ],
+     [
+      46,
+      "checking",
+      "2026-01-24",
+      "Starbucks Store 116",
+      "STARBUCKS STORE",
+      "-4.34",
+      1
+     ],
+     [
+      47,
+      "checking",
+      "2026-01-25",
+      "AMAZON.COM*96QJWH AMZN.COM/BILL",
+      "AMAZON.COM*96QJWH AMZN.COM/BILL",
+      "-69.58",
+      1
+     ],
+     [
+      48,
+      "checking",
+      "2026-01-27",
+      "UBER   *TRIP 2BFDD2",
+      "UBER *TRIP 2BFDD2",
+      "-44.93",
+      1
+     ],
+     [
+      49,
+      "checking",
+      "2026-01-30",
+      "Netflix.com",
+      "NETFLIX.COM",
+      "-15.00",
+      1
+     ],
+     [
+      50,
+      "checking",
+      "2026-02-01",
+      "RENT - OAKWOOD APTS",
+      "RENT - OAKWOOD APTS",
+      "-1850.00",
+      1
+     ],
+     [
+      51,
+      "checking",
+      "2026-02-01",
+      "UBER   *TRIP MQT6M6",
+      "UBER *TRIP MQT6M6",
+      "-15.37",
+      1
+     ],
+     [
+      52,
+      "checking",
+      "2026-02-03",
+      "REI #2404",
+      "REI",
+      "-86.65",
+      1
+     ],
+     [
+      53,
+      "checking",
+      "2026-02-03",
+      "SQ *Blue Bottle Coffee 5940",
+      "SQ *BLUE BOTTLE COFFEE",
+      "-5.28",
+      1
+     ],
+     [
+      54,
+      "checking",
+      "2026-02-03",
+      "UBER   *TRIP MQT6M6",
+      "UBER *TRIP MQT6M6",
+      "15.37",
+      1
+     ],
+     [
+      55,
+      "checking",
+      "2026-02-04",
+      "Starbucks Store 5476",
+      "STARBUCKS STORE",
+      "-7.62",
+      1
+     ],
+     [
+      56,
+      "checking",
+      "2026-02-04",
+      "SAFEWAY 6182",
+      "SAFEWAY",
+      "-56.43",
+      1
+     ],
+     [
+      57,
+      "checking",
+      "2026-02-04",
+      "Shell Oil 3521",
+      "SHELL OIL",
+      "-73.35",
+      1
+     ],
+     [
+      58,
+      "checking",
+      "2026-02-08",
+      "SQ *Blue Bottle Coffee 4901",
+      "SQ *BLUE BOTTLE COFFEE",
+      "-4.30",
+      1
+     ],
+     [
+      59,
+      "checking",
+      "2026-02-10",
+      "7-Eleven 12",
+      "7-ELEVEN 12",
+      "-7.03",
+      1
+     ],
+     [
+      60,
+      "checking",
+      "2026-02-13",
+      "SAFEWAY 3783",
+      "SAFEWAY",
+      "-140.78",
+      1
+     ],
+     [
+      61,
+      "checking",
+      "2026-02-15",
+      "PAYROLL ACME CORP",
+      "PAYROLL ACME CORP",
+      "4250.00",
+      1
+     ],
+     [
+      62,
+      "checking",
+      "2026-02-15",
+      "Pacific Gas & Electric",
+      "PACIFIC GAS & ELECTRIC",
+      "-212.15",
+      1
+     ],
+     [
+      63,
+      "checking",
+      "2026-02-17",
+      "Home Depot #4238",
+      "HOME DEPOT",
+      "-233.10",
+      1
+     ],
+     [
+      64,
+      "checking",
+      "2026-02-19",
+      "CVS/PHARMACY #129",
+      "CVS/PHARMACY",
+      "-36.08",
+      1
+     ],
+     [
+      65,
+      "checking",
+      "2026-02-20",
+      "Netflix.com",
+      "NETFLIX.COM",
+      "-15.39",
+      1
+     ],
+     [
+      66,
+      "checking",
+      "2026-02-24",
+      "Lyft Ride 1613",
+      "LYFT RIDE",
+      "-10.88",
+      1
+     ],
+     [
+      67,
+      "card",
+      "2025-12-04",
+      "AMAZON.COM*CKJWK6 AMZN.COM/BILL",
+      "AMAZON.COM*CKJWK6 AMZN.COM/BILL",
+      "-213.13",
+      2
+     ],
+     [
+      68,
+      "card",
+      "2025-12-06",
+      "AMAZON.COM*CKJWK6 AMZN.COM/BILL",
+      "AMAZON.COM*CKJWK6 AMZN.COM/BILL",
+      "213.13",
+      2
+     ],
+     [
+      69,
+      "card",
+      "2025-12-07",
+      "Home Depot #7337",
+      "HOME DEPOT",
+      "-167.92",
+      2
+     ],
+     [
+      70,
+      "card",
+      "2025-12-12",
+      "CVS/PHARMACY #9598",
+      "CVS/PHARMACY",
+      "-33.74",
+      2
+     ],
+     [
+      71,
+      "card",
+      "2025-12-17",
+      "UBER   *TRIP TJJ9SN",
+      "UBER *TRIP TJJ9SN",
+      "-22.05",
+      2
+     ],
+     [
+      72,
+      "card",
+      "2025-12-19",
+      "Spotify USA",
+      "SPOTIFY USA",
+      "-11.37",
+      2
+     ],
+     [
+      73,
+      "card",
+      "2025-12-21",
+      "Lyft Ride 3799",
+      "LYFT RIDE",
+      "-14.26",
+      2
+     ],
+     [
+      74,
+      "card",
+      "2025-12-22",
+      "Chipotle 606",
+      "CHIPOTLE",
+      "-15.91",
+      2
+     ],
+     [
+      75,
+      "card",
+      "2025-12-23",
+      "Comcast Cable",
+      "COMCAST CABLE",
+      "-102.09",
+      2
+     ],
+     [
+      76,
+      "card",
+      "2025-12-28",
+      "SQ *Blue Bottle Coffee 6398",
+      "SQ *BLUE BOTTLE COFFEE",
+      "-8.75",
+      2
+     ],
+     [
+      77,
+      "card",
+      "2025-12-31",
+      "SQ *Blue Bottle Coffee 6651",
+      "SQ *BLUE BOTTLE COFFEE",
+      "-5.54",
+      2
+     ],
+     [
+      78,
+      "card",
+      "2026-01-04",
+      "Shell Oil 2354",
+      "SHELL OIL",
+      "-49.23",
+      2
+     ],
+     [
+      79,
+      "card",
+      "2026-01-05",
+      "SQ *Blue Bottle Coffee 6560",
+      "SQ *BLUE BOTTLE COFFEE",
+      "-9.81",
+      2
+     ],
+     [
+      80,
+      "card",
+      "2026-01-06",
+      "UBER   *TRIP MZJGLM",
+      "UBER *TRIP MZJGLM",
+      "-13.82",
+      2
+     ],
+     [
+      81,
+      "card",
+      "2026-01-07",
+      "Home Depot #8312",
+      "HOME DEPOT",
+      "-220.51",
+      2
+     ],
+     [
+      82,
+      "card",
+      "2026-01-10",
+      "7-Eleven 12",
+      "7-ELEVEN 12",
+      "-17.07",
+      2
+     ],
+     [
+      83,
+      "card",
+      "2026-01-11",
+      "AMAZON.COM*U59E7F AMZN.COM/BILL",
+      "AMAZON.COM*U59E7F AMZN.COM/BILL",
+      "-180.15",
+      2
+     ],
+     [
+      84,
+      "card",
+      "2026-01-20",
+      "Home Depot #1393",
+      "HOME DEPOT",
+      "-222.83",
+      2
+     ],
+     [
+      85,
+      "card",
+      "2026-01-25",
+      "AMAZON.COM*9ZNSQG AMZN.COM/BILL",
+      "AMAZON.COM*9ZNSQG AMZN.COM/BILL",
+      "-10.37",
+      2
+     ],
+     [
+      86,
+      "card",
+      "2026-01-28",
+      "Chipotle 7534",
+      "CHIPOTLE",
+      "-18.72",
+      2
+     ],
+     [
+      87,
+      "card",
+      "2026-01-30",
+      "Shell Oil 5637",
+      "SHELL OIL",
+      "-78.18",
+      2
+     ],
+     [
+      88,
+      "card",
+      "2026-02-01",
+      "REI #7678",
+      "REI",
+      "-106.16",
+      2
+     ],
+     [
+      89,
+      "card",
+      "2026-02-01",
+      "Starbucks Store 2182",
+      "STARBUCKS STORE",
+      "-8.50",
+      2
+     ],
+     [
+      90,
+      "card",
+      "2026-02-12",
+      "SAFEWAY 730",
+      "SAFEWAY",
+      "-144.24",
+      2
+     ],
+     [
+      91,
+      "card",
+      "2026-02-13",
+      "AMAZON.COM*8J4PPP AMZN.COM/BILL",
+      "AMAZON.COM*8J4PPP AMZN.COM/BILL",
+      "-155.57",
+      2
+     ],
+     [
+      92,
+      "card",
+      "2026-02-14",
+      "Trader Joe's #4253",
+      "TRADER JOE'S",
+      "-115.78",
+      2
+     ],
+     [
+      93,
+      "card",
+      "2026-02-17",
+      "Starbucks Store 9957",
+      "STARBUCKS STORE",
+      "-7.26",
+      2
+     ],
+     [
+      94,
+      "card",
+      "2026-02-18",
+      "Starbucks Store 2867",
+      "STARBUCKS STORE",
+      "-4.95",
+      2
+     ],
+     [
+      95,
+      "card",
+      "2026-02-18",
+      "Comcast Cable",
+      "COMCAST CABLE",
+      "-106.70",
+      2
+     ],
+     [
+      96,
+      "card",
+      "2026-02-27",
+      "Comcast Cable",
+      "COMCAST CABLE",
+      "-74.98",
+      2
+     ],
+     [
+      97,
+      "card",
+      "2026-02-28",
+      "SAFEWAY 9994",
+      "SAFEWAY",
+      "-45.46",
+      2
+     ],
+     [
+      98,
+      "card",
+      "2026-02-28",
+      "SAFEWAY 9994",
+      "SAFEWAY",
+      "45.46",
+      2
+     ],
+     [
+      99,
+      "card",
+      "2026-03-01",
+      "SAFEWAY 8521",
+      "SAFEWAY",
+      "-42.46",
+      2
+     ],
+     [
+      100,
+      "card",
+      "2026-03-02",
+      "Starbucks Store 7709",
+      "STARBUCKS STORE",
+      "-7.40",
+      2
+     ],
+     [
+      101,
+      "card",
+      "2026-03-13",
+      "SAFEWAY 6421",
+      "SAFEWAY",
+      "-90.33",
+      2
+     ],
+     [
+      102,
+      "card",
+      "2026-03-16",
+      "CVS/PHARMACY #9465",
+      "CVS/PHARMACY",
+      "-47.80",
+      2
+     ],
+     [
+      103,
+      "card",
+      "2026-03-18",
+      "7-Eleven 12",
+      "7-ELEVEN 12",
+      "-4.78",
+      2
+     ],
+     [
+      104,
+      "card",
+      "2026-03-18",
+      "Comcast Cable",
+      "COMCAST CABLE",
+      "-70.33",
+      2
+     ],
+     [
+      105,
+      "card",
+      "2026-03-20",
+      "Spotify USA",
+      "SPOTIFY USA",
+      "-11.16",
+      2
+     ],
+     [
+      106,
+      "card",
+      "2026-03-22",
+      "UBER   *TRIP N93THR",
+      "UBER *TRIP N93THR",
+      "-21.02",
+      2
+     ],
+     [
+      107,
+      "card",
+      "2026-03-26",
+      "SAFEWAY 7609",
+      "SAFEWAY",
+      "-146.91",
+      2
+     ],
+     [
+      108,
+      "card",
+      "2026-03-27",
+      "Spotify USA",
+      "SPOTIFY USA",
+      "-11.75",
+      2
+     ],
+     [
+      109,
+      "checking",
+      "2026-03-01",
+      "RENT - OAKWOOD APTS",
+      "RENT - OAKWOOD APTS",
+      "-1850.00",
+      3
+     ],
+     [
+      110,
+      "checking",
+      "2026-03-02",
+      "Comcast Cable",
+      "COMCAST CABLE",
+      "-90.84",
+      3
+     ],
+     [
+      111,
+      "checking",
+      "2026-03-04",
+      "Spotify USA",
+      "SPOTIFY USA",
+      "-11.87",
+      3
+     ],
+     [
+      112,
+      "checking",
+      "2026-03-06",
+      "AMAZON.COM*KFP24T AMZN.COM/BILL",
+      "AMAZON.COM*KFP24T AMZN.COM/BILL",
+      "-142.14",
+      3
+     ],
+     [
+      113,
+      "checking",
+      "2026-03-13",
+      "Chipotle 1699",
+      "CHIPOTLE",
+      "-10.90",
+      3
+     ],
+     [
+      114,
+      "checking",
+      "2026-03-15",
+      "PAYROLL ACME CORP",
+      "PAYROLL ACME CORP",
+      "4250.00",
+      3
+     ],
+     [
+      115,
+      "checking",
+      "2026-03-17",
+      "REI #6255",
+      "REI",
+      "-33.72",
+      3
+     ],
+     [
+      116,
+      "checking",
+      "2026-03-18",
+      "Chevron #6309",
+      "CHEVRON",
+      "-28.62",
+      3
+     ],
+     [
+      117,
+      "checking",
+      "2026-03-18",
+      "Starbucks Store 2955",
+      "STARBUCKS STORE",
+      "-5.81",
+      3
+     ],
+     [
+      118,
+      "checking",
+      "2026-03-20",
+      "Whole Foods Market #709",
+      "WHOLE FOODS MARKET",
+      "-153.77",
+      3
+     ],
+     [
+      119,
+      "checking",
+      "2026-03-21",
+      "REI #805",
+      "REI",
+      "-261.82",
+      3
+     ],
+     [
+      120,
+      "checking",
+      "2026-03-22",
+      "Lyft Ride 747",
+      "LYFT RIDE",
+      "-22.51",
+      3
+     ],
+     [
+      121,
+      "checking",
+      "2026-03-22",
+      "Starbucks Store 2728",
+      "STARBUCKS STORE",
+      "-6.68",
+      3
+     ],
+     [
+      122,
+      "checking",
+      "2026-03-22",
+      "Whole Foods Market #709",
+      "WHOLE FOODS MARKET",
+      "153.77",
+      3
+     ],
+     [
+      123,
+      "checking",
+      "2026-03-23",
+      "Chevron #3510",
+      "CHEVRON",
+      "-63.22",
+      3
+     ],
+     [
+      124,
+      "checking",
+      "2026-03-24",
+      "Chipotle 3995",
+      "CHIPOTLE",
+      "-19.28",
+      3
+     ],
+     [
+      125,
+      "checking",
+      "2026-03-25",
+      "Comcast Cable",
+      "COMCAST CABLE",
+      "-76.13",
+      3
+     ],
+     [
+      126,
+      "checking",
+      "2026-04-01",
+      "RENT - OAKWOOD APTS",
+      "RENT - OAKWOOD APTS",
+      "-1850.00",
+      3
+     ],
+     [
+      127,
+      "checking",
+      "2026-04-01",
+      "Trader Joe's #889",
+      "TRADER JOE'S",
+      "-76.64",
+      3
+     ],
+     [
+      128,
+      "checking",
+      "2026-04-01",
+      "REI #5465",
+      "REI",
+      "-269.79",
+      3
+     ],
+     [
+      129,
+      "checking",
+      "2026-04-03",
+      "Pacific Gas & Electric",
+      "PACIFIC GAS & ELECTRIC",
+      "-136.97",
+      3
+     ],
+     [
+      130,
+      "checking",
+      "2026-04-03",
+      "SAFEWAY 4978",
+      "SAFEWAY",
+      "-42.38",
+      3
+     ],
+     [
+      131,
+      "checking",
+      "2026-04-07",
+      "SQ *Blue Bottle Coffee 1145",
+      "SQ *BLUE BOTTLE COFFEE",
+      "-6.42",
+      3
+     ],
+     [
+      132,
+      "checking",
+      "2026-04-11",
+      "Spotify USA",
+      "SPOTIFY USA",
+      "-11.83",
+      3
+     ],
+     [
+      133,
+      "checking",
+      "2026-04-12",
+      "Chipotle 6788",
+      "CHIPOTLE",
+      "-18.41",
+      3
+     ],
+     [
+      134,
+      "checking",
+      "2026-04-13",
+      "Trader Joe's #5658",
+      "TRADER JOE'S",
+      "-42.35",
+      3
+     ],
+     [
+      135,
+      "checking",
+      "2026-04-15",
+      "PAYROLL ACME CORP",
+      "PAYROLL ACME CORP",
+      "4250.00",
+      3
+     ],
+     [
+      136,
+      "checking",
+      "2026-04-19",
+      "7-Eleven 12",
+      "7-ELEVEN 12",
+      "-3.49",
+      3
+     ],
+     [
+      137,
+      "checking",
+      "2026-04-25",
+      "7-Eleven 12",
+      "7-ELEVEN 12",
+      "-15.73",
+      3
+     ],
+     [
+      138,
+      "checking",
+      "2026-04-27",
+      "SAFEWAY 7484",
+      "SAFEWAY",
+      "-134.13",
+      3
+     ],
+     [
+      139,
+      "checking",
+      "2026-04-28",
+      "Trader Joe's #4867",
+      "TRADER JOE'S",
+      "-82.62",
+      3
+     ],
+     [
+      140,
+      "checking",
+      "2026-04-29",
+      "Home Depot #8459",
+      "HOME DEPOT",
+      "-310.29",
+      3
+     ],
+     [
+      141,
+      "checking",
+      "2026-04-29",
+      "Netflix.com",
+      "NETFLIX.COM",
+      "-15.87",
+      3
+     ],
+     [
+      142,
+      "checking",
+      "2026-04-29",
+      "SAFEWAY 7484",
+      "SAFEWAY",
+      "134.13",
+      3
+     ],
+     [
+      143,
+      "giro",
+      "2025-12-01",
+      "Miete Hausverwaltung",
+      "MIETE HAUSVERWALTUNG",
+      "-1120.00",
+      4
+     ],
+     [
+      144,
+      "giro",
+      "2025-12-03",
+      "Bäckerei Schäfer",
+      "BäCKEREI SCHäFER",
+      "-5.03",
+      4
+     ],
+     [
+      145,
+      "giro",
+      "2025-12-08",
+      "REWE Markt GmbH 2152",
+      "REWE MARKT GMBH",
+      "-29.04",
+      4
+     ],
+     [
+      146,
+      "giro",
+      "2025-12-12",
+      "Bäckerei Schäfer",
+      "BäCKEREI SCHäFER",
+      "-10.24",
+      4
+     ],
+     [
+      147,
+      "giro",
+      "2025-12-12",
+      "Aral Tankstelle 6086",
+      "ARAL TANKSTELLE",
+      "-53.98",
+      4
+     ],
+     [
+      148,
+      "giro",
+      "2025-12-15",
+      "Gehalt ACME GmbH",
+      "GEHALT ACME GMBH",
+      "3810.55",
+      4
+     ],
+     [
+      149,
+      "giro",
+      "2025-12-15",
+      "Lidl Dienstleistung 4176",
+      "LIDL DIENSTLEISTUNG",
+      "-27.01",
+      4
+     ],
+     [
+      150,
+      "giro",
+      "2025-12-15",
+      "REWE Markt GmbH 6226",
+      "REWE MARKT GMBH",
+      "-42.63",
+      4
+     ],
+     [
+      151,
+      "giro",
+      "2025-12-16",
+      "Lidl Dienstleistung 2486",
+      "LIDL DIENSTLEISTUNG",
+      "-44.47",
+      4
+     ],
+     [
+      152,
+      "giro",
+      "2025-12-20",
+      "Stadtwerke München",
+      "STADTWERKE MüNCHEN",
+      "-100.90",
+      4
+     ],
+     [
+      153,
+      "giro",
+      "2025-12-27",
+      "Stadtwerke München",
+      "STADTWERKE MüNCHEN",
+      "-83.64",
+      4
+     ],
+     [
+      154,
+      "giro",
+      "2025-12-27",
+      "Stadtwerke München",
+      "STADTWERKE MüNCHEN",
+      "-89.53",
+      4
+     ],
+     [
+      155,
+      "giro",
+      "2026-01-01",
+      "Miete Hausverwaltung",
+      "MIETE HAUSVERWALTUNG",
+      "-1120.00",
+      4
+     ],
+     [
+      156,
+      "giro",
+      "2026-01-03",
+      "REWE Markt GmbH 4934",
+      "REWE MARKT GMBH",
+      "-100.77",
+      4
+     ],
+     [
+      157,
+      "giro",
+      "2026-01-05",
+      "DB Vertrieb GmbH",
+      "DB VERTRIEB GMBH",
+      "-30.63",
+      4
+     ],
+     [
+      158,
+      "giro",
+      "2026-01-13",
+      "Telekom Deutschland",
+      "TELEKOM DEUTSCHLAND",
+      "-38.00",
+      4
+     ],
+     [
+      159,
+      "giro",
+      "2026-01-13",
+      "Telekom Deutschland",
+      "TELEKOM DEUTSCHLAND",
+      "-58.08",
+      4
+     ],
+     [
+      160,
+      "giro",
+      "2026-01-15",
+      "Gehalt ACME GmbH",
+      "GEHALT ACME GMBH",
+      "3810.55",
+      4
+     ],
+     [
+      161,
+      "giro",
+      "2026-01-20",
+      "EDEKA Center 4958",
+      "EDEKA CENTER",
+      "-21.96",
+      4
+     ],
+     [
+      162,
+      "giro",
+      "2026-01-20",
+      "Bäckerei Schäfer",
+      "BäCKEREI SCHäFER",
+      "-14.53",
+      4
+     ],
+     [
+      163,
+      "giro",
+      "2026-01-20",
+      "DB Vertrieb GmbH",
+      "DB VERTRIEB GMBH",
+      "-121.41",
+      4
+     ],
+     [
+      164,
+      "giro",
+      "2026-01-21",
+      "EDEKA Center 9053",
+      "EDEKA CENTER",
+      "-22.22",
+      4
+     ],
+     [
+      165,
+      "giro",
+      "2026-01-22",
+      "DB Vertrieb GmbH",
+      "DB VERTRIEB GMBH",
+      "121.41",
+      4
+     ],
+     [
+      166,
+      "giro",
+      "2026-01-25",
+      "Telekom Deutschland",
+      "TELEKOM DEUTSCHLAND",
+      "-51.01",
+      4
+     ],
+     [
+      167,
+      "giro",
+      "2026-01-30",
+      "Bäckerei Schäfer",
+      "BäCKEREI SCHäFER",
+      "-13.80",
+      4
+     ],
+     [
+      168,
+      "giro",
+      "2026-02-01",
+      "Miete Hausverwaltung",
+      "MIETE HAUSVERWALTUNG",
+      "-1120.00",
+      4
+     ],
+     [
+      169,
+      "giro",
+      "2026-02-04",
+      "EDEKA Center 6227",
+      "EDEKA CENTER",
+      "-77.14",
+      4
+     ],
+     [
+      170,
+      "giro",
+      "2026-02-05",
+      "DB Vertrieb GmbH",
+      "DB VERTRIEB GMBH",
+      "-66.78",
+      4
+     ],
+     [
+      171,
+      "giro",
+      "2026-02-06",
+      "EDEKA Center 6227",
+      "EDEKA CENTER",
+      "77.14",
+      4
+     ],
+     [
+      172,
+      "giro",
+      "2026-02-12",
+      "Aral Tankstelle 9530",
+      "ARAL TANKSTELLE",
+      "-70.38",
+      4
+     ],
+     [
+      173,
+      "giro",
+      "2026-02-15",
+      "Gehalt ACME GmbH",
+      "GEHALT ACME GMBH",
+      "3810.55",
+      4
+     ],
+     [
+      174,
+      "giro",
+      "2026-02-16",
+      "Lidl Dienstleistung 2448",
+      "LIDL DIENSTLEISTUNG",
+      "-48.53",
+      4
+     ],
+     [
+      175,
+      "giro",
+      "2026-02-18",
+      "Stadtwerke München",
+      "STADTWERKE MüNCHEN",
+      "-67.78",
+      4
+     ],
+     [
+      176,
+      "giro",
+      "2026-02-23",
+      "REWE Markt GmbH 2853",
+      "REWE MARKT GMBH",
+      "-104.06",
+      4
+     ],
+     [
+      177,
+      "giro",
+      "2026-02-24",
+      "REWE Markt GmbH 9981",
+      "REWE MARKT GMBH",
+      "-72.57",
+      4
+     ],
+     [
+      178,
+      "giro",
+      "2026-02-25",
+      "REWE Markt GmbH 5736",
+      "REWE MARKT GMBH",
+      "-70.97",
+      4
+     ],
+     [
+      179,
+      "giro",
+      "2026-02-26",
+      "Lidl Dienstleistung 1926",
+      "LIDL DIENSTLEISTUNG",
+      "-26.93",
+      4
+     ],
+     [
+      180,
+      "giro",
+      "2026-02-27",
+      "Aral Tankstelle 581",
+      "ARAL TANKSTELLE",
+      "-87.38",
+      4
+     ]
+    ],
+    "batches": [
+     [
+      1,
+      "checking",
+      "a.csv",
+      66,
+      0
+     ],
+     [
+      2,
+      "card",
+      "card.csv",
+      42,
+      0
+     ],
+     [
+      3,
+      "checking",
+      "b.csv",
+      34,
+      33
+     ],
+     [
+      4,
+      "giro",
+      "giro.csv",
+      38,
+      0
+     ],
+     [
+      5,
+      "card",
+      "card.csv",
+      0,
+      42
+     ]
+    ],
+    "overrides": []
+   }
+  },
+  {
+   "args": [
+    "accounts"
+   ],
+   "exit": 0,
+   "stdout": "account   transactions   balance  first       last\n--------  ------------  --------  ----------  ----------\ncard                42  -2380.40  2025-12-04  2026-03-27\nchecking           100   8990.93  2025-11-01  2026-04-29\ngiro                38   6618.80  2025-12-01  2026-02-27\n(3 rows)\n"
+  },
+  {
+   "args": [
+    "report",
+    "monthly"
+   ],
+   "exit": 0,
+   "stdout": "month     income  expenses      net  transactions\n-------  -------  --------  -------  ------------\n2025-11  4250.00   2738.87  1511.13            16\n2025-12  8290.69   4713.83  3576.86            40\n2026-01  8181.96   5442.34  2739.62            39\n2026-02  8198.52   5336.53  2861.99            41\n2026-03  4403.77   3231.25  1172.52            27\n2026-04  4384.13   3016.92  1367.21            17\n(6 rows)\n"
+  },
+  {
+   "args": [
+    "--format",
+    "json",
+    "report",
+    "monthly",
+    "--account",
+    "checking"
+   ],
+   "exit": 0,
+   "stdout": "{\"month\":\"2025-11\",\"income\":\"4250.00\",\"expenses\":\"2738.87\",\"net\":\"1511.13\",\"transactions\":16}\n{\"month\":\"2025-12\",\"income\":\"4267.01\",\"expenses\":\"2512.60\",\"net\":\"1754.41\",\"transactions\":17}\n{\"month\":\"2026-01\",\"income\":\"4250.00\",\"expenses\":\"3029.24\",\"net\":\"1220.76\",\"transactions\":16}\n{\"month\":\"2026-02\",\"income\":\"4265.37\",\"expenses\":\"2754.41\",\"net\":\"1510.96\",\"transactions\":17}\n{\"month\":\"2026-03\",\"income\":\"4403.77\",\"expenses\":\"2777.31\",\"net\":\"1626.46\",\"transactions\":17}\n{\"month\":\"2026-04\",\"income\":\"4384.13\",\"expenses\":\"3016.92\",\"net\":\"1367.21\",\"transactions\":17}\n"
+  },
+  {
+   "args": [
+    "report",
+    "categories",
+    "--from",
+    "2026-01",
+    "--to",
+    "2026-02"
+   ],
+   "exit": 0,
+   "stdout": "category         spent  share  transactions\n-------------  -------  -----  ------------\nhousing        5940.00   55.1             4\nshopping       1820.08   16.9            12\ngroceries      1291.71   12.0            16\ntransport       739.28    6.9            13\nutilities       722.62    6.7             8\nuncategorized   198.71    1.8            10\ncoffee           66.47    0.6             9\n(7 rows)\n"
+  },
+  {
+   "args": [
+    "report",
+    "merchants",
+    "--top",
+    "7",
+    "--account",
+    "card"
+   ],
+   "exit": 0,
+   "stdout": "merchant                          spent  transactions\n-------------------------------  ------  ------------\nHOME DEPOT                       611.26             3\nSAFEWAY                          469.40             5\nCOMCAST CABLE                    354.10             4\nAMAZON.COM*CKJWK6 AMZN.COM/BILL  213.13             1\nAMAZON.COM*U59E7F AMZN.COM/BILL  180.15             1\nAMAZON.COM*8J4PPP AMZN.COM/BILL  155.57             1\nSHELL OIL                        127.41             2\n(7 rows)\n"
+  },
+  {
+   "args": [
+    "budget",
+    "--month",
+    "2026-02"
+   ],
+   "exit": 3,
+   "stdout": "category   budget   spent  remaining  status\n---------  ------  ------  ---------  ------\ncoffee      30.00   37.91      -7.91  over\ngroceries  600.00  902.89    -302.89  over\nshopping   150.50  581.48    -430.98  over\ntransport  200.00  324.14    -124.14  over\n(4 rows)\n"
+  },
+  {
+   "args": [
+    "--format",
+    "csv",
+    "list",
+    "--month",
+    "2026-03"
+   ],
+   "exit": 0,
+   "stdout": "id,date,account,description,amount,category\n99,2026-03-01,card,SAFEWAY 8521,-42.46,groceries\n109,2026-03-01,checking,RENT - OAKWOOD APTS,-1850.00,housing\n100,2026-03-02,card,Starbucks Store 7709,-7.40,coffee\n110,2026-03-02,checking,Comcast Cable,-90.84,utilities\n111,2026-03-04,checking,Spotify USA,-11.87,uncategorized\n112,2026-03-06,checking,AMAZON.COM*KFP24T AMZN.COM/BILL,-142.14,shopping\n101,2026-03-13,card,SAFEWAY 6421,-90.33,groceries\n113,2026-03-13,checking,Chipotle 1699,-10.90,uncategorized\n114,2026-03-15,checking,PAYROLL ACME CORP,4250.00,income\n102,2026-03-16,card,CVS/PHARMACY #9465,-47.80,uncategorized\n115,2026-03-17,checking,REI #6255,-33.72,shopping\n103,2026-03-18,card,7-Eleven 12,-4.78,uncategorized\n104,2026-03-18,card,Comcast Cable,-70.33,utilities\n116,2026-03-18,checking,Chevron #6309,-28.62,transport\n117,2026-03-18,checking,Starbucks Store 2955,-5.81,coffee\n105,2026-03-20,card,Spotify USA,-11.16,uncategorized\n118,2026-03-20,checking,Whole Foods Market #709,-153.77,groceries\n119,2026-03-21,checking,REI #805,-261.82,shopping\n106,2026-03-22,card,UBER   *TRIP N93THR,-21.02,transport\n120,2026-03-22,checking,Lyft Ride 747,-22.51,transport\n121,2026-03-22,checking,Starbucks Store 2728,-6.68,coffee\n122,2026-03-22,checking,Whole Foods Market #709,153.77,groceries\n123,2026-03-23,checking,Chevron #3510,-63.22,transport\n124,2026-03-24,checking,Chipotle 3995,-19.28,uncategorized\n125,2026-03-25,checking,Comcast Cable,-76.13,utilities\n107,2026-03-26,card,SAFEWAY 7609,-146.91,groceries\n108,2026-03-27,card,Spotify USA,-11.75,uncategorized\n"
+  },
+  {
+   "args": [
+    "export",
+    "--account",
+    "giro",
+    "--month",
+    "2025-12"
+   ],
+   "exit": 0,
+   "stdout": " id  account  date        description               merchant                amount  category       batch\n---  -------  ----------  ------------------------  --------------------  --------  -------------  -----\n143  giro     2025-12-01  Miete Hausverwaltung      MIETE HAUSVERWALTUNG  -1120.00  housing            4\n144  giro     2025-12-03  Bäckerei Schäfer          BäCKEREI SCHäFER         -5.03  uncategorized      4\n145  giro     2025-12-08  REWE Markt GmbH 2152      REWE MARKT GMBH         -29.04  groceries          4\n146  giro     2025-12-12  Bäckerei Schäfer          BäCKEREI SCHäFER        -10.24  uncategorized      4\n147  giro     2025-12-12  Aral Tankstelle 6086      ARAL TANKSTELLE         -53.98  transport          4\n148  giro     2025-12-15  Gehalt ACME GmbH          GEHALT ACME GMBH       3810.55  income             4\n149  giro     2025-12-15  Lidl Dienstleistung 4176  LIDL DIENSTLEISTUNG     -27.01  groceries          4\n150  giro     2025-12-15  REWE Markt GmbH 6226      REWE MARKT GMBH         -42.63  groceries          4\n151  giro     2025-12-16  Lidl Dienstleistung 2486  LIDL DIENSTLEISTUNG     -44.47  groceries          4\n152  giro     2025-12-20  Stadtwerke München        STADTWERKE MüNCHEN     -100.90  utilities          4\n153  giro     2025-12-27  Stadtwerke München        STADTWERKE MüNCHEN      -83.64  utilities          4\n154  giro     2025-12-27  Stadtwerke München        STADTWERKE MüNCHEN      -89.53  utilities          4\n(12 rows)\n"
+  }
+ ]
+}

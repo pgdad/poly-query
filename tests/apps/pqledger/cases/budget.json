@@ -1,0 +1,80 @@
+{
+ "name": "budget",
+ "description": "budget status and exit 3",
+ "files": {
+  "pqledger.conf": "[ledger]\ndata_dir = ledger\nrules_file = rules.conf\nbudget_file = budgets.conf\n\n[account card]\ndate_column = Transaction Date\ndate_format = MM/DD/YYYY\ncurrency_symbol = $\nthousands_separator = ,\ninvert_sign = true\n\n[account giro]\ndelimiter = ;\nskip_lines = 2\ndate_column = Buchungstag\ndate_format = DD.MM.YYYY\ndescription_column = Verwendungszweck\namount_mode = debit_credit\ndebit_column = Soll\ncredit_column = Haben\ndecimal_separator = ,\nthousands_separator = .\n",
+  "rules.conf": "# first match wins\ngroceries = WHOLE FOODS*, TRADER JOE*, SAFEWAY, REWE*, EDEKA*, LIDL*\ncoffee = SQ *BLUE BOTTLE*, STARBUCKS*, CAFé*\ntransport = SHELL*, CHEVRON*, UBER*, LYFT*, ARAL*, DB VERTRIEB*\nhousing = RENT*, MIETE*\nincome = PAYROLL*, GEHALT*\nshopping = AMAZON*, HOME DEPOT, REI\nutilities = PACIFIC GAS*, COMCAST*, STADTWERKE*, TELEKOM*\n",
+  "budgets.conf": "groceries = 600\ncoffee = 30.00\ntransport = 200\nshopping = 150.5\n",
+  "chk.csv": "Date,Description,Amount\n2026-01-01,\"RENT - OAKWOOD APTS\",-1850.00\n2026-01-01,\"Netflix.com\",-15.16\n2026-01-02,\"Trader Joe's #3614\",-119.75\n2026-01-03,\"Netflix.com\",-15.94\n2026-01-04,\"Whole Foods Market #544\",-158.07\n2026-01-07,\"SQ *Blue Bottle Coffee 1750\",-10.65\n2026-01-07,\"Whole Foods Market #2967\",-156.42\n2026-01-15,\"PAYROLL ACME CORP\",4250.00\n2026-01-18,\"Shell Oil 8395\",-68.76\n2026-01-19,\"Starbucks Store 4606\",-9.95\n2026-01-19,\"Chevron #4786\",-25.21\n2026-01-22,\"UBER   *TRIP DE9XDE\",-16.43\n2026-02-01,\"RENT - OAKWOOD APTS\",-1850.00\n2026-02-03,\"7-Eleven 12\",-4.15\n2026-02-09,\"SAFEWAY 4071\",-114.46\n2026-02-10,\"REI #4342\",-294.00\n2026-02-11,\"Chipotle 1517\",-13.25\n2026-02-15,\"PAYROLL ACME CORP\",4250.00\n2026-02-17,\"Chipotle 1131\",-11.00\n2026-02-21,\"UBER   *TRIP UP7ALA\",-28.00\n2026-02-22,\"Chevron #5051\",-49.97\n2026-02-23,\"Café Mélange\",-7.06\n2026-02-25,\"REI #4972\",-98.04\n2026-02-27,\"7-Eleven 12\",-11.44\n",
+  "card.csv": "\"Transaction Date\",\"Description\",\"Amount\"\n01/03/2026,\"UBER   *TRIP Q5WS6F\",\"$31.06\"\n01/05/2026,\"UBER   *TRIP Q5WS6F\",\"($31.06)\"\n01/06/2026,\"Home Depot #3203\",\"$248.23\"\n01/10/2026,\"UBER   *TRIP UUX37L\",\"$24.74\"\n01/11/2026,\"Café Mélange\",\"$6.95\"\n01/16/2026,\"Home Depot #4509\",\"$46.85\"\n01/17/2026,\"Lyft Ride 6767\",\"$30.74\"\n01/23/2026,\"Comcast Cable\",\"$97.62\"\n01/31/2026,\"REI #8127\",\"$111.56\"\n02/02/2026,\"Café Mélange\",\"$24.90\"\n02/09/2026,\"Comcast Cable\",\"$84.74\"\n02/18/2026,\"Lyft Ride 3352\",\"$8.75\"\n02/18/2026,\"REI #540\",\"$137.18\"\n02/18/2026,\"Whole Foods Market #6933\",\"$126.23\"\n02/21/2026,\"Café Mélange\",\"$5.47\"\n02/24/2026,\"REI #2426\",\"$31.23\"\n02/26/2026,\"UBER   *TRIP DVEKU2\",\"$36.64\"\n"
+ },
+ "steps": [
+  {
+   "args": [
+    "init"
+   ],
+   "exit": 0,
+   "stdout": "initialized ledger\n"
+  },
+  {
+   "args": [
+    "import",
+    "chk.csv",
+    "--account",
+    "checking"
+   ],
+   "exit": 0,
+   "stdout": "batch 1: imported 24, duplicates 0\n"
+  },
+  {
+   "args": [
+    "import",
+    "card.csv",
+    "--account",
+    "card"
+   ],
+   "exit": 0,
+   "stdout": "batch 2: imported 17, duplicates 0\n"
+  },
+  {
+   "args": [
+    "budget",
+    "--month",
+    "2026-01"
+   ],
+   "exit": 3,
+   "stdout": "category   budget   spent  remaining  status\n---------  ------  ------  ---------  ------\ncoffee      30.00   27.55       2.45  ok\ngroceries  600.00  434.24     165.76  ok\nshopping   150.50  406.64    -256.14  over\ntransport  200.00  196.94       3.06  ok\n(4 rows)\n"
+  },
+  {
+   "args": [
+    "budget",
+    "--month",
+    "2026-02",
+    "--account",
+    "card"
+   ],
+   "exit": 3,
+   "stdout": "category   budget   spent  remaining  status\n---------  ------  ------  ---------  ------\ncoffee      30.00   30.37      -0.37  over\ngroceries  600.00  126.23     473.77  ok\nshopping   150.50  168.41     -17.91  over\ntransport  200.00   45.39     154.61  ok\n(4 rows)\n"
+  },
+  {
+   "args": [
+    "budget",
+    "--month",
+    "2025-12"
+   ],
+   "exit": 0,
+   "stdout": "category   budget  spent  remaining  status\n---------  ------  -----  ---------  ------\ncoffee      30.00   0.00      30.00  ok\ngroceries  600.00   0.00     600.00  ok\nshopping   150.50   0.00     150.50  ok\ntransport  200.00   0.00     200.00  ok\n(4 rows)\n"
+  },
+  {
+   "args": [
+    "--format",
+    "json",
+    "budget",
+    "--month",
+    "2026-01"
+   ],
+   "exit": 3,
+   "stdout": "{\"category\":\"coffee\",\"budget\":\"30.00\",\"spent\":\"27.55\",\"remaining\":\"2.45\",\"status\":\"ok\"}\n{\"category\":\"groceries\",\"budget\":\"600.00\",\"spent\":\"434.24\",\"remaining\":\"165.76\",\"status\":\"ok\"}\n{\"category\":\"shopping\",\"budget\":\"150.50\",\"spent\":\"406.64\",\"remaining\":\"-256.14\",\"status\":\"over\"}\n{\"category\":\"transport\",\"budget\":\"200.00\",\"spent\":\"196.94\",\"remaining\":\"3.06\",\"status\":\"ok\"}\n"
+  }
+ ]
+}

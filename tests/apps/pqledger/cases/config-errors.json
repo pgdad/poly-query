@@ -1,0 +1,112 @@
+{
+ "name": "config-errors",
+ "description": "invalid configuration files exit 2",
+ "files": {
+  "unknown-key.conf": "[ledger]\ndata_dir = l\ncolour = blue\n",
+  "repeated-key.conf": "[ledger]\ndata_dir = l\ndata_dir = m\n",
+  "before-section.conf": "data_dir = l\n[ledger]\ndata_dir = l\n",
+  "no-data-dir.conf": "[ledger]\nrules_file = r\n",
+  "bad-format.conf": "[ledger]\ndata_dir = l\n[output]\nformat = xml\n",
+  "bad-header.conf": "[ledger]\ndata_dir = l\n[import]\nheader = yes\n",
+  "unknown-section.conf": "[ledger]\ndata_dir = l\n[accounts]\n",
+  "same-separators.conf": "[ledger]\ndata_dir = l\n[account eu]\ndecimal_separator = ,\nthousands_separator = ,\n",
+  "ok.conf": "; comment\n[ledger]\n  data_dir = \"l\"  \nrules_file = bad-rules.conf\n",
+  "ok2.conf": "[ledger]\ndata_dir = l\nbudget_file = bad-budget.conf\n",
+  "bad-rules.conf": "groceries = SAFE_WAY\n",
+  "bad-budget.conf": "groceries = 12.345\n"
+ },
+ "steps": [
+  {
+   "args": [
+    "--config",
+    "unknown-key.conf",
+    "init"
+   ],
+   "exit": 2
+  },
+  {
+   "args": [
+    "--config",
+    "repeated-key.conf",
+    "init"
+   ],
+   "exit": 2
+  },
+  {
+   "args": [
+    "--config",
+    "before-section.conf",
+    "init"
+   ],
+   "exit": 2
+  },
+  {
+   "args": [
+    "--config",
+    "no-data-dir.conf",
+    "init"
+   ],
+   "exit": 2
+  },
+  {
+   "args": [
+    "--config",
+    "bad-format.conf",
+    "init"
+   ],
+   "exit": 2
+  },
+  {
+   "args": [
+    "--config",
+    "bad-header.conf",
+    "init"
+   ],
+   "exit": 2
+  },
+  {
+   "args": [
+    "--config",
+    "unknown-section.conf",
+    "init"
+   ],
+   "exit": 2
+  },
+  {
+   "args": [
+    "--config",
+    "same-separators.conf",
+    "init"
+   ],
+   "exit": 2
+  },
+  {
+   "args": [
+    "--config",
+    "ok.conf",
+    "init"
+   ],
+   "exit": 0,
+   "stdout": "initialized ledger\n"
+  },
+  {
+   "args": [
+    "--config",
+    "ok.conf",
+    "report",
+    "monthly"
+   ],
+   "exit": 2
+  },
+  {
+   "args": [
+    "--config",
+    "ok2.conf",
+    "budget",
+    "--month",
+    "2026-01"
+   ],
+   "exit": 2
+  }
+ ]
+}

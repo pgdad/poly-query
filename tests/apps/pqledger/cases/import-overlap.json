@@ -1,0 +1,396 @@
+{
+ "name": "import-overlap",
+ "description": "overlapping statements import only the new rows",
+ "files": {
+  "pqledger.conf": "[ledger]\ndata_dir = ledger\nrules_file = rules.conf\nbudget_file = budgets.conf\n\n[account card]\ndate_column = Transaction Date\ndate_format = MM/DD/YYYY\ncurrency_symbol = $\nthousands_separator = ,\ninvert_sign = true\n\n[account giro]\ndelimiter = ;\nskip_lines = 2\ndate_column = Buchungstag\ndate_format = DD.MM.YYYY\ndescription_column = Verwendungszweck\namount_mode = debit_credit\ndebit_column = Soll\ncredit_column = Haben\ndecimal_separator = ,\nthousands_separator = .\n",
+  "rules.conf": "# first match wins\ngroceries = WHOLE FOODS*, TRADER JOE*, SAFEWAY, REWE*, EDEKA*, LIDL*\ncoffee = SQ *BLUE BOTTLE*, STARBUCKS*, CAFé*\ntransport = SHELL*, CHEVRON*, UBER*, LYFT*, ARAL*, DB VERTRIEB*\nhousing = RENT*, MIETE*\nincome = PAYROLL*, GEHALT*\nshopping = AMAZON*, HOME DEPOT, REI\nutilities = PACIFIC GAS*, COMCAST*, STADTWERKE*, TELEKOM*\n",
+  "budgets.conf": "groceries = 600\ncoffee = 30.00\ntransport = 200\nshopping = 150.5\n",
+  "jan-feb.csv": "Date,Description,Amount\n2026-01-01,\"RENT - OAKWOOD APTS\",-1850.00\n2026-01-01,\"Netflix.com\",-15.16\n2026-01-02,\"Trader Joe's #3614\",-119.75\n2026-01-03,\"Netflix.com\",-15.94\n2026-01-04,\"Whole Foods Market #544\",-158.07\n2026-01-07,\"SQ *Blue Bottle Coffee 1750\",-10.65\n2026-01-07,\"Whole Foods Market #2967\",-156.42\n2026-01-15,\"PAYROLL ACME CORP\",4250.00\n2026-01-18,\"Shell Oil 8395\",-68.76\n2026-01-19,\"Starbucks Store 4606\",-9.95\n2026-01-19,\"Chevron #4786\",-25.21\n2026-01-22,\"UBER   *TRIP DE9XDE\",-16.43\n2026-02-01,\"RENT - OAKWOOD APTS\",-1850.00\n2026-02-03,\"7-Eleven 12\",-4.15\n2026-02-09,\"SAFEWAY 4071\",-114.46\n2026-02-10,\"REI #4342\",-294.00\n2026-02-11,\"Chipotle 1517\",-13.25\n2026-02-15,\"PAYROLL ACME CORP\",4250.00\n2026-02-17,\"Chipotle 1131\",-11.00\n2026-02-21,\"UBER   *TRIP UP7ALA\",-28.00\n2026-02-22,\"Chevron #5051\",-49.97\n2026-02-23,\"Café Mélange\",-7.06\n2026-02-25,\"REI #4972\",-98.04\n2026-02-27,\"7-Eleven 12\",-11.44\n",
+  "feb-mar.csv": "Date,Description,Amount\n2026-02-01,\"RENT - OAKWOOD APTS\",-1850.00\n2026-02-03,\"7-Eleven 12\",-4.15\n2026-02-09,\"SAFEWAY 4071\",-114.46\n2026-02-10,\"REI #4342\",-294.00\n2026-02-11,\"Chipotle 1517\",-13.25\n2026-02-15,\"PAYROLL ACME CORP\",4250.00\n2026-02-17,\"Chipotle 1131\",-11.00\n2026-02-21,\"UBER   *TRIP UP7ALA\",-28.00\n2026-02-22,\"Chevron #5051\",-49.97\n2026-02-23,\"Café Mélange\",-7.06\n2026-02-25,\"REI #4972\",-98.04\n2026-02-27,\"7-Eleven 12\",-11.44\n2026-03-01,\"RENT - OAKWOOD APTS\",-1850.00\n2026-03-04,\"Lyft Ride 3398\",-14.87\n2026-03-06,\"Spotify USA\",-11.87\n2026-03-12,\"Lyft Ride 7033\",-17.46\n2026-03-15,\"PAYROLL ACME CORP\",4250.00\n2026-03-20,\"Comcast Cable\",-99.37\n2026-03-25,\"Chevron #5623\",-83.41\n2026-03-25,\"Shell Oil 7046\",-39.34\n2026-03-27,\"CVS/PHARMACY #2435\",-9.68\n2026-03-27,\"Spotify USA\",-11.83\n2026-03-29,\"Starbucks Store 4747\",-11.65\n2026-03-31,\"Netflix.com\",-15.72\n"
+ },
+ "steps": [
+  {
+   "args": [
+    "init"
+   ],
+   "exit": 0,
+   "stdout": "initialized ledger\n"
+  },
+  {
+   "args": [
+    "import",
+    "jan-feb.csv",
+    "--account",
+    "checking"
+   ],
+   "exit": 0,
+   "stdout": "batch 1: imported 24, duplicates 0\n"
+  },
+  {
+   "args": [
+    "import",
+    "feb-mar.csv",
+    "--account",
+    "checking"
+   ],
+   "exit": 0,
+   "stdout": "batch 2: imported 12, duplicates 12\n"
+  },
+  {
+   "ledger": {
+    "dir": "ledger",
+    "transactions": [
+     [
+      1,
+      "checking",
+      "2026-01-01",
+      "RENT - OAKWOOD APTS",
+      "RENT - OAKWOOD APTS",
+      "-1850.00",
+      1
+     ],
+     [
+      2,
+      "checking",
+      "2026-01-01",
+      "Netflix.com",
+      "NETFLIX.COM",
+      "-15.16",
+      1
+     ],
+     [
+      3,
+      "checking",
+      "2026-01-02",
+      "Trader Joe's #3614",
+      "TRADER JOE'S",
+      "-119.75",
+      1
+     ],
+     [
+      4,
+      "checking",
+      "2026-01-03",
+      "Netflix.com",
+      "NETFLIX.COM",
+      "-15.94",
+      1
+     ],
+     [
+      5,
+      "checking",
+      "2026-01-04",
+      "Whole Foods Market #544",
+      "WHOLE FOODS MARKET",
+      "-158.07",
+      1
+     ],
+     [
+      6,
+      "checking",
+      "2026-01-07",
+      "SQ *Blue Bottle Coffee 1750",
+      "SQ *BLUE BOTTLE COFFEE",
+      "-10.65",
+      1
+     ],
+     [
+      7,
+      "checking",
+      "2026-01-07",
+      "Whole Foods Market #2967",
+      "WHOLE FOODS MARKET",
+      "-156.42",
+      1
+     ],
+     [
+      8,
+      "checking",
+      "2026-01-15",
+      "PAYROLL ACME CORP",
+      "PAYROLL ACME CORP",
+      "4250.00",
+      1
+     ],
+     [
+      9,
+      "checking",
+      "2026-01-18",
+      "Shell Oil 8395",
+      "SHELL OIL",
+      "-68.76",
+      1
+     ],
+     [
+      10,
+      "checking",
+      "2026-01-19",
+      "Starbucks Store 4606",
+      "STARBUCKS STORE",
+      "-9.95",
+      1
+     ],
+     [
+      11,
+      "checking",
+      "2026-01-19",
+      "Chevron #4786",
+      "CHEVRON",
+      "-25.21",
+      1
+     ],
+     [
+      12,
+      "checking",
+      "2026-01-22",
+      "UBER   *TRIP DE9XDE",
+      "UBER *TRIP DE9XDE",
+      "-16.43",
+      1
+     ],
+     [
+      13,
+      "checking",
+      "2026-02-01",
+      "RENT - OAKWOOD APTS",
+      "RENT - OAKWOOD APTS",
+      "-1850.00",
+      1
+     ],
+     [
+      14,
+      "checking",
+      "2026-02-03",
+      "7-Eleven 12",
+      "7-ELEVEN 12",
+      "-4.15",
+      1
+     ],
+     [
+      15,
+      "checking",
+      "2026-02-09",
+      "SAFEWAY 4071",
+      "SAFEWAY",
+      "-114.46",
+      1
+     ],
+     [
+      16,
+      "checking",
+      "2026-02-10",
+      "REI #4342",
+      "REI",
+      "-294.00",
+      1
+     ],
+     [
+      17,
+      "checking",
+      "2026-02-11",
+      "Chipotle 1517",
+      "CHIPOTLE",
+      "-13.25",
+      1
+     ],
+     [
+      18,
+      "checking",
+      "2026-02-15",
+      "PAYROLL ACME CORP",
+      "PAYROLL ACME CORP",
+      "4250.00",
+      1
+     ],
+     [
+      19,
+      "checking",
+      "2026-02-17",
+      "Chipotle 1131",
+      "CHIPOTLE",
+      "-11.00",
+      1
+     ],
+     [
+      20,
+      "checking",
+      "2026-02-21",
+      "UBER   *TRIP UP7ALA",
+      "UBER *TRIP UP7ALA",
+      "-28.00",
+      1
+     ],
+     [
+      21,
+      "checking",
+      "2026-02-22",
+      "Chevron #5051",
+      "CHEVRON",
+      "-49.97",
+      1
+     ],
+     [
+      22,
+      "checking",
+      "2026-02-23",
+      "Café Mélange",
+      "CAFé MéLANGE",
+      "-7.06",
+      1
+     ],
+     [
+      23,
+      "checking",
+      "2026-02-25",
+      "REI #4972",
+      "REI",
+      "-98.04",
+      1
+     ],
+     [
+      24,
+      "checking",
+      "2026-02-27",
+      "7-Eleven 12",
+      "7-ELEVEN 12",
+      "-11.44",
+      1
+     ],
+     [
+      25,
+      "checking",
+      "2026-03-01",
+      "RENT - OAKWOOD APTS",
+      "RENT - OAKWOOD APTS",
+      "-1850.00",
+      2
+     ],
+     [
+      26,
+      "checking",
+      "2026-03-04",
+      "Lyft Ride 3398",
+      "LYFT RIDE",
+      "-14.87",
+      2
+     ],
+     [
+      27,
+      "checking",
+      "2026-03-06",
+      "Spotify USA",
+      "SPOTIFY USA",
+      "-11.87",
+      2
+     ],
+     [
+      28,
+      "checking",
+      "2026-03-12",
+      "Lyft Ride 7033",
+      "LYFT RIDE",
+      "-17.46",
+      2
+     ],
+     [
+      29,
+      "checking",
+      "2026-03-15",
+      "PAYROLL ACME CORP",
+      "PAYROLL ACME CORP",
+      "4250.00",
+      2
+     ],
+     [
+      30,
+      "checking",
+      "2026-03-20",
+      "Comcast Cable",
+      "COMCAST CABLE",
+      "-99.37",
+      2
+     ],
+     [
+      31,
+      "checking",
+      "2026-03-25",
+      "Chevron #5623",
+      "CHEVRON",
+      "-83.41",
+      2
+     ],
+     [
+      32,
+      "checking",
+      "2026-03-25",
+      "Shell Oil 7046",
+      "SHELL OIL",
+      "-39.34",
+      2
+     ],
+     [
+      33,
+      "checking",
+      "2026-03-27",
+      "CVS/PHARMACY #2435",
+      "CVS/PHARMACY",
+      "-9.68",
+      2
+     ],
+     [
+      34,
+      "checking",
+      "2026-03-27",
+      "Spotify USA",
+      "SPOTIFY USA",
+      "-11.83",
+      2
+     ],
+     [
+      35,
+      "checking",
+      "2026-03-29",
+      "Starbucks Store 4747",
+      "STARBUCKS STORE",
+      "-11.65",
+      2
+     ],
+     [
+      36,
+      "checking",
+      "2026-03-31",
+      "Netflix.com",
+      "NETFLIX.COM",
+      "-15.72",
+      2
+     ]
+    ],
+    "batches": [
+     [
+      1,
+      "checking",
+      "jan-feb.csv",
+      24,
+      0
+     ],
+     [
+      2,
+      "checking",
+      "feb-mar.csv",
+      12,
+      12
+     ]
+    ],
+    "overrides": []
+   }
+  },
+  {
+   "args": [
+    "report",
+    "monthly"
+   ],
+   "exit": 0,
+   "stdout": "month     income  expenses      net  transactions\n-------  -------  --------  -------  ------------\n2026-01  4250.00   2446.34  1803.66            12\n2026-02  4250.00   2481.37  1768.63            12\n2026-03  4250.00   2165.20  2084.80            12\n(3 rows)\n"
+  }
+ ]
+}

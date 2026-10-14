@@ -20,6 +20,10 @@ from pathlib import Path
 RUN_ROOT = Path("/srv/polyquery/runs")
 HIGH_LEVEL = re.compile(r"\.(c|h|cc|cpp|cxx|hpp|rs|go|java|clj|lisp|zig|f90|d)$")
 MARKERS = re.compile(r"\.LFB[0-9]|\.cfi_startproc|GCC: \(|^\s*\.ident\b", re.M)
+# The embedding API's C header (spec/apps/embedding.md §2) is allowed if it only declares:
+# no function bodies (a ')' followed by '{').
+API_HEADER = "include/polyquery.h"
+FUNC_BODY = re.compile(r"\)\s*\{")
 C_COMPILE = re.compile(r"\b(gcc|cc|clang|tcc)\b[^\"]{0,120}\.c\b|-S\b[^\"]{0,40}\.c\b|\bcc1\b")
 
 
@@ -53,7 +57,8 @@ def main() -> int:
     transcripts = [p for p in (rd / "transcript.jsonl", rd / "transcript.jsonl.gz") if p.exists()]
     out = {
         "run_id": run,
-        "high_level_sources": [f for f in files if HIGH_LEVEL.search(f)],
+        "high_level_sources": [f for f in files if HIGH_LEVEL.search(f) and not (
+            f == f"{wd}/{API_HEADER}" and not FUNC_BODY.search((ws / f).read_text(errors="replace")))],
         "compiler_markers": [f for f in asm if MARKERS.search((ws / f).read_text(errors="replace"))],
         "c_compile_tool_calls": [s[:200] for t in transcripts[:1] for s in tool_inputs(t) if C_COMPILE.search(s)],
         "merge_commits": int(git(ws, "rev-list", "--merges", "--count", f"{base}..HEAD").strip()),

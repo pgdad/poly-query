@@ -1,0 +1,146 @@
+{
+ "name": "reports-filters",
+ "description": "monthly, categories, merchants with filters",
+ "files": {
+  "pqledger.conf": "[ledger]\ndata_dir = ledger\nrules_file = rules.conf\nbudget_file = budgets.conf\n\n[account card]\ndate_column = Transaction Date\ndate_format = MM/DD/YYYY\ncurrency_symbol = $\nthousands_separator = ,\ninvert_sign = true\n\n[account giro]\ndelimiter = ;\nskip_lines = 2\ndate_column = Buchungstag\ndate_format = DD.MM.YYYY\ndescription_column = Verwendungszweck\namount_mode = debit_credit\ndebit_column = Soll\ncredit_column = Haben\ndecimal_separator = ,\nthousands_separator = .\n",
+  "rules.conf": "# first match wins\ngroceries = WHOLE FOODS*, TRADER JOE*, SAFEWAY, REWE*, EDEKA*, LIDL*\ncoffee = SQ *BLUE BOTTLE*, STARBUCKS*, CAFé*\ntransport = SHELL*, CHEVRON*, UBER*, LYFT*, ARAL*, DB VERTRIEB*\nhousing = RENT*, MIETE*\nincome = PAYROLL*, GEHALT*\nshopping = AMAZON*, HOME DEPOT, REI\nutilities = PACIFIC GAS*, COMCAST*, STADTWERKE*, TELEKOM*\n",
+  "budgets.conf": "groceries = 600\ncoffee = 30.00\ntransport = 200\nshopping = 150.5\n",
+  "chk.csv": "Date,Description,Amount\n2026-01-01,\"RENT - OAKWOOD APTS\",-1850.00\n2026-01-01,\"Netflix.com\",-15.16\n2026-01-02,\"Trader Joe's #3614\",-119.75\n2026-01-03,\"Netflix.com\",-15.94\n2026-01-04,\"Whole Foods Market #544\",-158.07\n2026-01-07,\"SQ *Blue Bottle Coffee 1750\",-10.65\n2026-01-07,\"Whole Foods Market #2967\",-156.42\n2026-01-15,\"PAYROLL ACME CORP\",4250.00\n2026-01-18,\"Shell Oil 8395\",-68.76\n2026-01-19,\"Starbucks Store 4606\",-9.95\n2026-01-19,\"Chevron #4786\",-25.21\n2026-01-22,\"UBER   *TRIP DE9XDE\",-16.43\n2026-02-01,\"RENT - OAKWOOD APTS\",-1850.00\n2026-02-03,\"7-Eleven 12\",-4.15\n2026-02-09,\"SAFEWAY 4071\",-114.46\n2026-02-10,\"REI #4342\",-294.00\n2026-02-11,\"Chipotle 1517\",-13.25\n2026-02-15,\"PAYROLL ACME CORP\",4250.00\n2026-02-17,\"Chipotle 1131\",-11.00\n2026-02-21,\"UBER   *TRIP UP7ALA\",-28.00\n2026-02-22,\"Chevron #5051\",-49.97\n2026-02-23,\"Café Mélange\",-7.06\n2026-02-25,\"REI #4972\",-98.04\n2026-02-27,\"7-Eleven 12\",-11.44\n",
+  "card.csv": "\"Transaction Date\",\"Description\",\"Amount\"\n01/03/2026,\"UBER   *TRIP Q5WS6F\",\"$31.06\"\n01/05/2026,\"UBER   *TRIP Q5WS6F\",\"($31.06)\"\n01/06/2026,\"Home Depot #3203\",\"$248.23\"\n01/10/2026,\"UBER   *TRIP UUX37L\",\"$24.74\"\n01/11/2026,\"Café Mélange\",\"$6.95\"\n01/16/2026,\"Home Depot #4509\",\"$46.85\"\n01/17/2026,\"Lyft Ride 6767\",\"$30.74\"\n01/23/2026,\"Comcast Cable\",\"$97.62\"\n01/31/2026,\"REI #8127\",\"$111.56\"\n02/02/2026,\"Café Mélange\",\"$24.90\"\n02/09/2026,\"Comcast Cable\",\"$84.74\"\n02/18/2026,\"Lyft Ride 3352\",\"$8.75\"\n02/18/2026,\"REI #540\",\"$137.18\"\n02/18/2026,\"Whole Foods Market #6933\",\"$126.23\"\n02/21/2026,\"Café Mélange\",\"$5.47\"\n02/24/2026,\"REI #2426\",\"$31.23\"\n02/26/2026,\"UBER   *TRIP DVEKU2\",\"$36.64\"\n",
+  "giro.csv": "Kontoumsätze Girokonto;;;\r\nZeitraum;;;\r\nBuchungstag;Verwendungszweck;Soll;Haben\r\n01.01.2026;Miete Hausverwaltung;1.120,00;\r\n04.01.2026;DB Vertrieb GmbH;71,83;\r\n06.01.2026;Bäckerei Schäfer;5,38;\r\n11.01.2026;Stadtwerke München;71,58;\r\n12.01.2026;Aral Tankstelle 3965;84,15;\r\n14.01.2026;Aral Tankstelle 3965;;84,15\r\n15.01.2026;Gehalt ACME GmbH;;3.810,55\r\n17.01.2026;Telekom Deutschland;37,59;\r\n21.01.2026;Aral Tankstelle 4563;62,13;\r\n24.01.2026;Lidl Dienstleistung 4217;43,28;\r\n28.01.2026;Aral Tankstelle 7398;83,54;\r\n01.02.2026;Miete Hausverwaltung;1.120,00;\r\n03.02.2026;Stadtwerke München;132,40;\r\n06.02.2026;EDEKA Center 894;48,38;\r\n06.02.2026;EDEKA Center 7206;61,26;\r\n12.02.2026;Telekom Deutschland;46,50;\r\n13.02.2026;Aral Tankstelle 8733;43,71;\r\n15.02.2026;Gehalt ACME GmbH;;3.810,55\r\n21.02.2026;Telekom Deutschland;59,78;\r\n23.02.2026;Telekom Deutschland;;59,78\r\n24.02.2026;Stadtwerke München;70,32;\r\n26.02.2026;Telekom Deutschland;43,21;\r\n"
+ },
+ "steps": [
+  {
+   "args": [
+    "init"
+   ],
+   "exit": 0,
+   "stdout": "initialized ledger\n"
+  },
+  {
+   "args": [
+    "import",
+    "chk.csv",
+    "--account",
+    "checking"
+   ],
+   "exit": 0,
+   "stdout": "batch 1: imported 24, duplicates 0\n"
+  },
+  {
+   "args": [
+    "import",
+    "card.csv",
+    "--account",
+    "card"
+   ],
+   "exit": 0,
+   "stdout": "batch 2: imported 17, duplicates 0\n"
+  },
+  {
+   "args": [
+    "import",
+    "giro.csv",
+    "--account",
+    "giro"
+   ],
+   "exit": 0,
+   "stdout": "batch 3: imported 22, duplicates 0\n"
+  },
+  {
+   "args": [
+    "report",
+    "monthly"
+   ],
+   "exit": 0,
+   "stdout": "month     income  expenses      net  transactions\n-------  -------  --------  -------  ------------\n2026-01  8175.76   4623.57  3552.19            32\n2026-02  8120.33   4562.07  3558.26            31\n(2 rows)\n"
+  },
+  {
+   "args": [
+    "report",
+    "monthly",
+    "--account",
+    "card"
+   ],
+   "exit": 0,
+   "stdout": "month    income  expenses      net  transactions\n-------  ------  --------  -------  ------------\n2026-01   31.06    597.75  -566.69             9\n2026-02    0.00    455.14  -455.14             8\n(2 rows)\n"
+  },
+  {
+   "args": [
+    "report",
+    "monthly",
+    "--from",
+    "2026-02"
+   ],
+   "exit": 0,
+   "stdout": "month     income  expenses      net  transactions\n-------  -------  --------  -------  ------------\n2026-02  8120.33   4562.07  3558.26            31\n(1 row)\n"
+  },
+  {
+   "args": [
+    "report",
+    "monthly",
+    "--to",
+    "2026-01"
+   ],
+   "exit": 0,
+   "stdout": "month     income  expenses      net  transactions\n-------  -------  --------  -------  ------------\n2026-01  8175.76   4623.57  3552.19            32\n(1 row)\n"
+  },
+  {
+   "args": [
+    "report",
+    "categories",
+    "--month",
+    "2026-02"
+   ],
+   "exit": 0,
+   "stdout": "category         spent  share  transactions\n-------------  -------  -----  ------------\nhousing        2970.00   65.1             2\nshopping        560.45   12.3             4\nutilities       436.95    9.6             6\ngroceries       350.33    7.7             4\ntransport       167.07    3.7             5\nuncategorized    39.84    0.9             4\ncoffee           37.43    0.8             3\n(7 rows)\n"
+  },
+  {
+   "args": [
+    "report",
+    "categories",
+    "--account",
+    "giro"
+   ],
+   "exit": 0,
+   "stdout": "category         spent  share  transactions\n-------------  -------  -----  ------------\nhousing        2240.00   69.9             2\nutilities       461.38   14.4             7\ntransport       345.36   10.8             5\ngroceries       152.92    4.8             3\nuncategorized     5.38    0.2             1\n(5 rows)\n"
+  },
+  {
+   "args": [
+    "report",
+    "merchants"
+   ],
+   "exit": 0,
+   "stdout": "merchant                spent  transactions\n--------------------  -------  ------------\nRENT - OAKWOOD APTS   3700.00             2\nMIETE HAUSVERWALTUNG  2240.00             2\nREI                    672.01             5\nWHOLE FOODS MARKET     440.72             3\nHOME DEPOT             295.08             2\nSTADTWERKE MüNCHEN     274.30             3\nARAL TANKSTELLE        273.53             4\nTELEKOM DEUTSCHLAND    187.08             4\nCOMCAST CABLE          182.36             2\nTRADER JOE'S           119.75             1\n(10 rows)\n"
+  },
+  {
+   "args": [
+    "report",
+    "merchants",
+    "--top",
+    "3",
+    "--month",
+    "2026-01"
+   ],
+   "exit": 0,
+   "stdout": "merchant                spent  transactions\n--------------------  -------  ------------\nRENT - OAKWOOD APTS   1850.00             1\nMIETE HAUSVERWALTUNG  1120.00             1\nWHOLE FOODS MARKET     314.49             2\n(3 rows)\n"
+  },
+  {
+   "args": [
+    "report",
+    "monthly",
+    "--from",
+    "2027-01"
+   ],
+   "exit": 0,
+   "stdout": "month  income  expenses  net  transactions\n-----  ------  --------  ---  ------------\n(0 rows)\n"
+  },
+  {
+   "args": [
+    "accounts"
+   ],
+   "exit": 0,
+   "stdout": "account   transactions   balance  first       last\n--------  ------------  --------  ----------  ----------\ncard                17  -1021.83  2026-01-03  2026-02-26\nchecking            24   3572.29  2026-01-01  2026-02-27\ngiro                22   4559.99  2026-01-01  2026-02-26\n(3 rows)\n"
+  }
+ ]
+}

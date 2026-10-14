@@ -1,0 +1,45 @@
+{
+ "name": "config-env",
+ "description": "PQLEDGER_CONFIG is used when --config is absent",
+ "files": {
+  "conf/env.conf": "[ledger]\ndata_dir = envbooks\n",
+  "pqledger.conf": "[ledger]\ndata_dir = cwdbooks\n"
+ },
+ "env": {
+  "PQLEDGER_CONFIG": "conf/env.conf"
+ },
+ "steps": [
+  {
+   "args": [
+    "init"
+   ],
+   "exit": 0,
+   "stdout": "initialized ledger\n"
+  },
+  {
+   "ledger": {
+    "dir": "conf/envbooks",
+    "transactions": [],
+    "batches": [],
+    "overrides": []
+   }
+  },
+  {
+   "args": [
+    "--config",
+    "pqledger.conf",
+    "init"
+   ],
+   "exit": 0,
+   "stdout": "initialized ledger\n"
+  },
+  {
+   "ledger": {
+    "dir": "cwdbooks",
+    "transactions": [],
+    "batches": [],
+    "overrides": []
+   }
+  }
+ ]
+}

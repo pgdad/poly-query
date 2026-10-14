@@ -1,0 +1,107 @@
+{
+ "name": "h-scale",
+ "description": "about 100,000 transactions: import and reports in time",
+ "files": {
+  "pqledger.conf": "[ledger]\ndata_dir = ledger\nrules_file = rules.conf\nbudget_file = budgets.conf\n\n[account card]\ndate_column = Transaction Date\ndate_format = MM/DD/YYYY\ncurrency_symbol = $\nthousands_separator = ,\ninvert_sign = true\n\n[account giro]\ndelimiter = ;\nskip_lines = 2\ndate_column = Buchungstag\ndate_format = DD.MM.YYYY\ndescription_column = Verwendungszweck\namount_mode = debit_credit\ndebit_column = Soll\ncredit_column = Haben\ndecimal_separator = ,\nthousands_separator = .\n",
+  "rules.conf": "# first match wins\ngroceries = WHOLE FOODS*, TRADER JOE*, SAFEWAY, REWE*, EDEKA*, LIDL*\ncoffee = SQ *BLUE BOTTLE*, STARBUCKS*, CAFé*\ntransport = SHELL*, CHEVRON*, UBER*, LYFT*, ARAL*, DB VERTRIEB*\nhousing = RENT*, MIETE*\nincome = PAYROLL*, GEHALT*\nshopping = AMAZON*, HOME DEPOT, REI\nutilities = PACIFIC GAS*, COMCAST*, STADTWERKE*, TELEKOM*\n",
+  "budgets.conf": "groceries = 600\ncoffee = 30.00\ntransport = 200\nshopping = 150.5\n"
+ },
+ "generate": [
+  {
+   "path": "big.csv",
+   "style": "us-checking",
+   "from": "2018-01",
+   "to": "2026-12",
+   "seed": 5,
+   "per_month": 920
+  }
+ ],
+ "steps": [
+  {
+   "args": [
+    "init"
+   ],
+   "exit": 0,
+   "stdout": "initialized ledger\n"
+  },
+  {
+   "args": [
+    "import",
+    "big.csv",
+    "--account",
+    "checking"
+   ],
+   "exit": 0,
+   "stdout": "batch 1: imported 99629, duplicates 0\n",
+   "timeout": 120
+  },
+  {
+   "args": [
+    "import",
+    "big.csv",
+    "--account",
+    "checking"
+   ],
+   "exit": 0,
+   "stdout": "batch 2: imported 0, duplicates 99629\n",
+   "timeout": 120
+  },
+  {
+   "args": [
+    "report",
+    "monthly",
+    "--from",
+    "2026-01"
+   ],
+   "exit": 0,
+   "stdout": "month     income  expenses        net  transactions\n-------  -------  --------  ---------  ------------\n2026-01  4250.00  58397.55  -54147.55           922\n2026-02  4250.00  62462.26  -58212.26           922\n2026-03  4335.64  58146.40  -53810.76           923\n2026-04  4279.59  62373.16  -58093.57           923\n2026-05  4376.32  61128.86  -56752.54           923\n2026-06  4285.63  57931.13  -53645.50           923\n2026-07  4291.91  56274.41  -51982.50           923\n2026-08  4250.00  57324.98  -53074.98           922\n2026-09  4274.90  57818.42  -53543.52           923\n2026-10  4250.00  59957.83  -55707.83           922\n2026-11  4250.00  59098.80  -54848.80           922\n2026-12  4250.00  58533.30  -54283.30           922\n(12 rows)\n",
+   "timeout": 60
+  },
+  {
+   "args": [
+    "report",
+    "categories"
+   ],
+   "exit": 0,
+   "stdout": "category            spent  share  transactions\n-------------  ----------  -----  ------------\nshopping       2389530.44   37.2         14646\ngroceries      1232558.84   19.2         14789\nutilities      1147285.48   17.9         10025\ntransport       817729.63   12.7         20129\nuncategorized   462822.42    7.2         24896\nhousing         199800.00    3.1           108\ncoffee          174512.65    2.7         14875\n(7 rows)\n",
+   "timeout": 60
+  },
+  {
+   "args": [
+    "report",
+    "merchants",
+    "--top",
+    "3"
+   ],
+   "exit": 0,
+   "stdout": "merchant                    spent  transactions\n----------------------  ---------  ------------\nHOME DEPOT              999521.03          4880\nREI                     775928.71          4845\nPACIFIC GAS & ELECTRIC  700867.20          5052\n(3 rows)\n",
+   "timeout": 60
+  },
+  {
+   "args": [
+    "budget",
+    "--month",
+    "2024-02"
+   ],
+   "exit": 3,
+   "stdout": "category   budget     spent  remaining  status\n---------  ------  --------  ---------  ------\ncoffee      30.00   1389.19   -1359.19  over\ngroceries  600.00  10756.73  -10156.73  over\nshopping   150.50  23182.84  -23032.34  over\ntransport  200.00   7949.12   -7749.12  over\n(4 rows)\n",
+   "timeout": 60
+  },
+  {
+   "args": [
+    "accounts"
+   ],
+   "exit": 0,
+   "stdout": "account   transactions      balance  first       last\n--------  ------------  -----------  ----------  ----------\nchecking         99629  -5961995.10  2018-01-01  2026-12-31\n(1 row)\n",
+   "timeout": 60
+  },
+  {
+   "args": [
+    "query",
+    "SELECT COUNT(*) AS n FROM transactions"
+   ],
+   "exit": 0,
+   "stdout": "    n\n-----\n99629\n(1 row)\n"
+  }
+ ]
+}

@@ -1,0 +1,12 @@
+{
+ "name": "embed-aggregate",
+ "files": {
+  "t.csv": "id,name,amount,day\n1,ann,10.50,2026-01-01\n2,bob,-3.25,2026-01-02\n3,\"c, d\",0.75,2026-01-02\n"
+ },
+ "args": [
+  "t.csv",
+  "SELECT day, COUNT(*) AS n FROM t GROUP BY day ORDER BY day"
+ ],
+ "exit": 0,
+ "stdout": "day,n\n2026-01-01,1\n2026-01-02,2\n"
+}

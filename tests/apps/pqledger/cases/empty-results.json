@@ -1,0 +1,54 @@
+{
+ "name": "empty-results",
+ "description": "zero rows in every format",
+ "files": {
+  "pqledger.conf": "[ledger]\ndata_dir = ledger\nrules_file = rules.conf\nbudget_file = budgets.conf\n\n[account card]\ndate_column = Transaction Date\ndate_format = MM/DD/YYYY\ncurrency_symbol = $\nthousands_separator = ,\ninvert_sign = true\n\n[account giro]\ndelimiter = ;\nskip_lines = 2\ndate_column = Buchungstag\ndate_format = DD.MM.YYYY\ndescription_column = Verwendungszweck\namount_mode = debit_credit\ndebit_column = Soll\ncredit_column = Haben\ndecimal_separator = ,\nthousands_separator = .\n",
+  "rules.conf": "# first match wins\ngroceries = WHOLE FOODS*, TRADER JOE*, SAFEWAY, REWE*, EDEKA*, LIDL*\ncoffee = SQ *BLUE BOTTLE*, STARBUCKS*, CAFé*\ntransport = SHELL*, CHEVRON*, UBER*, LYFT*, ARAL*, DB VERTRIEB*\nhousing = RENT*, MIETE*\nincome = PAYROLL*, GEHALT*\nshopping = AMAZON*, HOME DEPOT, REI\nutilities = PACIFIC GAS*, COMCAST*, STADTWERKE*, TELEKOM*\n",
+  "budgets.conf": "groceries = 600\ncoffee = 30.00\ntransport = 200\nshopping = 150.5\n"
+ },
+ "steps": [
+  {
+   "args": [
+    "init"
+   ],
+   "exit": 0,
+   "stdout": "initialized ledger\n"
+  },
+  {
+   "args": [
+    "report",
+    "monthly"
+   ],
+   "exit": 0,
+   "stdout": "month  income  expenses  net  transactions\n-----  ------  --------  ---  ------------\n(0 rows)\n"
+  },
+  {
+   "args": [
+    "--format",
+    "csv",
+    "report",
+    "categories"
+   ],
+   "exit": 0,
+   "stdout": "category,spent,share,transactions\n"
+  },
+  {
+   "args": [
+    "--format",
+    "json",
+    "list"
+   ],
+   "exit": 0,
+   "stdout": ""
+  },
+  {
+   "args": [
+    "budget",
+    "--month",
+    "2026-01"
+   ],
+   "exit": 0,
+   "stdout": "category   budget  spent  remaining  status\n---------  ------  -----  ---------  ------\ncoffee      30.00   0.00      30.00  ok\ngroceries  600.00   0.00     600.00  ok\nshopping   150.50   0.00     150.50  ok\ntransport  200.00   0.00     200.00  ok\n(4 rows)\n"
+  }
+ ]
+}

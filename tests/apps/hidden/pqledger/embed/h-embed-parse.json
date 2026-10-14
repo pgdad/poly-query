@@ -1,0 +1,14 @@
+{
+ "name": "h-embed-parse",
+ "files": {
+  "t.csv": "id,name,amount,day\n1,ann,10.50,2026-01-01\n2,bob,-3.25,2026-01-02\n3,\"c, d\",0.75,2026-01-02\n"
+ },
+ "args": [
+  "t.csv",
+  "SELECT FROM"
+ ],
+ "exit": 1,
+ "stderr_contains": [
+  "error: PARSE_ERROR"
+ ]
+}

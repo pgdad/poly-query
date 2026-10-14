@@ -1,0 +1,467 @@
+{
+ "name": "h-seeded-interop",
+ "description": "seeded plain-encoded ledger, rules change, overrides kept",
+ "files": {
+  "pqledger.conf": "[ledger]\ndata_dir = ledger\nrules_file = rules.conf\nbudget_file = budgets.conf\n\n[account card]\ndate_column = Transaction Date\ndate_format = MM/DD/YYYY\ncurrency_symbol = $\nthousands_separator = ,\ninvert_sign = true\n\n[account giro]\ndelimiter = ;\nskip_lines = 2\ndate_column = Buchungstag\ndate_format = DD.MM.YYYY\ndescription_column = Verwendungszweck\namount_mode = debit_credit\ndebit_column = Soll\ncredit_column = Haben\ndecimal_separator = ,\nthousands_separator = .\n",
+  "rules.conf": "# first match wins\ngroceries = WHOLE FOODS*, TRADER JOE*, SAFEWAY, REWE*, EDEKA*, LIDL*\ncoffee = SQ *BLUE BOTTLE*, STARBUCKS*, CAFé*\ntransport = SHELL*, CHEVRON*, UBER*, LYFT*, ARAL*, DB VERTRIEB*\nhousing = RENT*, MIETE*\nincome = PAYROLL*, GEHALT*\nshopping = AMAZON*, HOME DEPOT, REI\nutilities = PACIFIC GAS*, COMCAST*, STADTWERKE*, TELEKOM*\n",
+  "budgets.conf": "groceries = 600\ncoffee = 30.00\ntransport = 200\nshopping = 150.5\n",
+  "g.csv": "Kontoumsätze Girokonto;;;\r\nZeitraum;;;\r\nBuchungstag;Verwendungszweck;Soll;Haben\r\n01.12.2025;Miete Hausverwaltung;1.120,00;\r\n03.12.2025;Bäckerei Schäfer;5,03;\r\n08.12.2025;REWE Markt GmbH 2152;29,04;\r\n12.12.2025;Bäckerei Schäfer;10,24;\r\n12.12.2025;Aral Tankstelle 6086;53,98;\r\n15.12.2025;Gehalt ACME GmbH;;3.810,55\r\n15.12.2025;Lidl Dienstleistung 4176;27,01;\r\n15.12.2025;REWE Markt GmbH 6226;42,63;\r\n16.12.2025;Lidl Dienstleistung 2486;44,47;\r\n20.12.2025;Stadtwerke München;100,90;\r\n27.12.2025;Stadtwerke München;83,64;\r\n27.12.2025;Stadtwerke München;89,53;\r\n01.01.2026;Miete Hausverwaltung;1.120,00;\r\n03.01.2026;REWE Markt GmbH 4934;100,77;\r\n05.01.2026;DB Vertrieb GmbH;30,63;\r\n13.01.2026;Telekom Deutschland;38,00;\r\n13.01.2026;Telekom Deutschland;58,08;\r\n15.01.2026;Gehalt ACME GmbH;;3.810,55\r\n20.01.2026;EDEKA Center 4958;21,96;\r\n20.01.2026;Bäckerei Schäfer;14,53;\r\n20.01.2026;DB Vertrieb GmbH;121,41;\r\n21.01.2026;EDEKA Center 9053;22,22;\r\n22.01.2026;DB Vertrieb GmbH;;121,41\r\n25.01.2026;Telekom Deutschland;51,01;\r\n30.01.2026;Bäckerei Schäfer;13,80;\r\n01.02.2026;Miete Hausverwaltung;1.120,00;\r\n04.02.2026;EDEKA Center 6227;77,14;\r\n05.02.2026;DB Vertrieb GmbH;66,78;\r\n06.02.2026;EDEKA Center 6227;;77,14\r\n12.02.2026;Aral Tankstelle 9530;70,38;\r\n15.02.2026;Gehalt ACME GmbH;;3.810,55\r\n16.02.2026;Lidl Dienstleistung 2448;48,53;\r\n18.02.2026;Stadtwerke München;67,78;\r\n23.02.2026;REWE Markt GmbH 2853;104,06;\r\n24.02.2026;REWE Markt GmbH 9981;72,57;\r\n25.02.2026;REWE Markt GmbH 5736;70,97;\r\n26.02.2026;Lidl Dienstleistung 1926;26,93;\r\n27.02.2026;Aral Tankstelle 581;87,38;\r\n"
+ },
+ "seed_ledger": {
+  "dir": "ledger",
+  "encoding": "plain",
+  "transactions": [
+   [
+    1,
+    "giro",
+    "2025-12-01",
+    "Miete Hausverwaltung",
+    "MIETE HAUSVERWALTUNG",
+    "-1120.00",
+    1
+   ],
+   [
+    2,
+    "giro",
+    "2025-12-15",
+    "Gehalt ACME GmbH",
+    "GEHALT ACME GMBH",
+    "3810.55",
+    1
+   ]
+  ],
+  "batches": [
+   [
+    1,
+    "giro",
+    "old.csv",
+    2,
+    0
+   ]
+  ],
+  "overrides": [
+   [
+    2,
+    "bonus"
+   ]
+  ]
+ },
+ "steps": [
+  {
+   "args": [
+    "import",
+    "g.csv",
+    "--account",
+    "giro"
+   ],
+   "exit": 0,
+   "stdout": "batch 2: imported 36, duplicates 2\n"
+  },
+  {
+   "ledger": {
+    "dir": "ledger",
+    "transactions": [
+     [
+      1,
+      "giro",
+      "2025-12-01",
+      "Miete Hausverwaltung",
+      "MIETE HAUSVERWALTUNG",
+      "-1120.00",
+      1
+     ],
+     [
+      2,
+      "giro",
+      "2025-12-15",
+      "Gehalt ACME GmbH",
+      "GEHALT ACME GMBH",
+      "3810.55",
+      1
+     ],
+     [
+      3,
+      "giro",
+      "2025-12-03",
+      "Bäckerei Schäfer",
+      "BäCKEREI SCHäFER",
+      "-5.03",
+      2
+     ],
+     [
+      4,
+      "giro",
+      "2025-12-08",
+      "REWE Markt GmbH 2152",
+      "REWE MARKT GMBH",
+      "-29.04",
+      2
+     ],
+     [
+      5,
+      "giro",
+      "2025-12-12",
+      "Bäckerei Schäfer",
+      "BäCKEREI SCHäFER",
+      "-10.24",
+      2
+     ],
+     [
+      6,
+      "giro",
+      "2025-12-12",
+      "Aral Tankstelle 6086",
+      "ARAL TANKSTELLE",
+      "-53.98",
+      2
+     ],
+     [
+      7,
+      "giro",
+      "2025-12-15",
+      "Lidl Dienstleistung 4176",
+      "LIDL DIENSTLEISTUNG",
+      "-27.01",
+      2
+     ],
+     [
+      8,
+      "giro",
+      "2025-12-15",
+      "REWE Markt GmbH 6226",
+      "REWE MARKT GMBH",
+      "-42.63",
+      2
+     ],
+     [
+      9,
+      "giro",
+      "2025-12-16",
+      "Lidl Dienstleistung 2486",
+      "LIDL DIENSTLEISTUNG",
+      "-44.47",
+      2
+     ],
+     [
+      10,
+      "giro",
+      "2025-12-20",
+      "Stadtwerke München",
+      "STADTWERKE MüNCHEN",
+      "-100.90",
+      2
+     ],
+     [
+      11,
+      "giro",
+      "2025-12-27",
+      "Stadtwerke München",
+      "STADTWERKE MüNCHEN",
+      "-83.64",
+      2
+     ],
+     [
+      12,
+      "giro",
+      "2025-12-27",
+      "Stadtwerke München",
+      "STADTWERKE MüNCHEN",
+      "-89.53",
+      2
+     ],
+     [
+      13,
+      "giro",
+      "2026-01-01",
+      "Miete Hausverwaltung",
+      "MIETE HAUSVERWALTUNG",
+      "-1120.00",
+      2
+     ],
+     [
+      14,
+      "giro",
+      "2026-01-03",
+      "REWE Markt GmbH 4934",
+      "REWE MARKT GMBH",
+      "-100.77",
+      2
+     ],
+     [
+      15,
+      "giro",
+      "2026-01-05",
+      "DB Vertrieb GmbH",
+      "DB VERTRIEB GMBH",
+      "-30.63",
+      2
+     ],
+     [
+      16,
+      "giro",
+      "2026-01-13",
+      "Telekom Deutschland",
+      "TELEKOM DEUTSCHLAND",
+      "-38.00",
+      2
+     ],
+     [
+      17,
+      "giro",
+      "2026-01-13",
+      "Telekom Deutschland",
+      "TELEKOM DEUTSCHLAND",
+      "-58.08",
+      2
+     ],
+     [
+      18,
+      "giro",
+      "2026-01-15",
+      "Gehalt ACME GmbH",
+      "GEHALT ACME GMBH",
+      "3810.55",
+      2
+     ],
+     [
+      19,
+      "giro",
+      "2026-01-20",
+      "EDEKA Center 4958",
+      "EDEKA CENTER",
+      "-21.96",
+      2
+     ],
+     [
+      20,
+      "giro",
+      "2026-01-20",
+      "Bäckerei Schäfer",
+      "BäCKEREI SCHäFER",
+      "-14.53",
+      2
+     ],
+     [
+      21,
+      "giro",
+      "2026-01-20",
+      "DB Vertrieb GmbH",
+      "DB VERTRIEB GMBH",
+      "-121.41",
+      2
+     ],
+     [
+      22,
+      "giro",
+      "2026-01-21",
+      "EDEKA Center 9053",
+      "EDEKA CENTER",
+      "-22.22",
+      2
+     ],
+     [
+      23,
+      "giro",
+      "2026-01-22",
+      "DB Vertrieb GmbH",
+      "DB VERTRIEB GMBH",
+      "121.41",
+      2
+     ],
+     [
+      24,
+      "giro",
+      "2026-01-25",
+      "Telekom Deutschland",
+      "TELEKOM DEUTSCHLAND",
+      "-51.01",
+      2
+     ],
+     [
+      25,
+      "giro",
+      "2026-01-30",
+      "Bäckerei Schäfer",
+      "BäCKEREI SCHäFER",
+      "-13.80",
+      2
+     ],
+     [
+      26,
+      "giro",
+      "2026-02-01",
+      "Miete Hausverwaltung",
+      "MIETE HAUSVERWALTUNG",
+      "-1120.00",
+      2
+     ],
+     [
+      27,
+      "giro",
+      "2026-02-04",
+      "EDEKA Center 6227",
+      "EDEKA CENTER",
+      "-77.14",
+      2
+     ],
+     [
+      28,
+      "giro",
+      "2026-02-05",
+      "DB Vertrieb GmbH",
+      "DB VERTRIEB GMBH",
+      "-66.78",
+      2
+     ],
+     [
+      29,
+      "giro",
+      "2026-02-06",
+      "EDEKA Center 6227",
+      "EDEKA CENTER",
+      "77.14",
+      2
+     ],
+     [
+      30,
+      "giro",
+      "2026-02-12",
+      "Aral Tankstelle 9530",
+      "ARAL TANKSTELLE",
+      "-70.38",
+      2
+     ],
+     [
+      31,
+      "giro",
+      "2026-02-15",
+      "Gehalt ACME GmbH",
+      "GEHALT ACME GMBH",
+      "3810.55",
+      2
+     ],
+     [
+      32,
+      "giro",
+      "2026-02-16",
+      "Lidl Dienstleistung 2448",
+      "LIDL DIENSTLEISTUNG",
+      "-48.53",
+      2
+     ],
+     [
+      33,
+      "giro",
+      "2026-02-18",
+      "Stadtwerke München",
+      "STADTWERKE MüNCHEN",
+      "-67.78",
+      2
+     ],
+     [
+      34,
+      "giro",
+      "2026-02-23",
+      "REWE Markt GmbH 2853",
+      "REWE MARKT GMBH",
+      "-104.06",
+      2
+     ],
+     [
+      35,
+      "giro",
+      "2026-02-24",
+      "REWE Markt GmbH 9981",
+      "REWE MARKT GMBH",
+      "-72.57",
+      2
+     ],
+     [
+      36,
+      "giro",
+      "2026-02-25",
+      "REWE Markt GmbH 5736",
+      "REWE MARKT GMBH",
+      "-70.97",
+      2
+     ],
+     [
+      37,
+      "giro",
+      "2026-02-26",
+      "Lidl Dienstleistung 1926",
+      "LIDL DIENSTLEISTUNG",
+      "-26.93",
+      2
+     ],
+     [
+      38,
+      "giro",
+      "2026-02-27",
+      "Aral Tankstelle 581",
+      "ARAL TANKSTELLE",
+      "-87.38",
+      2
+     ]
+    ],
+    "batches": [
+     [
+      1,
+      "giro",
+      "old.csv",
+      2,
+      0
+     ],
+     [
+      2,
+      "giro",
+      "g.csv",
+      36,
+      2
+     ]
+    ],
+    "overrides": [
+     [
+      2,
+      "bonus"
+     ]
+    ]
+   }
+  },
+  {
+   "args": [
+    "report",
+    "monthly"
+   ],
+   "exit": 0,
+   "stdout": "month     income  expenses      net  transactions\n-------  -------  --------  -------  ------------\n2025-12  3810.55   1606.47  2204.08            12\n2026-01  3931.96   1592.41  2339.55            13\n2026-02  3887.69   1812.52  2075.17            13\n(3 rows)\n"
+  },
+  {
+   "args": [
+    "list",
+    "--category",
+    "bonus"
+   ],
+   "exit": 0,
+   "stdout": "id  date        account  description        amount  category\n--  ----------  -------  ----------------  -------  --------\n 2  2025-12-15  giro     Gehalt ACME GmbH  3810.55  bonus\n(1 row)\n"
+  },
+  {
+   "args": [
+    "query",
+    "SELECT id, merchant, amount FROM transactions WHERE amount <= -1000 ORDER BY id"
+   ],
+   "exit": 0,
+   "stdout": "id  merchant                amount\n--  --------------------  --------\n 1  MIETE HAUSVERWALTUNG  -1120.00\n13  MIETE HAUSVERWALTUNG  -1120.00\n26  MIETE HAUSVERWALTUNG  -1120.00\n(3 rows)\n"
+  },
+  {
+   "args": [
+    "--format",
+    "csv",
+    "query",
+    "SELECT batch, file, imported FROM batches ORDER BY batch"
+   ],
+   "exit": 0,
+   "stdout": "batch,file,imported\n1,old.csv,2\n2,g.csv,36\n"
+  }
+ ]
+}

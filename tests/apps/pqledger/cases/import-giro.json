@@ -1,0 +1,253 @@
+{
+ "name": "import-giro",
+ "description": "semicolons, preamble, debit/credit, comma decimals, CRLF",
+ "files": {
+  "pqledger.conf": "[ledger]\ndata_dir = ledger\nrules_file = rules.conf\nbudget_file = budgets.conf\n\n[account card]\ndate_column = Transaction Date\ndate_format = MM/DD/YYYY\ncurrency_symbol = $\nthousands_separator = ,\ninvert_sign = true\n\n[account giro]\ndelimiter = ;\nskip_lines = 2\ndate_column = Buchungstag\ndate_format = DD.MM.YYYY\ndescription_column = Verwendungszweck\namount_mode = debit_credit\ndebit_column = Soll\ncredit_column = Haben\ndecimal_separator = ,\nthousands_separator = .\n",
+  "rules.conf": "# first match wins\ngroceries = WHOLE FOODS*, TRADER JOE*, SAFEWAY, REWE*, EDEKA*, LIDL*\ncoffee = SQ *BLUE BOTTLE*, STARBUCKS*, CAFé*\ntransport = SHELL*, CHEVRON*, UBER*, LYFT*, ARAL*, DB VERTRIEB*\nhousing = RENT*, MIETE*\nincome = PAYROLL*, GEHALT*\nshopping = AMAZON*, HOME DEPOT, REI\nutilities = PACIFIC GAS*, COMCAST*, STADTWERKE*, TELEKOM*\n",
+  "budgets.conf": "groceries = 600\ncoffee = 30.00\ntransport = 200\nshopping = 150.5\n",
+  "giro.csv": "Kontoumsätze Girokonto;;;\r\nZeitraum;;;\r\nBuchungstag;Verwendungszweck;Soll;Haben\r\n01.01.2026;Miete Hausverwaltung;1.120,00;\r\n04.01.2026;DB Vertrieb GmbH;71,83;\r\n06.01.2026;Bäckerei Schäfer;5,38;\r\n11.01.2026;Stadtwerke München;71,58;\r\n12.01.2026;Aral Tankstelle 3965;84,15;\r\n14.01.2026;Aral Tankstelle 3965;;84,15\r\n15.01.2026;Gehalt ACME GmbH;;3.810,55\r\n17.01.2026;Telekom Deutschland;37,59;\r\n21.01.2026;Aral Tankstelle 4563;62,13;\r\n24.01.2026;Lidl Dienstleistung 4217;43,28;\r\n28.01.2026;Aral Tankstelle 7398;83,54;\r\n01.02.2026;Miete Hausverwaltung;1.120,00;\r\n03.02.2026;Stadtwerke München;132,40;\r\n06.02.2026;EDEKA Center 894;48,38;\r\n06.02.2026;EDEKA Center 7206;61,26;\r\n12.02.2026;Telekom Deutschland;46,50;\r\n13.02.2026;Aral Tankstelle 8733;43,71;\r\n15.02.2026;Gehalt ACME GmbH;;3.810,55\r\n21.02.2026;Telekom Deutschland;59,78;\r\n23.02.2026;Telekom Deutschland;;59,78\r\n24.02.2026;Stadtwerke München;70,32;\r\n26.02.2026;Telekom Deutschland;43,21;\r\n"
+ },
+ "steps": [
+  {
+   "args": [
+    "init"
+   ],
+   "exit": 0,
+   "stdout": "initialized ledger\n"
+  },
+  {
+   "args": [
+    "import",
+    "giro.csv",
+    "--account",
+    "giro"
+   ],
+   "exit": 0,
+   "stdout": "batch 1: imported 22, duplicates 0\n"
+  },
+  {
+   "ledger": {
+    "dir": "ledger",
+    "transactions": [
+     [
+      1,
+      "giro",
+      "2026-01-01",
+      "Miete Hausverwaltung",
+      "MIETE HAUSVERWALTUNG",
+      "-1120.00",
+      1
+     ],
+     [
+      2,
+      "giro",
+      "2026-01-04",
+      "DB Vertrieb GmbH",
+      "DB VERTRIEB GMBH",
+      "-71.83",
+      1
+     ],
+     [
+      3,
+      "giro",
+      "2026-01-06",
+      "Bäckerei Schäfer",
+      "BäCKEREI SCHäFER",
+      "-5.38",
+      1
+     ],
+     [
+      4,
+      "giro",
+      "2026-01-11",
+      "Stadtwerke München",
+      "STADTWERKE MüNCHEN",
+      "-71.58",
+      1
+     ],
+     [
+      5,
+      "giro",
+      "2026-01-12",
+      "Aral Tankstelle 3965",
+      "ARAL TANKSTELLE",
+      "-84.15",
+      1
+     ],
+     [
+      6,
+      "giro",
+      "2026-01-14",
+      "Aral Tankstelle 3965",
+      "ARAL TANKSTELLE",
+      "84.15",
+      1
+     ],
+     [
+      7,
+      "giro",
+      "2026-01-15",
+      "Gehalt ACME GmbH",
+      "GEHALT ACME GMBH",
+      "3810.55",
+      1
+     ],
+     [
+      8,
+      "giro",
+      "2026-01-17",
+      "Telekom Deutschland",
+      "TELEKOM DEUTSCHLAND",
+      "-37.59",
+      1
+     ],
+     [
+      9,
+      "giro",
+      "2026-01-21",
+      "Aral Tankstelle 4563",
+      "ARAL TANKSTELLE",
+      "-62.13",
+      1
+     ],
+     [
+      10,
+      "giro",
+      "2026-01-24",
+      "Lidl Dienstleistung 4217",
+      "LIDL DIENSTLEISTUNG",
+      "-43.28",
+      1
+     ],
+     [
+      11,
+      "giro",
+      "2026-01-28",
+      "Aral Tankstelle 7398",
+      "ARAL TANKSTELLE",
+      "-83.54",
+      1
+     ],
+     [
+      12,
+      "giro",
+      "2026-02-01",
+      "Miete Hausverwaltung",
+      "MIETE HAUSVERWALTUNG",
+      "-1120.00",
+      1
+     ],
+     [
+      13,
+      "giro",
+      "2026-02-03",
+      "Stadtwerke München",
+      "STADTWERKE MüNCHEN",
+      "-132.40",
+      1
+     ],
+     [
+      14,
+      "giro",
+      "2026-02-06",
+      "EDEKA Center 894",
+      "EDEKA CENTER",
+      "-48.38",
+      1
+     ],
+     [
+      15,
+      "giro",
+      "2026-02-06",
+      "EDEKA Center 7206",
+      "EDEKA CENTER",
+      "-61.26",
+      1
+     ],
+     [
+      16,
+      "giro",
+      "2026-02-12",
+      "Telekom Deutschland",
+      "TELEKOM DEUTSCHLAND",
+      "-46.50",
+      1
+     ],
+     [
+      17,
+      "giro",
+      "2026-02-13",
+      "Aral Tankstelle 8733",
+      "ARAL TANKSTELLE",
+      "-43.71",
+      1
+     ],
+     [
+      18,
+      "giro",
+      "2026-02-15",
+      "Gehalt ACME GmbH",
+      "GEHALT ACME GMBH",
+      "3810.55",
+      1
+     ],
+     [
+      19,
+      "giro",
+      "2026-02-21",
+      "Telekom Deutschland",
+      "TELEKOM DEUTSCHLAND",
+      "-59.78",
+      1
+     ],
+     [
+      20,
+      "giro",
+      "2026-02-23",
+      "Telekom Deutschland",
+      "TELEKOM DEUTSCHLAND",
+      "59.78",
+      1
+     ],
+     [
+      21,
+      "giro",
+      "2026-02-24",
+      "Stadtwerke München",
+      "STADTWERKE MüNCHEN",
+      "-70.32",
+      1
+     ],
+     [
+      22,
+      "giro",
+      "2026-02-26",
+      "Telekom Deutschland",
+      "TELEKOM DEUTSCHLAND",
+      "-43.21",
+      1
+     ]
+    ],
+    "batches": [
+     [
+      1,
+      "giro",
+      "giro.csv",
+      22,
+      0
+     ]
+    ],
+    "overrides": []
+   }
+  },
+  {
+   "args": [
+    "list",
+    "--month",
+    "2026-01"
+   ],
+   "exit": 0,
+   "stdout": "id  date        account  description                 amount  category\n--  ----------  -------  ------------------------  --------  -------------\n 1  2026-01-01  giro     Miete Hausverwaltung      -1120.00  housing\n 2  2026-01-04  giro     DB Vertrieb GmbH            -71.83  transport\n 3  2026-01-06  giro     Bäckerei Schäfer             -5.38  uncategorized\n 4  2026-01-11  giro     Stadtwerke München          -71.58  utilities\n 5  2026-01-12  giro     Aral Tankstelle 3965        -84.15  transport\n 6  2026-01-14  giro     Aral Tankstelle 3965         84.15  transport\n 7  2026-01-15  giro     Gehalt ACME GmbH           3810.55  income\n 8  2026-01-17  giro     Telekom Deutschland         -37.59  utilities\n 9  2026-01-21  giro     Aral Tankstelle 4563        -62.13  transport\n10  2026-01-24  giro     Lidl Dienstleistung 4217    -43.28  groceries\n11  2026-01-28  giro     Aral Tankstelle 7398        -83.54  transport\n(11 rows)\n"
+  }
+ ]
+}

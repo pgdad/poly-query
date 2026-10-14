@@ -1,0 +1,24 @@
+{
+ "name": "budget-missing",
+ "description": "budget needs a budget_file",
+ "files": {
+  "pqledger.conf": "[ledger]\ndata_dir = ledger\n"
+ },
+ "steps": [
+  {
+   "args": [
+    "init"
+   ],
+   "exit": 0,
+   "stdout": "initialized ledger\n"
+  },
+  {
+   "args": [
+    "budget",
+    "--month",
+    "2026-01"
+   ],
+   "exit": 2
+  }
+ ]
+}

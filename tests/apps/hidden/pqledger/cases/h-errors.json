@@ -1,0 +1,131 @@
+{
+ "name": "h-errors",
+ "description": "more invalid input",
+ "files": {
+  "pqledger.conf": "[ledger]\ndata_dir = ledger\nrules_file = rules.conf\nbudget_file = budgets.conf\n\n[account card]\ndate_column = Transaction Date\ndate_format = MM/DD/YYYY\ncurrency_symbol = $\nthousands_separator = ,\ninvert_sign = true\n\n[account giro]\ndelimiter = ;\nskip_lines = 2\ndate_column = Buchungstag\ndate_format = DD.MM.YYYY\ndescription_column = Verwendungszweck\namount_mode = debit_credit\ndebit_column = Soll\ncredit_column = Haben\ndecimal_separator = ,\nthousands_separator = .\n",
+  "rules.conf": "# first match wins\ngroceries = WHOLE FOODS*, TRADER JOE*, SAFEWAY, REWE*, EDEKA*, LIDL*\ncoffee = SQ *BLUE BOTTLE*, STARBUCKS*, CAFé*\ntransport = SHELL*, CHEVRON*, UBER*, LYFT*, ARAL*, DB VERTRIEB*\nhousing = RENT*, MIETE*\nincome = PAYROLL*, GEHALT*\nshopping = AMAZON*, HOME DEPOT, REI\nutilities = PACIFIC GAS*, COMCAST*, STADTWERKE*, TELEKOM*\n",
+  "budgets.conf": "groceries = 600\ncoffee = 30.00\ntransport = 200\nshopping = 150.5\n",
+  "q.csv": "Date,Description,Amount\n2026-01-01,\"unterminated,-1.00\n",
+  "dc.csv": "Date,Description,Amount\n2026-01-01,X,12.\n",
+  "big.csv": "Date,Description,Amount\n2026-01-01,X,-12345678901234567.00\n",
+  "ok.csv": "Date,Description,Amount\n2026-01-01,X,9999999999999999.99\n"
+ },
+ "steps": [
+  {
+   "args": [
+    "init"
+   ],
+   "exit": 0,
+   "stdout": "initialized ledger\n"
+  },
+  {
+   "args": [
+    "import",
+    "q.csv",
+    "--account",
+    "a"
+   ],
+   "exit": 4
+  },
+  {
+   "args": [
+    "import",
+    "dc.csv",
+    "--account",
+    "a"
+   ],
+   "exit": 4,
+   "stderr_contains": [
+    "dc.csv:2:"
+   ]
+  },
+  {
+   "args": [
+    "import",
+    "big.csv",
+    "--account",
+    "a"
+   ],
+   "exit": 4,
+   "stderr_contains": [
+    "big.csv:2:"
+   ]
+  },
+  {
+   "args": [
+    "import",
+    "ok.csv",
+    "--account",
+    "a"
+   ],
+   "exit": 0,
+   "stdout": "batch 1: imported 1, duplicates 0\n"
+  },
+  {
+   "ledger": {
+    "dir": "ledger",
+    "transactions": [
+     [
+      1,
+      "a",
+      "2026-01-01",
+      "X",
+      "X",
+      "9999999999999999.99",
+      1
+     ]
+    ],
+    "batches": [
+     [
+      1,
+      "a",
+      "ok.csv",
+      1,
+      0
+     ]
+    ],
+    "overrides": []
+   }
+  },
+  {
+   "args": [
+    "set-category",
+    "0",
+    "x"
+   ],
+   "exit": 1
+  },
+  {
+   "args": [
+    "set-category",
+    "abc",
+    "x"
+   ],
+   "exit": 1
+  },
+  {
+   "args": [
+    "set-category",
+    "1",
+    "x",
+    "--clear"
+   ],
+   "exit": 1
+  },
+  {
+   "args": [
+    "budget"
+   ],
+   "exit": 1
+  },
+  {
+   "args": [
+    "report",
+    "merchants",
+    "--top",
+    "x"
+   ],
+   "exit": 1
+  }
+ ]
+}

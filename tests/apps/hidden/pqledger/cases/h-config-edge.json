@@ -1,0 +1,72 @@
+{
+ "name": "h-config-edge",
+ "description": "quoted values, comments, account sections, CRLF config",
+ "files": {
+  "p.conf": "﻿# books\r\n[ledger]\r\ndata_dir = \"my books\"\r\nrules_file=r.conf\r\n[account joint-1]\r\n  amount_mode = debit_credit\r\n  debit_column = 2\r\n  credit_column = 3\r\n description_column = 4\r\n date_column = 1\r\n",
+  "r.conf": "; rules\nfood = *BURGER*, ?ACO BELL\nfood = PIZZA*\nfun = *\n",
+  "j.csv": "Date,Out,In,What\n2026-02-01,12.00,,Burger King\n2026-02-01,,5.00,Pizza Hut\n2026-02-02,3.00,1.00,Taco Bell\n2026-02-03,,,Nothing\n"
+ },
+ "steps": [
+  {
+   "args": [
+    "--config",
+    "p.conf",
+    "init"
+   ],
+   "exit": 0,
+   "stdout": "initialized ledger\n"
+  },
+  {
+   "args": [
+    "--config",
+    "p.conf",
+    "import",
+    "j.csv",
+    "--account",
+    "joint-1"
+   ],
+   "exit": 4,
+   "stderr_contains": [
+    "j.csv:5:"
+   ]
+  },
+  {
+   "write": {
+    "j.csv": "Date,Out,In,What\n2026-02-01,12.00,,Burger King\n2026-02-01,,5.00,Pizza Hut\n2026-02-02,3.00,1.00,Taco Bell\n2026-02-03,1,,Kino\n"
+   }
+  },
+  {
+   "args": [
+    "--config",
+    "p.conf",
+    "import",
+    "j.csv",
+    "--account",
+    "joint-1"
+   ],
+   "exit": 0,
+   "stdout": "batch 1: imported 4, duplicates 0\n"
+  },
+  {
+   "args": [
+    "--config",
+    "p.conf",
+    "--format",
+    "csv",
+    "list"
+   ],
+   "exit": 0,
+   "stdout": "id,date,account,description,amount,category\n1,2026-02-01,joint-1,Burger King,-12.00,food\n2,2026-02-01,joint-1,Pizza Hut,5.00,food\n3,2026-02-02,joint-1,Taco Bell,-2.00,food\n4,2026-02-03,joint-1,Kino,-1.00,fun\n"
+  },
+  {
+   "args": [
+    "--config",
+    "p.conf",
+    "report",
+    "categories"
+   ],
+   "exit": 0,
+   "stdout": "category  spent  share  transactions\n--------  -----  -----  ------------\nfood      14.00   93.3             2\nfun        1.00    6.7             1\n(2 rows)\n"
+  }
+ ]
+}

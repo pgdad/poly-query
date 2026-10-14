@@ -1,0 +1,102 @@
+{
+ "name": "query",
+ "description": "SQL on the ledger tables",
+ "files": {
+  "pqledger.conf": "[ledger]\ndata_dir = ledger\nrules_file = rules.conf\nbudget_file = budgets.conf\n\n[account card]\ndate_column = Transaction Date\ndate_format = MM/DD/YYYY\ncurrency_symbol = $\nthousands_separator = ,\ninvert_sign = true\n\n[account giro]\ndelimiter = ;\nskip_lines = 2\ndate_column = Buchungstag\ndate_format = DD.MM.YYYY\ndescription_column = Verwendungszweck\namount_mode = debit_credit\ndebit_column = Soll\ncredit_column = Haben\ndecimal_separator = ,\nthousands_separator = .\n",
+  "rules.conf": "# first match wins\ngroceries = WHOLE FOODS*, TRADER JOE*, SAFEWAY, REWE*, EDEKA*, LIDL*\ncoffee = SQ *BLUE BOTTLE*, STARBUCKS*, CAFé*\ntransport = SHELL*, CHEVRON*, UBER*, LYFT*, ARAL*, DB VERTRIEB*\nhousing = RENT*, MIETE*\nincome = PAYROLL*, GEHALT*\nshopping = AMAZON*, HOME DEPOT, REI\nutilities = PACIFIC GAS*, COMCAST*, STADTWERKE*, TELEKOM*\n",
+  "budgets.conf": "groceries = 600\ncoffee = 30.00\ntransport = 200\nshopping = 150.5\n",
+  "chk.csv": "Date,Description,Amount\n2026-01-01,\"RENT - OAKWOOD APTS\",-1850.00\n2026-01-01,\"Netflix.com\",-15.16\n2026-01-02,\"Trader Joe's #3614\",-119.75\n2026-01-03,\"Netflix.com\",-15.94\n2026-01-04,\"Whole Foods Market #544\",-158.07\n2026-01-07,\"SQ *Blue Bottle Coffee 1750\",-10.65\n2026-01-07,\"Whole Foods Market #2967\",-156.42\n2026-01-15,\"PAYROLL ACME CORP\",4250.00\n2026-01-18,\"Shell Oil 8395\",-68.76\n2026-01-19,\"Starbucks Store 4606\",-9.95\n2026-01-19,\"Chevron #4786\",-25.21\n2026-01-22,\"UBER   *TRIP DE9XDE\",-16.43\n2026-02-01,\"RENT - OAKWOOD APTS\",-1850.00\n2026-02-03,\"7-Eleven 12\",-4.15\n2026-02-09,\"SAFEWAY 4071\",-114.46\n2026-02-10,\"REI #4342\",-294.00\n2026-02-11,\"Chipotle 1517\",-13.25\n2026-02-15,\"PAYROLL ACME CORP\",4250.00\n2026-02-17,\"Chipotle 1131\",-11.00\n2026-02-21,\"UBER   *TRIP UP7ALA\",-28.00\n2026-02-22,\"Chevron #5051\",-49.97\n2026-02-23,\"Café Mélange\",-7.06\n2026-02-25,\"REI #4972\",-98.04\n2026-02-27,\"7-Eleven 12\",-11.44\n"
+ },
+ "steps": [
+  {
+   "args": [
+    "init"
+   ],
+   "exit": 0,
+   "stdout": "initialized ledger\n"
+  },
+  {
+   "args": [
+    "import",
+    "chk.csv",
+    "--account",
+    "checking"
+   ],
+   "exit": 0,
+   "stdout": "batch 1: imported 24, duplicates 0\n"
+  },
+  {
+   "args": [
+    "set-category",
+    "3",
+    "gifts"
+   ],
+   "exit": 0,
+   "stdout": "transaction 3: category gifts\n"
+  },
+  {
+   "args": [
+    "query",
+    "SELECT COUNT(*) AS n FROM transactions"
+   ],
+   "exit": 0,
+   "stdout": " n\n--\n24\n(1 row)\n"
+  },
+  {
+   "args": [
+    "query",
+    "SELECT category, COUNT(*) AS n, SUM(amount) AS total FROM ledger GROUP BY category ORDER BY category"
+   ],
+   "exit": 0,
+   "stdout": "category       n     total\n-------------  -  --------\ncoffee         3    -27.66\ngifts          1   -119.75\ngroceries      3   -428.95\nhousing        2  -3700.00\nincome         2   8500.00\nshopping       2   -392.04\ntransport      5   -188.37\nuncategorized  6    -70.94\n(8 rows)\n"
+  },
+  {
+   "args": [
+    "--format",
+    "csv",
+    "query",
+    "SELECT rule_no, category, pattern FROM rules WHERE category = 'coffee' ORDER BY rule_no"
+   ],
+   "exit": 0,
+   "stdout": "rule_no,category,pattern\n7,coffee,SQ *BLUE BOTTLE*\n8,coffee,STARBUCKS*\n9,coffee,CAFé*\n"
+  },
+  {
+   "args": [
+    "--format",
+    "json",
+    "query",
+    "SELECT category, amount FROM budgets WHERE amount > 100 ORDER BY category"
+   ],
+   "exit": 0,
+   "stdout": "{\"category\":\"groceries\",\"amount\":\"600.00\"}\n{\"category\":\"shopping\",\"amount\":\"150.50\"}\n{\"category\":\"transport\",\"amount\":\"200.00\"}\n"
+  },
+  {
+   "args": [
+    "query",
+    "SELECT t.id, o.category FROM transactions t JOIN overrides o ON t.id = o.id ORDER BY t.id"
+   ],
+   "exit": 0,
+   "stdout": "id  category\n--  --------\n 3  gifts\n(1 row)\n"
+  },
+  {
+   "args": [
+    "query",
+    "SELEC 1"
+   ],
+   "exit": 5,
+   "stderr_contains": [
+    "PARSE_ERROR"
+   ]
+  },
+  {
+   "args": [
+    "query",
+    "SELECT * FROM nowhere"
+   ],
+   "exit": 5,
+   "stderr_contains": [
+    "SEMANTIC_ERROR"
+   ]
+  }
+ ]
+}

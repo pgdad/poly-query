@@ -1,0 +1,53 @@
+{
+ "name": "merchant-normalization",
+ "description": "upper-casing, spaces, store-number tokens",
+ "files": {
+  "pqledger.conf": "[ledger]\ndata_dir = ledger\nrules_file = rules.conf\nbudget_file = budgets.conf\n\n[account card]\ndate_column = Transaction Date\ndate_format = MM/DD/YYYY\ncurrency_symbol = $\nthousands_separator = ,\ninvert_sign = true\n\n[account giro]\ndelimiter = ;\nskip_lines = 2\ndate_column = Buchungstag\ndate_format = DD.MM.YYYY\ndescription_column = Verwendungszweck\namount_mode = debit_credit\ndebit_column = Soll\ncredit_column = Haben\ndecimal_separator = ,\nthousands_separator = .\n",
+  "rules.conf": "# first match wins\ngroceries = WHOLE FOODS*, TRADER JOE*, SAFEWAY, REWE*, EDEKA*, LIDL*\ncoffee = SQ *BLUE BOTTLE*, STARBUCKS*, CAFé*\ntransport = SHELL*, CHEVRON*, UBER*, LYFT*, ARAL*, DB VERTRIEB*\nhousing = RENT*, MIETE*\nincome = PAYROLL*, GEHALT*\nshopping = AMAZON*, HOME DEPOT, REI\nutilities = PACIFIC GAS*, COMCAST*, STADTWERKE*, TELEKOM*\n",
+  "budgets.conf": "groceries = 600\ncoffee = 30.00\ntransport = 200\nshopping = 150.5\n",
+  "m.csv": "Date,Description,Amount\n2026-01-01,Whole Foods Market #10234,-1.00\n2026-01-01,  SQ *Blue  Bottle 4421 ,-2.00\n2026-01-01,Rent 2026,-3.00\n2026-01-01,7-Eleven 12,-4.00\n2026-01-01,#123,-5.00\n2026-01-01,\"Café\tMélange  #9\",-6.00\n2026-01-01,AMAZON.COM*X2 AMZN.COM/BILL,-7.00\n2026-01-01,Shop 12 345,-8.00\n2026-01-01,\"\",-9.00\n2026-01-01,REI #,-10.00\n"
+ },
+ "steps": [
+  {
+   "args": [
+    "init"
+   ],
+   "exit": 0,
+   "stdout": "initialized ledger\n"
+  },
+  {
+   "args": [
+    "import",
+    "m.csv",
+    "--account",
+    "x"
+   ],
+   "exit": 0,
+   "stdout": "batch 1: imported 10, duplicates 0\n"
+  },
+  {
+   "args": [
+    "export"
+   ],
+   "exit": 0,
+   "stdout": "id  account  date        description                  merchant                     amount  category       batch\n--  -------  ----------  ---------------------------  ---------------------------  ------  -------------  -----\n 1  x        2026-01-01  Whole Foods Market #10234    WHOLE FOODS MARKET            -1.00  groceries          1\n 2  x        2026-01-01  SQ *Blue  Bottle 4421        SQ *BLUE BOTTLE               -2.00  coffee             1\n 3  x        2026-01-01  Rent 2026                    RENT                          -3.00  housing            1\n 4  x        2026-01-01  7-Eleven 12                  7-ELEVEN 12                   -4.00  uncategorized      1\n 5  x        2026-01-01  #123                         #123                          -5.00  uncategorized      1\n 6  x        2026-01-01  Café\tMélange  #9             CAFé MéLANGE                  -6.00  coffee             1\n 7  x        2026-01-01  AMAZON.COM*X2 AMZN.COM/BILL  AMAZON.COM*X2 AMZN.COM/BILL   -7.00  shopping           1\n 8  x        2026-01-01  Shop 12 345                  SHOP 12                       -8.00  uncategorized      1\n 9  x        2026-01-01                                                             -9.00  uncategorized      1\n10  x        2026-01-01  REI #                        REI #                        -10.00  uncategorized      1\n(10 rows)\n"
+  },
+  {
+   "args": [
+    "--format",
+    "csv",
+    "export"
+   ],
+   "exit": 0,
+   "stdout": "id,account,date,description,merchant,amount,category,batch\n1,x,2026-01-01,Whole Foods Market #10234,WHOLE FOODS MARKET,-1.00,groceries,1\n2,x,2026-01-01,SQ *Blue  Bottle 4421,SQ *BLUE BOTTLE,-2.00,coffee,1\n3,x,2026-01-01,Rent 2026,RENT,-3.00,housing,1\n4,x,2026-01-01,7-Eleven 12,7-ELEVEN 12,-4.00,uncategorized,1\n5,x,2026-01-01,#123,#123,-5.00,uncategorized,1\n6,x,2026-01-01,Café\tMélange  #9,CAFé MéLANGE,-6.00,coffee,1\n7,x,2026-01-01,AMAZON.COM*X2 AMZN.COM/BILL,AMAZON.COM*X2 AMZN.COM/BILL,-7.00,shopping,1\n8,x,2026-01-01,Shop 12 345,SHOP 12,-8.00,uncategorized,1\n9,x,2026-01-01,\"\",\"\",-9.00,uncategorized,1\n10,x,2026-01-01,REI #,REI #,-10.00,uncategorized,1\n"
+  },
+  {
+   "args": [
+    "report",
+    "categories"
+   ],
+   "exit": 0,
+   "stdout": "category       spent  share  transactions\n-------------  -----  -----  ------------\nuncategorized  36.00   65.5             5\ncoffee          8.00   14.5             2\nshopping        7.00   12.7             1\nhousing         3.00    5.5             1\ngroceries       1.00    1.8             1\n(5 rows)\n"
+  }
+ ]
+}

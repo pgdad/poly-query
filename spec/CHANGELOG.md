@@ -1,5 +1,11 @@
 # Specification Changelog
 
+## apps 1.0.0 — 2026-10-14 (application family; engine spec unchanged)
+`spec/apps/pqledger.md` (the pqledger CLI: configuration, bank CSV import, duplicates, rules,
+reports, budgets, output formats, normative ledger layout in PQCF) and `spec/apps/embedding.md`
+(the in-process embedding API every engine exposes, packaging, `examples/embed-demo`), ADR-0018.
+Tests: `tests/apps/pqledger/runner.py` (public cases; hidden cases in `tests/apps/hidden/`).
+
 ## 1.3.0-cr6 — 2026-10-12 (capability `change.expression_limits`; resolves SPEC-Q-002)
 CR-6 `spec/changes/expression-limits.md` (ADR-0017): minimum statement sizes
 (1 MiB of text, nesting depth 1,000 with an operator chain counting as one level,

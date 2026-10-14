@@ -1,0 +1,52 @@
+{
+ "name": "output-formats",
+ "description": "table, csv and json quoting and escaping",
+ "files": {
+  "pqledger.conf": "[ledger]\ndata_dir = ledger\n[output]\nformat = csv\n",
+  "x.csv": "Date,Description,Amount\n2026-01-01,\"Comma, Inc\",-1.00\n2026-01-02,\"Say \"\"hi\"\"\",-2.00\n2026-01-03,\"Tab\there\",3.00\n2026-01-04,\"Line\nbreak\",4.00\n2026-01-05,\"\",-5.00\n2026-01-06,Back\\slash,0.00\n2026-01-07,Ünïcödé ✓,-0.50\n"
+ },
+ "steps": [
+  {
+   "args": [
+    "init"
+   ],
+   "exit": 0,
+   "stdout": "initialized ledger\n"
+  },
+  {
+   "args": [
+    "import",
+    "x.csv",
+    "--account",
+    "a"
+   ],
+   "exit": 0,
+   "stdout": "batch 1: imported 7, duplicates 0\n"
+  },
+  {
+   "args": [
+    "export"
+   ],
+   "exit": 0,
+   "stdout": "id,account,date,description,merchant,amount,category,batch\n1,a,2026-01-01,\"Comma, Inc\",\"COMMA, INC\",-1.00,uncategorized,1\n2,a,2026-01-02,\"Say \"\"hi\"\"\",\"SAY \"\"HI\"\"\",-2.00,uncategorized,1\n3,a,2026-01-03,Tab\there,TAB HERE,3.00,uncategorized,1\n4,a,2026-01-04,\"Line\nbreak\",\"LINE\nBREAK\",4.00,uncategorized,1\n5,a,2026-01-05,\"\",\"\",-5.00,uncategorized,1\n6,a,2026-01-06,Back\\slash,BACK\\SLASH,0.00,uncategorized,1\n7,a,2026-01-07,Ünïcödé ✓,ÜNïCöDé ✓,-0.50,uncategorized,1\n"
+  },
+  {
+   "args": [
+    "--format",
+    "json",
+    "export"
+   ],
+   "exit": 0,
+   "stdout": "{\"id\":1,\"account\":\"a\",\"date\":\"2026-01-01\",\"description\":\"Comma, Inc\",\"merchant\":\"COMMA, INC\",\"amount\":\"-1.00\",\"category\":\"uncategorized\",\"batch\":1}\n{\"id\":2,\"account\":\"a\",\"date\":\"2026-01-02\",\"description\":\"Say \\\"hi\\\"\",\"merchant\":\"SAY \\\"HI\\\"\",\"amount\":\"-2.00\",\"category\":\"uncategorized\",\"batch\":1}\n{\"id\":3,\"account\":\"a\",\"date\":\"2026-01-03\",\"description\":\"Tab\\there\",\"merchant\":\"TAB HERE\",\"amount\":\"3.00\",\"category\":\"uncategorized\",\"batch\":1}\n{\"id\":4,\"account\":\"a\",\"date\":\"2026-01-04\",\"description\":\"Line\\nbreak\",\"merchant\":\"LINE\\nBREAK\",\"amount\":\"4.00\",\"category\":\"uncategorized\",\"batch\":1}\n{\"id\":5,\"account\":\"a\",\"date\":\"2026-01-05\",\"description\":\"\",\"merchant\":\"\",\"amount\":\"-5.00\",\"category\":\"uncategorized\",\"batch\":1}\n{\"id\":6,\"account\":\"a\",\"date\":\"2026-01-06\",\"description\":\"Back\\\\slash\",\"merchant\":\"BACK\\\\SLASH\",\"amount\":\"0.00\",\"category\":\"uncategorized\",\"batch\":1}\n{\"id\":7,\"account\":\"a\",\"date\":\"2026-01-07\",\"description\":\"Ünïcödé ✓\",\"merchant\":\"ÜNïCöDé ✓\",\"amount\":\"-0.50\",\"category\":\"uncategorized\",\"batch\":1}\n"
+  },
+  {
+   "args": [
+    "--format",
+    "table",
+    "accounts"
+   ],
+   "exit": 0,
+   "stdout": "account  transactions  balance  first       last\n-------  ------------  -------  ----------  ----------\na                   7    -1.50  2026-01-01  2026-01-07\n(1 row)\n"
+  }
+ ]
+}

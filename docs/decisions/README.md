@@ -19,3 +19,4 @@
 | [ADR-0015](ADR-0015.md) | Benchmarks run natively on the host, not in Docker |
 | [ADR-0016](ADR-0016.md) | Assembly languages: kernel experiment family now, complete engines as a separate cohort |
 | [ADR-0017](ADR-0017.md) | Expression size limits: capability-scoped CR-6 resolves SPEC-Q-002 |
+| [ADR-0018](ADR-0018.md) | Application family: embedding API and the pqledger CLI |

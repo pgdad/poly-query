@@ -88,11 +88,14 @@ TASK_EXTRA_PATHS = {"optimize-latency": ["benchmarks/workloads"], "jvm-tuning": 
                                        "benchmarks/workloads"],
                     "optimize-scaling": ["benchmarks/workloads", "benchmarks/harness/bench.py",
                                          "benchmarks/harness/startup_probe.py",
-                                         "tests/regression/robustness_probe.py"]}
+                                         "tests/regression/robustness_probe.py"],
+                    # Public application cases only; tests/apps/hidden stays in the repository.
+                    "app-pqledger": ["tests/apps/pqledger", "tests/regression/robustness_probe.py"]}
 
 TRUSTED_PATHS = ["tests", "spec"]
 # Inputs a task's validation reads beyond tests/ and spec/: taken from the repository, never the workspace.
-TASK_TRUSTED_EXTRA = {"fix-large-data": ["benchmarks/workloads", "datasets/generators", "datasets/manifests"]}
+TASK_TRUSTED_EXTRA = {"fix-large-data": ["benchmarks/workloads", "datasets/generators", "datasets/manifests"],
+                      "app-pqledger": ["datasets/generators"]}
 TRUSTED_KERNEL_PATHS = ["spec", "native-kernels/Makefile", "native-kernels/include", "native-kernels/reference-c",
                         "native-kernels/tests", "tests/kernels-hidden"]
 
@@ -828,6 +831,18 @@ fi
    --logs large-data-logs --report large-data.json > validate-large-data.log 2>&1; echo "large_data_exit=$?" >> validate-status
 rm -rf datasets/generated/10m
 """
+    if m["task"] == "app-pqledger":
+        # Public and hidden application cases, traced (in-process use, spec/apps/pqledger.md §1), and the
+        # deliverables the documentation criteria name.
+        impl = f"implementations/{lang}"
+        script += f"""if [ -x {impl}/bin/pqledger ]; then
+python3 tests/apps/pqledger/runner.py --app {impl}/bin/pqledger --embed-demo {impl}/bin/pq-embed-demo \
+   --cases tests/apps/pqledger/cases --cases tests/apps/hidden/pqledger/cases --trace --report app-tests.json \
+   > validate-app.log 2>&1; echo "app_exit=$?" >> validate-status
+else echo "app_exit=3" >> validate-status; fi
+d=0; for f in APP.md EMBEDDING.md; do [ "$(wc -c < {impl}/$f 2>/dev/null || echo 0)" -ge 2000 ] || d=1; done
+for x in app examples/embed-demo; do [ -d {impl}/$x ] || d=1; done; echo "docs_exit=$d" >> validate-status
+"""
     cfg = rd / "config"
     t0 = time.time()
     host = agent_host(lang)
@@ -861,7 +876,7 @@ rm -rf datasets/generated/10m
             d = json.loads(p.read_text())
             out["extra"][x] = d.get("summary") or d
     for f in ["conformance.json", *extra, "validate-build.log", "validate-conformance.log", "expression-limits.json",
-              "large-data.json"]:
+              "large-data.json", "app-tests.json", "validate-app.log"]:
         if (vd / f).exists():
             shutil.copy(vd / f, rd / f)
     out["outcome"] = classify(m, out)
@@ -1024,7 +1039,8 @@ def run_native_arm(kernels_dir: Path, out_dir: Path) -> dict:
                                                          "sve_default_vector_length_bytes", "governor")}}
 
 
-CAPS_UNCHANGED_TASKS = {"refactor-plan-separation", "debug-mutant", "optimize-latency", "jvm-tuning", "optimize-scaling"}
+CAPS_UNCHANGED_TASKS = {"refactor-plan-separation", "debug-mutant", "optimize-latency", "jvm-tuning", "optimize-scaling",
+                        "app-pqledger"}
 TASK_REQUIRED_CAPS = {"change-union-all": "change.union_all", "change-decimal38": "change.decimal38",
                       "change-expression-limits": "change.expression_limits",
                       "native": "native.kernels"}
@@ -1065,7 +1081,10 @@ def classify(m: dict, v: dict) -> str:
         elif isinstance(s, dict) and "failed" in s and s["failed"]:
             ok = False
     # Fail closed: a native check that ran without a library would otherwise pass on the fallback path (HI-008).
-    if any(v["status"].get(k, "0") != "0" for k in ("native_lib_exit", "native_exit", "limits_exit", "large_data_exit")):
+    if any(v["status"].get(k, "0") != "0" for k in ("native_lib_exit", "native_exit", "limits_exit", "large_data_exit",
+                                                   "app_exit", "docs_exit")):
+        ok = False
+    if m["task"] == "app-pqledger" and not {"app_exit", "docs_exit"} <= set(v["status"]):
         ok = False
     rc = m.get("agent_exit_code")
     # A killed agent did not finish its task, even if what it had committed passes.
@@ -1104,7 +1123,7 @@ def record(run_id: str) -> Path:
     dest.mkdir(parents=True, exist_ok=True)
     for f in ["manifest.json", "telemetry.json", "validation.json", "conformance.json", "conformance-http.json",
               "conformance-modes.json", "http-suite.json", "kernel-bench.json", "compliance.json",
-              "expression-limits.json", "large-data.json"]:
+              "expression-limits.json", "large-data.json", "app-tests.json"]:
         if (rd / f).exists():
             shutil.copy(rd / f, dest / f)
     if (rd / "native-arm").is_dir():

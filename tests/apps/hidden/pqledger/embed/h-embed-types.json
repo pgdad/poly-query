@@ -1,0 +1,12 @@
+{
+ "name": "h-embed-types",
+ "files": {
+  "t.csv": "id,name,amount,day\n1,ann,10.50,2026-01-01\n2,bob,-3.25,2026-01-02\n3,\"c, d\",0.75,2026-01-02\n"
+ },
+ "args": [
+  "t.csv",
+  "SELECT name, amount * 2 AS twice, amount > 0 AS pos, CAST(NULL AS STRING) AS z FROM t WHERE id <> 2 ORDER BY name DESC"
+ ],
+ "exit": 0,
+ "stdout": "name,twice,pos,z\n\"c, d\",1.500000,true,\nann,21.000000,true,\n"
+}

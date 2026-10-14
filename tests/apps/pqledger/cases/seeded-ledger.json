@@ -1,0 +1,371 @@
+{
+ "name": "seeded-ledger",
+ "description": "a ledger written elsewhere (DICT/RLE encodings) is read and extended",
+ "files": {
+  "pqledger.conf": "[ledger]\ndata_dir = ledger\nrules_file = rules.conf\nbudget_file = budgets.conf\n\n[account card]\ndate_column = Transaction Date\ndate_format = MM/DD/YYYY\ncurrency_symbol = $\nthousands_separator = ,\ninvert_sign = true\n\n[account giro]\ndelimiter = ;\nskip_lines = 2\ndate_column = Buchungstag\ndate_format = DD.MM.YYYY\ndescription_column = Verwendungszweck\namount_mode = debit_credit\ndebit_column = Soll\ncredit_column = Haben\ndecimal_separator = ,\nthousands_separator = .\n",
+  "rules.conf": "# first match wins\ngroceries = WHOLE FOODS*, TRADER JOE*, SAFEWAY, REWE*, EDEKA*, LIDL*\ncoffee = SQ *BLUE BOTTLE*, STARBUCKS*, CAFé*\ntransport = SHELL*, CHEVRON*, UBER*, LYFT*, ARAL*, DB VERTRIEB*\nhousing = RENT*, MIETE*\nincome = PAYROLL*, GEHALT*\nshopping = AMAZON*, HOME DEPOT, REI\nutilities = PACIFIC GAS*, COMCAST*, STADTWERKE*, TELEKOM*\n",
+  "budgets.conf": "groceries = 600\ncoffee = 30.00\ntransport = 200\nshopping = 150.5\n",
+  "chk.csv": "Date,Description,Amount\n2026-01-01,\"RENT - OAKWOOD APTS\",-1850.00\n2026-01-01,\"Netflix.com\",-15.16\n2026-01-02,\"Trader Joe's #3614\",-119.75\n2026-01-03,\"Netflix.com\",-15.94\n2026-01-04,\"Whole Foods Market #544\",-158.07\n2026-01-07,\"SQ *Blue Bottle Coffee 1750\",-10.65\n2026-01-07,\"Whole Foods Market #2967\",-156.42\n2026-01-15,\"PAYROLL ACME CORP\",4250.00\n2026-01-18,\"Shell Oil 8395\",-68.76\n2026-01-19,\"Starbucks Store 4606\",-9.95\n2026-01-19,\"Chevron #4786\",-25.21\n2026-01-22,\"UBER   *TRIP DE9XDE\",-16.43\n2026-02-01,\"RENT - OAKWOOD APTS\",-1850.00\n2026-02-03,\"7-Eleven 12\",-4.15\n2026-02-09,\"SAFEWAY 4071\",-114.46\n2026-02-10,\"REI #4342\",-294.00\n2026-02-11,\"Chipotle 1517\",-13.25\n2026-02-15,\"PAYROLL ACME CORP\",4250.00\n2026-02-17,\"Chipotle 1131\",-11.00\n2026-02-21,\"UBER   *TRIP UP7ALA\",-28.00\n2026-02-22,\"Chevron #5051\",-49.97\n2026-02-23,\"Café Mélange\",-7.06\n2026-02-25,\"REI #4972\",-98.04\n2026-02-27,\"7-Eleven 12\",-11.44\n"
+ },
+ "seed_ledger": {
+  "dir": "ledger",
+  "encoding": "compact",
+  "transactions": [
+   [
+    7,
+    "checking",
+    "2026-01-01",
+    "RENT - OAKWOOD APTS",
+    "RENT - OAKWOOD APTS",
+    "-1850.00",
+    3
+   ],
+   [
+    9,
+    "old",
+    "2025-12-24",
+    "Gift shop",
+    "GIFT SHOP",
+    "-40.00",
+    3
+   ],
+   [
+    12,
+    "old",
+    "2025-12-31",
+    "Interest",
+    "INTEREST",
+    "0.12",
+    4
+   ]
+  ],
+  "batches": [
+   [
+    3,
+    "checking",
+    "dec.csv",
+    2,
+    0
+   ],
+   [
+    4,
+    "old",
+    "int.csv",
+    1,
+    0
+   ]
+  ],
+  "overrides": [
+   [
+    9,
+    "gifts"
+   ]
+  ]
+ },
+ "steps": [
+  {
+   "args": [
+    "accounts"
+   ],
+   "exit": 0,
+   "stdout": "account   transactions   balance  first       last\n--------  ------------  --------  ----------  ----------\nchecking             1  -1850.00  2026-01-01  2026-01-01\nold                  2    -39.88  2025-12-24  2025-12-31\n(2 rows)\n"
+  },
+  {
+   "args": [
+    "import",
+    "chk.csv",
+    "--account",
+    "checking"
+   ],
+   "exit": 0,
+   "stdout": "batch 5: imported 23, duplicates 1\n"
+  },
+  {
+   "ledger": {
+    "dir": "ledger",
+    "transactions": [
+     [
+      7,
+      "checking",
+      "2026-01-01",
+      "RENT - OAKWOOD APTS",
+      "RENT - OAKWOOD APTS",
+      "-1850.00",
+      3
+     ],
+     [
+      9,
+      "old",
+      "2025-12-24",
+      "Gift shop",
+      "GIFT SHOP",
+      "-40.00",
+      3
+     ],
+     [
+      12,
+      "old",
+      "2025-12-31",
+      "Interest",
+      "INTEREST",
+      "0.12",
+      4
+     ],
+     [
+      13,
+      "checking",
+      "2026-01-01",
+      "Netflix.com",
+      "NETFLIX.COM",
+      "-15.16",
+      5
+     ],
+     [
+      14,
+      "checking",
+      "2026-01-02",
+      "Trader Joe's #3614",
+      "TRADER JOE'S",
+      "-119.75",
+      5
+     ],
+     [
+      15,
+      "checking",
+      "2026-01-03",
+      "Netflix.com",
+      "NETFLIX.COM",
+      "-15.94",
+      5
+     ],
+     [
+      16,
+      "checking",
+      "2026-01-04",
+      "Whole Foods Market #544",
+      "WHOLE FOODS MARKET",
+      "-158.07",
+      5
+     ],
+     [
+      17,
+      "checking",
+      "2026-01-07",
+      "SQ *Blue Bottle Coffee 1750",
+      "SQ *BLUE BOTTLE COFFEE",
+      "-10.65",
+      5
+     ],
+     [
+      18,
+      "checking",
+      "2026-01-07",
+      "Whole Foods Market #2967",
+      "WHOLE FOODS MARKET",
+      "-156.42",
+      5
+     ],
+     [
+      19,
+      "checking",
+      "2026-01-15",
+      "PAYROLL ACME CORP",
+      "PAYROLL ACME CORP",
+      "4250.00",
+      5
+     ],
+     [
+      20,
+      "checking",
+      "2026-01-18",
+      "Shell Oil 8395",
+      "SHELL OIL",
+      "-68.76",
+      5
+     ],
+     [
+      21,
+      "checking",
+      "2026-01-19",
+      "Starbucks Store 4606",
+      "STARBUCKS STORE",
+      "-9.95",
+      5
+     ],
+     [
+      22,
+      "checking",
+      "2026-01-19",
+      "Chevron #4786",
+      "CHEVRON",
+      "-25.21",
+      5
+     ],
+     [
+      23,
+      "checking",
+      "2026-01-22",
+      "UBER   *TRIP DE9XDE",
+      "UBER *TRIP DE9XDE",
+      "-16.43",
+      5
+     ],
+     [
+      24,
+      "checking",
+      "2026-02-01",
+      "RENT - OAKWOOD APTS",
+      "RENT - OAKWOOD APTS",
+      "-1850.00",
+      5
+     ],
+     [
+      25,
+      "checking",
+      "2026-02-03",
+      "7-Eleven 12",
+      "7-ELEVEN 12",
+      "-4.15",
+      5
+     ],
+     [
+      26,
+      "checking",
+      "2026-02-09",
+      "SAFEWAY 4071",
+      "SAFEWAY",
+      "-114.46",
+      5
+     ],
+     [
+      27,
+      "checking",
+      "2026-02-10",
+      "REI #4342",
+      "REI",
+      "-294.00",
+      5
+     ],
+     [
+      28,
+      "checking",
+      "2026-02-11",
+      "Chipotle 1517",
+      "CHIPOTLE",
+      "-13.25",
+      5
+     ],
+     [
+      29,
+      "checking",
+      "2026-02-15",
+      "PAYROLL ACME CORP",
+      "PAYROLL ACME CORP",
+      "4250.00",
+      5
+     ],
+     [
+      30,
+      "checking",
+      "2026-02-17",
+      "Chipotle 1131",
+      "CHIPOTLE",
+      "-11.00",
+      5
+     ],
+     [
+      31,
+      "checking",
+      "2026-02-21",
+      "UBER   *TRIP UP7ALA",
+      "UBER *TRIP UP7ALA",
+      "-28.00",
+      5
+     ],
+     [
+      32,
+      "checking",
+      "2026-02-22",
+      "Chevron #5051",
+      "CHEVRON",
+      "-49.97",
+      5
+     ],
+     [
+      33,
+      "checking",
+      "2026-02-23",
+      "Café Mélange",
+      "CAFé MéLANGE",
+      "-7.06",
+      5
+     ],
+     [
+      34,
+      "checking",
+      "2026-02-25",
+      "REI #4972",
+      "REI",
+      "-98.04",
+      5
+     ],
+     [
+      35,
+      "checking",
+      "2026-02-27",
+      "7-Eleven 12",
+      "7-ELEVEN 12",
+      "-11.44",
+      5
+     ]
+    ],
+    "batches": [
+     [
+      3,
+      "checking",
+      "dec.csv",
+      2,
+      0
+     ],
+     [
+      4,
+      "old",
+      "int.csv",
+      1,
+      0
+     ],
+     [
+      5,
+      "checking",
+      "chk.csv",
+      23,
+      1
+     ]
+    ],
+    "overrides": [
+     [
+      9,
+      "gifts"
+     ]
+    ]
+   }
+  },
+  {
+   "args": [
+    "report",
+    "categories"
+   ],
+   "exit": 0,
+   "stdout": "category         spent  share  transactions\n-------------  -------  -----  ------------\nhousing        3700.00   74.5             2\ngroceries       548.70   11.0             4\nshopping        392.04    7.9             2\ntransport       188.37    3.8             5\nuncategorized    70.94    1.4             6\ngifts            40.00    0.8             1\ncoffee           27.66    0.6             3\n(7 rows)\n"
+  },
+  {
+   "args": [
+    "export",
+    "--to",
+    "2026-01"
+   ],
+   "exit": 0,
+   "stdout": "id  account   date        description                  merchant                  amount  category       batch\n--  --------  ----------  ---------------------------  ----------------------  --------  -------------  -----\n 7  checking  2026-01-01  RENT - OAKWOOD APTS          RENT - OAKWOOD APTS     -1850.00  housing            3\n 9  old       2025-12-24  Gift shop                    GIFT SHOP                 -40.00  gifts              3\n12  old       2025-12-31  Interest                     INTEREST                    0.12  uncategorized      4\n13  checking  2026-01-01  Netflix.com                  NETFLIX.COM               -15.16  uncategorized      5\n14  checking  2026-01-02  Trader Joe's #3614           TRADER JOE'S             -119.75  groceries          5\n15  checking  2026-01-03  Netflix.com                  NETFLIX.COM               -15.94  uncategorized      5\n16  checking  2026-01-04  Whole Foods Market #544      WHOLE FOODS MARKET       -158.07  groceries          5\n17  checking  2026-01-07  SQ *Blue Bottle Coffee 1750  SQ *BLUE BOTTLE COFFEE    -10.65  coffee             5\n18  checking  2026-01-07  Whole Foods Market #2967     WHOLE FOODS MARKET       -156.42  groceries          5\n19  checking  2026-01-15  PAYROLL ACME CORP            PAYROLL ACME CORP        4250.00  income             5\n20  checking  2026-01-18  Shell Oil 8395               SHELL OIL                 -68.76  transport          5\n21  checking  2026-01-19  Starbucks Store 4606         STARBUCKS STORE            -9.95  coffee             5\n22  checking  2026-01-19  Chevron #4786                CHEVRON                   -25.21  transport          5\n23  checking  2026-01-22  UBER   *TRIP DE9XDE          UBER *TRIP DE9XDE         -16.43  transport          5\n(14 rows)\n"
+  }
+ ]
+}

@@ -1,0 +1,72 @@
+{
+ "name": "share-rounding",
+ "description": "share is exact, rounded half away from zero",
+ "files": {
+  "pqledger.conf": "[ledger]\ndata_dir = ledger\nrules_file = rules.conf\nbudget_file = budgets.conf\n\n[account card]\ndate_column = Transaction Date\ndate_format = MM/DD/YYYY\ncurrency_symbol = $\nthousands_separator = ,\ninvert_sign = true\n\n[account giro]\ndelimiter = ;\nskip_lines = 2\ndate_column = Buchungstag\ndate_format = DD.MM.YYYY\ndescription_column = Verwendungszweck\namount_mode = debit_credit\ndebit_column = Soll\ncredit_column = Haben\ndecimal_separator = ,\nthousands_separator = .\n",
+  "rules.conf": "# first match wins\ngroceries = WHOLE FOODS*, TRADER JOE*, SAFEWAY, REWE*, EDEKA*, LIDL*\ncoffee = SQ *BLUE BOTTLE*, STARBUCKS*, CAFé*\ntransport = SHELL*, CHEVRON*, UBER*, LYFT*, ARAL*, DB VERTRIEB*\nhousing = RENT*, MIETE*\nincome = PAYROLL*, GEHALT*\nshopping = AMAZON*, HOME DEPOT, REI\nutilities = PACIFIC GAS*, COMCAST*, STADTWERKE*, TELEKOM*\n",
+  "budgets.conf": "groceries = 600\ncoffee = 30.00\ntransport = 200\nshopping = 150.5\n",
+  "s.csv": "Date,Description,Amount\n2026-05-01,Netflix.com,-1.00\n2026-05-01,Spotify USA,-2.00\n2026-05-01,Uber trip,-397.00\n2026-05-02,Lyft Ride,-0.01\n2026-05-02,Payroll Acme,100.00\n"
+ },
+ "steps": [
+  {
+   "args": [
+    "init"
+   ],
+   "exit": 0,
+   "stdout": "initialized ledger\n"
+  },
+  {
+   "args": [
+    "import",
+    "s.csv",
+    "--account",
+    "a"
+   ],
+   "exit": 0,
+   "stdout": "batch 1: imported 5, duplicates 0\n"
+  },
+  {
+   "args": [
+    "report",
+    "categories"
+   ],
+   "exit": 0,
+   "stdout": "category        spent  share  transactions\n-------------  ------  -----  ------------\ntransport      397.01   99.3             2\nuncategorized    3.00    0.7             2\n(2 rows)\n"
+  },
+  {
+   "args": [
+    "--format",
+    "csv",
+    "report",
+    "categories"
+   ],
+   "exit": 0,
+   "stdout": "category,spent,share,transactions\ntransport,397.01,99.3,2\nuncategorized,3.00,0.7,2\n"
+  },
+  {
+   "write": {
+    "s2.csv": "Date,Description,Amount\n2026-06-01,Uber X,-1.00\n2026-06-01,Shell 1,-1.00\n2026-06-01,C,-1.00\n"
+   }
+  },
+  {
+   "args": [
+    "import",
+    "s2.csv",
+    "--account",
+    "a"
+   ],
+   "exit": 0,
+   "stdout": "batch 2: imported 3, duplicates 0\n"
+  },
+  {
+   "args": [
+    "report",
+    "categories",
+    "--month",
+    "2026-06"
+   ],
+   "exit": 0,
+   "stdout": "category       spent  share  transactions\n-------------  -----  -----  ------------\ntransport       2.00   66.7             2\nuncategorized   1.00   33.3             1\n(2 rows)\n"
+  }
+ ]
+}

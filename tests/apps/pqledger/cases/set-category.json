@@ -1,0 +1,147 @@
+{
+ "name": "set-category",
+ "description": "overrides are stored in overrides.pqcf",
+ "files": {
+  "pqledger.conf": "[ledger]\ndata_dir = ledger\nrules_file = rules.conf\nbudget_file = budgets.conf\n\n[account card]\ndate_column = Transaction Date\ndate_format = MM/DD/YYYY\ncurrency_symbol = $\nthousands_separator = ,\ninvert_sign = true\n\n[account giro]\ndelimiter = ;\nskip_lines = 2\ndate_column = Buchungstag\ndate_format = DD.MM.YYYY\ndescription_column = Verwendungszweck\namount_mode = debit_credit\ndebit_column = Soll\ncredit_column = Haben\ndecimal_separator = ,\nthousands_separator = .\n",
+  "rules.conf": "# first match wins\ngroceries = WHOLE FOODS*, TRADER JOE*, SAFEWAY, REWE*, EDEKA*, LIDL*\ncoffee = SQ *BLUE BOTTLE*, STARBUCKS*, CAFé*\ntransport = SHELL*, CHEVRON*, UBER*, LYFT*, ARAL*, DB VERTRIEB*\nhousing = RENT*, MIETE*\nincome = PAYROLL*, GEHALT*\nshopping = AMAZON*, HOME DEPOT, REI\nutilities = PACIFIC GAS*, COMCAST*, STADTWERKE*, TELEKOM*\n",
+  "budgets.conf": "groceries = 600\ncoffee = 30.00\ntransport = 200\nshopping = 150.5\n",
+  "t.csv": "Date,Description,Amount\n2026-01-01,Mystery,-10.00\n2026-01-02,Mystery,-20.00\n"
+ },
+ "steps": [
+  {
+   "args": [
+    "init"
+   ],
+   "exit": 0,
+   "stdout": "initialized ledger\n"
+  },
+  {
+   "args": [
+    "import",
+    "t.csv",
+    "--account",
+    "a"
+   ],
+   "exit": 0,
+   "stdout": "batch 1: imported 2, duplicates 0\n"
+  },
+  {
+   "args": [
+    "set-category",
+    "2",
+    "gifts"
+   ],
+   "exit": 0,
+   "stdout": "transaction 2: category gifts\n"
+  },
+  {
+   "args": [
+    "set-category",
+    "2",
+    "books"
+   ],
+   "exit": 0,
+   "stdout": "transaction 2: category books\n"
+  },
+  {
+   "args": [
+    "set-category",
+    "9",
+    "gifts"
+   ],
+   "exit": 6
+  },
+  {
+   "ledger": {
+    "dir": "ledger",
+    "transactions": [
+     [
+      1,
+      "a",
+      "2026-01-01",
+      "Mystery",
+      "MYSTERY",
+      "-10.00",
+      1
+     ],
+     [
+      2,
+      "a",
+      "2026-01-02",
+      "Mystery",
+      "MYSTERY",
+      "-20.00",
+      1
+     ]
+    ],
+    "batches": [
+     [
+      1,
+      "a",
+      "t.csv",
+      2,
+      0
+     ]
+    ],
+    "overrides": [
+     [
+      2,
+      "books"
+     ]
+    ]
+   }
+  },
+  {
+   "args": [
+    "report",
+    "categories"
+   ],
+   "exit": 0,
+   "stdout": "category       spent  share  transactions\n-------------  -----  -----  ------------\nbooks          20.00   66.7             1\nuncategorized  10.00   33.3             1\n(2 rows)\n"
+  },
+  {
+   "args": [
+    "set-category",
+    "2",
+    "--clear"
+   ],
+   "exit": 0,
+   "stdout": "transaction 2: category cleared\n"
+  },
+  {
+   "ledger": {
+    "dir": "ledger",
+    "transactions": [
+     [
+      1,
+      "a",
+      "2026-01-01",
+      "Mystery",
+      "MYSTERY",
+      "-10.00",
+      1
+     ],
+     [
+      2,
+      "a",
+      "2026-01-02",
+      "Mystery",
+      "MYSTERY",
+      "-20.00",
+      1
+     ]
+    ],
+    "batches": [
+     [
+      1,
+      "a",
+      "t.csv",
+      2,
+      0
+     ]
+    ],
+    "overrides": []
+   }
+  }
+ ]
+}
