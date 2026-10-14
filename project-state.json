@@ -56,10 +56,9 @@
   "Debugging family remains too easy for both engines and kernels (kernel variant with symptom-only report and hidden-only failures: fixed in ~1 min)",
   "AArch64 kernel review findings: verification harnesses not committed, no BTI/GNU property note, block-size test constants not overridable",
   "Repeated attempts (n>1) per language/task for statistics (docs/methodology/statistics.md)",
-  "AArch64 assembly optimize-latency: 1.82x geomean but q01_filter_selective 8x slower (plus q16, q17 significantly slower)",
+  "AArch64 assembly optimize-latency: 1.82x geomean but q01_filter_selective 8x slower (plus q16, q17 significantly slower); still present in the 2026-10-14 re-benchmark (q01 0.55 ms vs 0.05 ms x86)",
   "Remaining unverified review findings: cross-thread longjmp via global jmp_buf (x86-64 asm), Go worker goroutines without recover (both need an internal fault), symlink-following data paths",
-  "x86-64 assembly at 10m after optimize-scaling: sorts (q14/q15), million-group aggregations and the large join probe still grow ~13-20x for 10x data; the main 10m benchmark row (70.7 ms) predates the fix (back-to-back 27.4 ms)",
-  "Storage open times in all benchmarks before 9edc603 are invalid (HI-012); re-measure open times in the next full benchmark"
+  "x86-64 assembly at 10m after optimize-scaling: sorts (q14/q15), million-group aggregations and the large join probe still grow ~13-20x for 10x data"
  ],
  "known_defects": [
   "See experiments/telemetry/harness-incidents.jsonl (HI-001..008 fixed; SPEC-Q-001 resolved for CR-2 engines)",
@@ -92,7 +91,7 @@
   "http_suite": "19/19 all engines (python fixed by its CR-6 run, 2026-10-13)"
  },
  "last_successful_commit": "3216d97bf70570d923a14ca1aaef2b7f28ec640b",
- "next_recommended_action": "Common Lisp large-data and x86 asm scaling tasks done and merged. Next candidates: a full 1m + 10m re-benchmark of all engines on current main (1m numbers predate CR-6 and both fixes; storage open times need re-measuring after HI-012), the AArch64 q01 regression, the large-data probe for the other engines, repeated attempts (n>1).",
+ "next_recommended_action": "Full 1m + 10m re-benchmark done (all engines agree; docs/results updated). Next candidates: the AArch64 q01 regression, the large-data probe for the other engines, repeated attempts (n>1).",
  "findings": [
   "go phase5 HTTP: single-client p95 ~40 ms vs median 1.2 ms (bimodal; consistent with Nagle/delayed-ACK interaction) — report as engine quality finding; clojure p95 16 ms",
   "CR-2 DECIMAL(38) was the most expensive change (6.25-16.50 USD); Go and Java needed a new wide-decimal representation",
@@ -111,7 +110,8 @@
   "GitHub CI green for the first time on 2026-10-13: all ten earlier runs failed building the CI image (404 on a JDK 'latest' URL); then Go (git safe.directory) and Python (python3 was 3.12, engine needs >= 3.13 for csv.QUOTE_NOTNULL) needed image fixes",
   "Large-data family: Common Lisp fix-large-data (a-fix-large-data-common-lisp-a1-20261013T234442Z, $8.37, 47 min, first attempt) streams CSV ingest, 64 GiB heap with a RESOURCE_LIMIT heap guard; large-data probe 4/4, conformance 731/731; 10m benchmark 20261014T113554Z: 20/20 ok, geomean 70.3 ms, 9.7 GiB, digests agree",
   "x86 asm optimize-scaling (a-optimize-scaling-x86_64-asm-engine-a1-20261013T235906Z, $17.53, 91 min, first attempt): cause was a 1 GiB cap on the query-memory pool (2.1M page faults per round at 10m) plus per-fork column statistics in the HTTP server; 10m geomean 63.7 -> 27.4 ms (2.33x), growth 22.9x -> 10.0x, 1m unchanged, HTTP 3-4x, RSS +12%, identical digests",
-  "HI-011 (large-data probe data generation in sandbox) and HI-012 (storage benchmark reopened a table whose indexes still existed; every open failed with ALREADY_EXISTS) fixed"
+  "HI-011 (large-data probe data generation in sandbox) and HI-012 (storage benchmark reopened a table whose indexes still existed; every open failed with ALREADY_EXISTS) fixed",
+  "Full re-benchmark 2026-10-14 (20261014T115525Z-1m / 20261014T120827Z-10m rebench-main-and-asm-x86, 20261014T115549Z / 20261014T115833Z rebench-asm-arm): all 8 engines 20/20 at both scales, identical results on x86 and ARM. Geomean 1m -> 10m: Go 1.90 -> 12.35, Rust 1.91 -> 14.20, Java 3.36 -> 19.52, Clojure 5.14 -> 41.02, Common Lisp 6.59 -> 68.79, Python 26.50 -> 239.66 ms; asm cohort x86 2.48 -> 27.39, AArch64 2.76 -> 23.46. First valid storage open times (HI-012 fixed)."
  ],
  "totals": {
   "track_a_runs": 118,

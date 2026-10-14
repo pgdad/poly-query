@@ -64,20 +64,27 @@ Phase 5 (optimization) was the most expensive phase for every language
 
 ## Runtime performance (1m rows, main line)
 
-Source: [`results/performance/20261011T172247Z-1m-main-after-reruns`](../../results/performance/20261011T172247Z-1m-main-after-reruns/summary.json),
-the engines on main after the real-workload optimization re-runs were merged
-(INT-001). HTTP throughput is from the earlier run
-[`20261011T051646Z-1m-m9-native`](../../results/performance/20261011T051646Z-1m-m9-native/summary.json)
-(before the optimization tasks); the new run did not include the HTTP benchmark.
+Source: [`20261014T115525Z-1m-rebench-main-and-asm-x86`](../../results/performance/20261014T115525Z-1m-rebench-main-and-asm-x86/summary.json) (2026-10-14), a full re-benchmark of main after CR-6, the Common Lisp
+large-data fix and the x86 assembly scaling fix: 7 measured repetitions after 3 warm-ups, CPUs
+0-15, HTTP with 1/4/16 clients, every engine in the same run. All engines return identical
+results for all 20 queries.
 
-| engine | startup | load 9 tables | peak RSS | query latency, geomean of 20 medians | HTTP q/s (16 clients, earlier run) |
+| engine | startup | load 9 tables | peak RSS | query latency, geomean of 20 medians | HTTP q/s (1 / 4 / 16 clients) |
 |---|---:|---:|---:|---:|---:|
-| Rust | 1.2 ms | 2.6 s | 1.3 GiB | 1.6 ms | 451 |
-| Go | 1.9 ms | 2.7 s | 2.4 GiB | 1.8 ms | 295 |
-| Java | 25 ms | 4.8 s | 3.0 GiB | 3.2 ms | 1,137 |
-| Clojure | 127 ms | 10.7 s | 8.7 GiB | 5.5 ms | 569 |
-| Common Lisp | 4.2 ms | 6.5 s | 1.7 GiB | 7.0 ms | 206 |
-| Python | 222 ms | 25.0 s | 15.8 GiB | 22.9 ms | 10 |
+| Go | 2.0 ms | 2.8 s | 2.4 GiB | 1.90 ms | 988 / 2,275 / 3,688 |
+| Rust | 1.0 ms | 2.6 s | 1.3 GiB | 1.91 ms | 1,179 / 1,824 / 2,189 |
+| Java | 24 ms | 4.6 s | 3.1 GiB | 3.36 ms | 632 / 951 / 1,094 |
+| Clojure | 125 ms | 10.4 s | 7.5 GiB | 5.14 ms | 299 / 832 / 1,067 |
+| Common Lisp | 14 ms | 2.7 s | 2.1 GiB | 6.59 ms | 146 / 145 / 105 |
+| Python | 229 ms | 23.9 s | 16.4 GiB | 26.50 ms | 47 / 17 / 11 |
+
+Go and Rust are tied. Compared with the previous round
+([`20261012T115848Z-1m-main-and-asm-x86`](../../results/performance/20261012T115848Z-1m-main-and-asm-x86/summary.json),
+before CR-6) every engine is within the ~20 % between-session spread, except Common Lisp's load
+(6.2 → 2.7 s, the streaming CSV ingest of its large-data fix) and its startup (4 → 14 ms, a 64 GiB
+heap reservation instead of 8 GiB). Earlier 1m runs:
+[`20261011T172247Z-1m-main-after-reruns`](../../results/performance/20261011T172247Z-1m-main-after-reruns/summary.json)
+(after the optimization re-runs, no HTTP).
 
 The same engine code measured in three separate sessions on the quiet host varied
 by up to ~20 % in geomean latency (Go 1.65–2.03 ms; others 5–10 %), so differences
@@ -111,39 +118,30 @@ the dispatcher currently prefers SVE. Sources:
 
 ## Runtime performance at 10m rows
 
-Same workload, harness settings (7 reps, 3 warmups, CPUs 0-15, HTTP 1/4/16 clients) and
-engines on main after CR-6, at ten times the data: the main tables have 10 million rows and the
-dataset is 1.9 GB of CSV. The memory cap was raised from 96 to 180 GiB so that Python fits.
-x86 (six engines and the x86-64 assembly engine):
-[`20261013T111035Z-10m-main-and-asm-x86`](../../results/performance/20261013T111035Z-10m-main-and-asm-x86/summary.json).
-AArch64 engine on spark:
-[`20261013T111147Z-10m-asm-arm`](../../results/performance/20261013T111147Z-10m-asm-arm/summary.json).
-Common Lisp after its large-data fix (same settings, quiet host):
-[`20261014T113554Z-10m-common-lisp-fix-large-data`](../../results/performance/20261014T113554Z-10m-common-lisp-fix-large-data/summary.json).
+Same workload and harness settings at ten times the data: the main tables have 10 million rows
+and the dataset is 1.9 GB of CSV. The memory cap is 180 GiB so that Python fits. Source:
+[`20261014T120827Z-10m-rebench-main-and-asm-x86`](../../results/performance/20261014T120827Z-10m-rebench-main-and-asm-x86/summary.json) (six engines and the x86-64 assembly engine) and, on spark,
+[`20261014T115833Z-10m-rebench-asm-arm`](../../results/performance/20261014T115833Z-10m-rebench-asm-arm/summary.json) (AArch64 assembly engine), 2026-10-14, the same code as the 1m table above. Every
+engine returns identical results for all 20 queries, on both machines.
 
-| engine | queries ok | geomean latency 1m → 10m | growth | peak RSS 1m → 10m | load 9 tables 1m → 10m | HTTP q/s, 16 clients, 1m → 10m |
+| engine | queries ok | geomean latency 1m → 10m | growth | peak RSS 1m → 10m | load 9 tables at 10m | HTTP q/s, 16 clients, 1m → 10m |
 |---|---:|---:|---:|---:|---:|---:|
-| Go | 20/20 | 1.9 → 12.9 ms | 6.9× | 2.1 → 18.1 GiB | 3 → 29 s | 3,691 → 387 |
-| Rust | 20/20 | 2.0 → 15.1 ms | 7.4× | 1.3 → 9.7 GiB | 3 → 29 s | 2,181 → 100 |
-| Java | 20/20 | 3.4 → 19.5 ms | 5.7× | 3.1 → 31.0 GiB | 5 → 40 s | 1,160 → 30 |
-| Clojure | 20/20 | 5.5 → 39.6 ms | 7.2× | 8.7 → 29.3 GiB | 10 → 94 s | 1,016 → 57 |
-| Python | 20/20 | 24.7 → 246.2 ms | 10.0× | 15.8 → 171.1 GiB | 25 → 325 s | 11 → 1.3 |
-| Common Lisp (after fix-large-data) | 20/20 | 6.9 → 70.3 ms | 10.2× | 1.7 → 9.7 GiB | 27 s at 10m | 96 → 8.6 |
-| *x86-64 assembly (cohort)* | 20/20 | 2.9 → 70.7 ms | 24.8× | 1.6 → 11.0 GiB | 1 → 15 s | 232 → 17 |
-| *AArch64 assembly (cohort, ARM host)* | 20/20 | 2.7 → 24.6 ms | 9.2× | 0.7 → 7.5 GiB | 2 → 24 s | 881 → 59 |
+| Go | 20/20 | 1.90 → 12.35 ms | 6.5× | 2.4 → 18.6 GiB | 29 s | 3,688 → 383 |
+| Rust | 20/20 | 1.91 → 14.20 ms | 7.4× | 1.3 → 9.8 GiB | 29 s | 2,189 → 95 |
+| Java | 20/20 | 3.36 → 19.52 ms | 5.8× | 3.1 → 31.2 GiB | 40 s | 1,094 → 34 |
+| Clojure | 20/20 | 5.14 → 41.02 ms | 8.0× | 7.5 → 29.9 GiB | 93 s | 1,067 → 58 |
+| Common Lisp | 20/20 | 6.59 → 68.79 ms | 10.4× | 2.1 → 7.7 GiB | 27 s | 105 → 9 |
+| Python | 20/20 | 26.50 → 239.66 ms | 9.0× | 16.4 → 178.5 GiB | 319 s | 11 → 1.3 |
+| *x86-64 assembly (cohort)* | 20/20 | 2.48 → 27.39 ms | 11.0× | 1.3 → 12.2 GiB | 14 s | 442 → 26 |
+| *AArch64 assembly (cohort, ARM host)* | 20/20 | 2.76 → 23.46 ms | 8.5× | 0.8 → 8.2 GiB | 24 s | 913 → 56 |
 
-The 1m column is the 2026-10-12 benchmark
-([`20261012T115848Z-1m-main-and-asm-x86`](../../results/performance/20261012T115848Z-1m-main-and-asm-x86/),
-[`20261012T124929Z-1m-asm-arm`](../../results/performance/20261012T124929Z-1m-asm-arm/)), which predates
-the CR-6 changes, so the growth factors mix data scale with those code changes. The assembly
-engines are a separate cohort and are not ranked with the six engines; the AArch64 row is a
-different machine.
+The assembly engines are a separate cohort and are not ranked with the six engines; the AArch64
+row is a different machine. The first 10m round (2026-10-13,
+[`20261013T111035Z-10m-main-and-asm-x86`](../../results/performance/20261013T111035Z-10m-main-and-asm-x86/summary.json),
+[`20261013T111147Z-10m-asm-arm`](../../results/performance/20261013T111147Z-10m-asm-arm/summary.json))
+gave the same numbers for the engines that did not change (within 6 %), and found the two
+defects fixed since:
 
-* **Every engine that finished agrees on every query** after a harness fix (HI-010). Raw digests first
-  showed both assembly engines disagreeing on `q16_timeseries_hourly`. The only difference was one
-  FLOAT64 value printed as `79` instead of `79.0`, which the spec allows, and the harness's digest
-  treated as different
-  ([`q16-digest-recheck.json`](../../results/performance/20261013T111035Z-10m-main-and-asm-x86/q16-digest-recheck.json)).
 * **Common Lisp crashed at 10m, and an agent task fixed it.** Its build fixed the SBCL heap at 8 GiB, and
   SBCL died with "Heap exhausted, game over" while parsing the first 10m-row CSV instead of returning
   `RESOURCE_LIMIT`
@@ -152,24 +150,50 @@ different machine.
   attempt) streams CSV into typed column builders, raises the heap to 64 GiB and adds a heap guard that
   answers `RESOURCE_LIMIT` (`--max-memory-mb`). It passes the new large-data probe
   (`tests/regression/large_data_probe.py`: 10m workload, a 64 MiB query budget, an ingest limit, six
-  10m tables in one process) and conformance 731/731. At 10m it is the slowest engine after Python (70.3 ms,
-  10× its 1m time; sorts and joins 250-540 ms), and its HTTP throughput falls to 8.6 q/s at 16 clients.
-* **The ranking at 1m holds for the six engines**: Go, Rust, Java, Clojure, then Python. Most grow
-  6-7× for 10× the data, because many queries are top-N, filtered or grouped down to small results.
-  Python grows linearly (10×) and needs 171 GiB.
-* **The x86-64 assembly engine did not scale like the others, and an agent task fixed most of it.** It
-  grew 25× (`q01_filter_selective` 427×, 0.06 → 27 ms): its 1 GiB pool of reusable query memory was too
-  small at 10m, so the next request unmapped the excess and the next query faulted it back in (2.1 M page
-  faults per round of 20 queries, much of it outside the engine's own timer), and the HTTP server
-  recomputed column statistics in every forked query process. The `optimize-scaling` run
-  (`a-optimize-scaling-x86_64-asm-engine-a1-20261013T235906Z`, $17.53, 91 min, first attempt) sized the pool
-  by peak use. Back to back: 10m geomean 63.7 → 27.4 ms (2.33×), 1m unchanged, growth 22.9× → 10.0×,
-  HTTP at 10m 3-4× higher, peak RSS +12 %, identical digests (see
-  [`x86-asm-10m-scaling.md`](../../results/performance/x86-asm-10m-scaling.md) and the assembly cohort
-  section). Sorts, million-group aggregations and the large join probe still grow faster than the data.
-  The AArch64 engine grows a more ordinary 9×.
-* **HTTP throughput drops 8-40×.** The HTTP benchmark sends workload queries, and at 10m they are
+  10m tables in one process) and conformance 731/731. At 10m it is the slowest engine after Python
+  (sorts and joins 250-540 ms) and its HTTP throughput falls to 9 q/s at 16 clients.
+* **The x86-64 assembly engine grew 25× (70.7 ms at 10m), and an agent task fixed most of it.** Its 1 GiB
+  pool of reusable query memory was too small at 10m, so each request unmapped the excess and the next
+  query faulted it back in (2.1 M page faults per round of 20 queries, much of it outside the engine's
+  own timer), and the HTTP server recomputed column statistics in every forked query process. The
+  `optimize-scaling` run (`a-optimize-scaling-x86_64-asm-engine-a1-20261013T235906Z`, $17.53, 91 min,
+  first attempt) sized the pool by peak use: 70.7 → 27.4 ms in the full benchmark, growth 25× → 11×,
+  1m unchanged, identical results
+  ([`x86-asm-10m-scaling.md`](../../results/performance/x86-asm-10m-scaling.md)). Sorts, million-group
+  aggregations and the large join probe still grow faster than the data.
+
+Findings:
+
+* **The 1m ranking holds at 10m**: Go, Rust, Java, Clojure, Common Lisp, then Python. Most engines grow
+  6-8× for 10× the data, because many queries are top-N, filtered or grouped down to small results.
+  Common Lisp and Python grow about linearly; Python needs 179 GiB.
+* **Memory**: Java and Clojure use 30 GiB, Go 19 GiB, Rust and the assembly engines 8-12 GiB, Common
+  Lisp 7.7 GiB (the least of the six).
+* **HTTP throughput drops 10-40×.** The HTTP benchmark sends workload queries, and at 10m they are
   heavier.
+
+### Storage: save and open (`transactions`, PQCF)
+
+First valid measurement (the harness's open step always failed before, HI-012). Same runs; `open`
+includes recreating the table's two indexes; cold = page cache dropped first.
+
+| engine | save 1m / 10m | open cold 1m / 10m | open cold with mmap 1m / 10m |
+|---|---:|---:|---:|
+| Go | 0.30 / 3.1 s | 0.31 / 3.5 s | 0.19 / 2.4 s |
+| Rust | 0.24 / 2.3 s | 0.24 / 3.3 s | 0.20 / 2.7 s |
+| Java | 0.23 / 1.8 s | 0.22 / 3.3 s | 0.20 / 3.1 s |
+| Clojure | 0.70 / 5.0 s | 0.85 / 15.5 s | 0.79 / 15.1 s |
+| Common Lisp | 0.42 / 4.1 s | 0.54 / 7.6 s | 0.37 / 6.2 s |
+| Python | 0.79 / 7.9 s | 0.68 / 9.8 s | 0.66 / 8.8 s |
+| *x86-64 assembly* | 0.26 / 2.6 s | 0.33 / 3.9 s | 0.21 / 3.0 s |
+| *AArch64 assembly (spark)* | 0.12 / 1.0 s | 0.31 / 4.6 s | 0.30 / 4.5 s |
+
+All eight engines write files of the same size (65 MiB at 1m, 650 MiB at 10m, from 87 / 875 MB of
+CSV). Opening is not always faster than loading the CSV, because `open` also rebuilds the two
+indexes and the CSV load does not: at 10m, compared with loading `transactions` from CSV, open is
+7.6× faster for Python, 2-3× for Java, Rust, Go and Clojure, about equal for AArch64, and slower
+for the x86-64 engine (3.9 s vs 2.7 s) and Common Lisp (7.6 s vs 5.8 s). Memory-mapping saves
+most in Go (33 %) and the x86-64 engine (25 %).
 
 ## Code size (automated count, `report.py`)
 
@@ -455,25 +479,27 @@ spend: $310.48 of the $600 cap.
 
 ### Benchmarks (assembly engines)
 
-Same workload, scale (1 m rows), repetitions and HTTP clients as the six engines.
-x86-64 ran together with the six engines on the quiet x86 host
-([`20261012T115848Z-1m-main-and-asm-x86`](../../results/performance/20261012T115848Z-1m-main-and-asm-x86/));
-AArch64 ran on spark's Cortex-X925 cores (`tools/remote/arm_bench.sh`,
-[`20261012T124929Z-1m-asm-arm`](../../results/performance/20261012T124929Z-1m-asm-arm/)).
-Different machines: the two are not compared with each other, and neither is
-ranked with the six engines.
+Same workload, repetitions and HTTP clients as the six engines, in the same full re-benchmark
+(2026-10-14). x86-64 ran together with the six engines on the x86 host ([`20261014T115525Z-1m-rebench-main-and-asm-x86`](../../results/performance/20261014T115525Z-1m-rebench-main-and-asm-x86/summary.json), [`20261014T120827Z-10m-rebench-main-and-asm-x86`](../../results/performance/20261014T120827Z-10m-rebench-main-and-asm-x86/summary.json));
+AArch64 ran on spark's Cortex-X925 cores (`tools/remote/arm_bench.sh`, [`20261014T115549Z-1m-rebench-asm-arm`](../../results/performance/20261014T115549Z-1m-rebench-asm-arm/summary.json), [`20261014T115833Z-10m-rebench-asm-arm`](../../results/performance/20261014T115833Z-10m-rebench-asm-arm/summary.json)).
+Different machines: the two are not compared with each other, and neither is ranked with the six
+engines.
 
-| engine | queries ok | geomean of query medians | startup | peak RSS | HTTP qps (1 / 4 / 16 clients) |
-|---|---|---|---|---|---|
-| x86-64 assembly | 20 / 20 | 2.85 ms | 1.0 ms | 1,612 MiB | 58 / 159 / 232 |
-| AArch64 assembly | 20 / 20 | 2.68 ms | 1.7 ms | 749 MiB | 536 / 788 / 881 |
+| engine | scale | queries ok | geomean of query medians | startup | peak RSS | HTTP qps (1 / 4 / 16 clients) |
+|---|---|---|---|---|---|---|
+| x86-64 assembly | 1m | 20 / 20 | 2.48 ms | 1.1 ms | 1,321 MiB | 207 / 391 / 442 |
+| x86-64 assembly | 10m | 20 / 20 | 27.39 ms | 0.8 ms | 12.2 GiB | 28 / 36 / 26 |
+| AArch64 assembly | 1m | 20 / 20 | 2.76 ms | 1.6 ms | 803 MiB | 589 / 811 / 913 |
+| AArch64 assembly | 10m | 20 / 20 | 23.46 ms | 1.3 ms | 8.2 GiB | 40 / 67 / 56 |
 
-For context only (same x86 run, not a ranking): the six engines' geomeans were
-1.88 ms (Go) to 24.67 ms (Python). The x86-64 engine's HTTP throughput is low
-because it forks a snapshot process per query; the AArch64 engine serves each
-connection from a thread. This run also re-measured the six engines' HTTP
-throughput after the optimize re-runs, which the earlier main-after-reruns bench
-did not include.
+For context only (same x86 runs, not a ranking): the six engines' geomeans were 1.90 ms (Go) to
+26.50 ms (Python) at 1m and 12.35 to 239.66 ms at 10m. The x86-64 engine forks a snapshot process
+per HTTP query; the AArch64 engine serves each connection from a thread. The AArch64
+`q01_filter_selective` regression from its optimization run is still there (0.55 ms, against
+0.05 ms on x86 and 0.13 ms for Go). Previous round (before CR-6 and the scaling fix):
+[`20261012T115848Z-1m-main-and-asm-x86`](../../results/performance/20261012T115848Z-1m-main-and-asm-x86/),
+[`20261012T124929Z-1m-asm-arm`](../../results/performance/20261012T124929Z-1m-asm-arm/): x86 2.85 ms,
+AArch64 2.68 ms.
 
 Optimization before/after (independent back-to-back benchmark of the engine
 before and after the optimize-latency run, identical result digests on both sides):
