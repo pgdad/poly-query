@@ -45,7 +45,10 @@
           "A #1"]
          (map st/normalize-merchant ["Whole Foods Market #10234" "  SQ *Blue  Bottle 4421 " "Rent 2026"
                                      "7-Eleven 12" "#123" "Café\tMélange  #9" "Shop 12 345" "" "REI #"
-                                     "a #1 #2"]))))
+                                     "a #1 #2"])))
+  (testing "only spaces and tabs are trimmed (a line break of a quoted field stays)"
+    (is (= "COFFEE\n" (st/normalize-merchant "Coffee\n")))
+    (is (= "MULTI\r\nLINE" (st/normalize-merchant "Multi\r\nline")))))
 
 (defn- settings [text]
   (config/import-settings (config/parse-config (str "[ledger]\ndata_dir = l\n" text) "c" (java.io.File. "."))

@@ -8,8 +8,8 @@ Working notes for the application task (`spec/apps/embedding.md`,
 
 Everything in the task's definition of done passes:
 
-* `make build test` — engine/API unit tests and pqledger unit tests
-  (`app/test`, 26 tests / 197 assertions) pass.
+* `make build test` — engine/API unit tests (125 tests / 1534 assertions)
+  and pqledger unit tests (`app/test`, 26 tests / 199 assertions) pass.
 * `tests/apps/pqledger/runner.py --app bin/pqledger --embed-demo
   bin/pq-embed-demo --trace` — pqledger 24/24, embed-demo 3/3.
 * Conformance: 660/660 (default), 3870/3870 (`--modes`), 660/660
@@ -18,7 +18,10 @@ Everything in the task's definition of done passes:
 * Capabilities unchanged (no change to `version`/capability code).
 * Scale check (bankgen, 100,610-transaction ledger): import of the 100k
   file ≈ 0.9 s, re-import (all duplicates) ≈ 1.3 s, every report/list/
-  budget/query 0.2–1.1 s (with the AOT cache).
+  budget/query 0.2–1.1 s (with the AOT cache). With 1,006,266
+  transactions (ten 100k imports, each 0.8–2.9 s): reports, budget,
+  accounts, list 0.5–1.2 s, `query` on `ledger` 1.9 s, full `export`
+  5.1 s — well inside the spec's 30 s.
 
 ## Layout
 
