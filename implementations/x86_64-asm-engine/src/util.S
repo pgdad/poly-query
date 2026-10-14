@@ -217,11 +217,17 @@ pool_release:
     ret
 
 /* chunk_class(size rdi) -> rax: the size class of a chunk of `size` bytes
- * (leaf: clobbers rcx, rdx) */
+ * (leaf: clobbers rcx, rdx); sizes of 2^62 and more stay as they are (the
+ * mapping fails: RESOURCE_LIMIT) */
 chunk_class:
     mov $CHUNK_MIN, %eax
     cmp %rax, %rdi
     jbe 9f
+    mov %rdi, %rax
+    bt $62, %rax
+    jc 9f
+    bt $63, %rax
+    jc 9f
     lea -1(%rdi), %rax
     bsr %rax, %rcx                  /* 2^cl < size <= 2^(cl+1) */
     sub $2, %ecx
