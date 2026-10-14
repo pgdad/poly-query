@@ -2716,13 +2716,20 @@ ENDF k_pred
 /* probe task: PT_A probe TupleSet, PT_B build TupleSet, PT_C HashTable,
  * PT_D next[] (build chains), PT_N 1 = ON is just the key equality */
 
-/* probe_part(task rdi, part rsi, lo rdx, hi rcx) */
+/* probe_part(task rdi, part rsi, lo rdx, hi rcx).  When ON is just the key
+ * equality (PT_N) every key match is a result: the joined tuples go
+ * straight to the output, followed by the NULL-padded tuple of an
+ * unmatched LEFT JOIN probe tuple (200(%rsp) = 1, "direct"); otherwise
+ * the candidates of a batch are collected, ON is evaluated on them and
+ * the passing ones are emitted in probe order. */
 FUNC probe_part
     ENTER 224
     mov %rdi, %rbx
     mov %rsi, 64(%rsp)
     mov %rdx, 136(%rsp)             /* batch start */
     mov %rcx, 72(%rsp)              /* hi */
+    mov PT_N(%rbx), %rax
+    mov %rax, 200(%rsp)             /* direct */
     mov PT_FP(%rbx), %r12
     mov PT_XS(%rbx), %r13
     lea 0(%rsp), %rdi
@@ -2779,6 +2786,7 @@ FUNC probe_part
     mov 152(%rsp), %rcx
     cmp 144(%rsp), %rcx
     jae 20f
+    movq $0, 208(%rsp)              /* direct: k matched */
     mov 112(%rsp), %rax
     cmpb $0, VNULL(%rax, %rcx)
     jne 19f                         /* NULL keys never match */
@@ -2804,6 +2812,8 @@ FUNC probe_part
     mov EN_D0(%rax), %r14           /* chain of build tuples */
 11: cmp $-1, %r14
     je 19f
+    cmpq $0, 200(%rsp)
+    jne 14f
     mov 88(%rsp), %rax              /* room for one more owner */
     mov TS_N(%rax), %rax
     cmp 104(%rsp), %rax
@@ -2834,6 +2844,27 @@ FUNC probe_part
     mov PT_D(%rbx), %rax
     mov (%rax, %r14, 8), %r14
     jmp 11b
+14: mov 80(%rsp), %rdi              /* direct: the joined tuple */
+    call ts_slot
+    mov %rax, %rdi
+    mov 152(%rsp), %rsi
+    imul %r15, %rsi
+    add 176(%rsp), %rsi             /* probe tuple */
+    mov PT_B(%rbx), %rdx
+    mov TS_DATA(%rdx), %rdx
+    mov %r14, %rcx
+    imul %r15, %rcx
+    add %rcx, %rdx                  /* build tuple */
+    cmpq $0, FP_BUILDL(%r12)
+    je 141f
+    xchg %rsi, %rdx                 /* the build side is the left input */
+141: mov %r12, %rcx
+    mov XS_W(%r13), %r8
+    call tuple_combine
+    movq $1, 208(%rsp)
+    mov PT_D(%rbx), %rax
+    mov (%rax, %r14, 8), %r14
+    jmp 11b
 15: mov %rax, %rsi                  /* fast table: key rsi, FHASH rax */
     mov $FHASH_MUL, %rcx
     imul %rcx, %rax
@@ -2857,10 +2888,28 @@ FUNC probe_part
     inc %rax
     and SB_MASK(%rcx), %rax
     jmp 16b
-19: incq 152(%rsp)
+19: cmpq $0, 200(%rsp)              /* direct: unmatched LEFT JOIN tuple */
+    je 191f
+    cmpq $0, 208(%rsp)
+    jne 191f
+    cmpq $JT_LEFT, FP_JTYPE(%r12)
+    jne 191f
+    mov 80(%rsp), %rdi
+    call ts_slot
+    mov %rax, %rdi
+    mov 152(%rsp), %rsi
+    imul %r15, %rsi
+    add 176(%rsp), %rsi
+    xor %edx, %edx
+    mov %r12, %rcx
+    mov XS_W(%r13), %r8
+    call tuple_combine
+191: incq 152(%rsp)
     jmp 10b
 
 20: /* ---- ON condition on the candidates */
+    cmpq $0, 200(%rsp)
+    jne 40f
     mov 88(%rsp), %rax
     mov TS_N(%rax), %r14            /* candidates */
     cmpq $0, PT_N(%rbx)
