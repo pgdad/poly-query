@@ -24,9 +24,12 @@
 
 (defn- serialized-rows
   "Reducible of the result rows serialized per types.md §9 (one Object[]
-  per row, or nil per row with count-only?), enforcing max-rows."
-  [rows columns max-rows count-only?]
-  (let [types (mapv :type columns)
+  per row, or nil per row with count-only?), enforcing max-rows. value-fn
+  (type, runtime value) → output value does the serialization; nil means
+  polyquery.values/value->json (the protocol's JSON values)."
+  [rows columns max-rows count-only? value-fn]
+  (let [value-fn (or value-fn v/value->json)
+        types (mapv :type columns)
         ncols (count types)
         max-rows (long (or max-rows Long/MAX_VALUE))]
     (eduction
@@ -36,7 +39,7 @@
                     (when-not count-only?
                       (let [out (object-array ncols)]
                         (dotimes [i ncols]
-                          (aset out i (v/value->json (nth types i) (aget row i))))
+                          (aset out i (value-fn (nth types i) (aget row i))))
                         out))))
      rows)))
 
@@ -132,11 +135,13 @@
 
 (defn- open-plan
   [{:keys [kind plan query]} opts qctx]
-  (let [serialize #(serialized-rows % (:columns plan) (:max-rows opts) (:count-only? opts))]
+  (let [serialize #(serialized-rows % (:columns plan) (:max-rows opts) (:count-only? opts)
+                                    (:value-fn opts))]
     (if (= kind :explain)
       {:columns [{"name" "plan" "type" "STRING"}]
+       :types [:string]
        :rows (serialized-rows [(object-array [(json/write-str (explain/plan->json plan))])]
-                              [{:type :string}] (:max-rows opts) (:count-only? opts))
+                              [{:type :string}] (:max-rows opts) (:count-only? opts) (:value-fn opts))
        :ctx qctx}
       (let [{:keys [mode threads]} (:execution plan)
             rows (serialize (execute plan qctx opts))
@@ -148,6 +153,7 @@
                                                                          :mode "row" :threads 1)))]
                            {:rows (serialize (execute serial fctx opts)) :ctx fctx})))]
         (cond-> {:columns (table/columns-json (:columns plan))
+                 :types (mapv :type (:columns plan))
                  :rows (if fallback (with-fallback rows fallback) rows)
                  :ctx qctx}
           fallback (assoc :primary {:rows rows :ctx qctx} :fallback fallback))))))
@@ -202,7 +208,8 @@
   "Executes one SQL query against a catalog snapshot. opts:
   :max-rows :timeout-ms :memory-budget-bytes :max-join-rows :test-functions?
   :count-only? :optimize :join :use-indexes :mode (\"auto\" \"row\" \"vectorized\")
-  :threads :default-threads :native (use the loaded native kernel library).
+  :threads :default-threads :native (use the loaded native kernel library)
+  :value-fn (serialization of result values, see serialized-rows).
   Returns {:columns [{\"name\" \"type\"}] :rows [[…]] :row-count n}."
   [catalog ^String sql opts]
   (let [qctx (ctx/make-context opts)
@@ -245,7 +252,7 @@
   (let [qctx (ctx/make-context opts)]
     (preparing qctx
       (let [analyzed (analyze @catalog-atom sql opts)
-            empty-result (fn [] {:columns [] :rows [] :ctx qctx})]
+            empty-result (fn [] {:columns [] :types [] :rows [] :ctx qctx})]
         (case (:kind analyzed)
           :create-index (do (catalog/update! catalog-atom (create-index analyzed)) (empty-result))
           :drop-index (do (catalog/update! catalog-atom (drop-index analyzed)) (empty-result))

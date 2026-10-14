@@ -1,0 +1,4 @@
+;; The minimal embedding example (spec/apps/embedding.md §5): a separate
+;; project that depends on the engine library through :local/root.
+{:paths ["src"]
+ :deps {polyquery/engine {:local/root "../.."}}}

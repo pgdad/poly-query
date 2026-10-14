@@ -42,11 +42,7 @@
   {"--enable-test-functions" :test-functions?})
 
 (def defaults
-  {:max-query-memory-mb 4096
-   :max-ingest-bytes (* 4 1024 1024 1024)
-   :max-table-rows 200000000
-   :max-join-rows 100000000
-   :log-level "info"})
+  (assoc protocol/default-limits :log-level "info"))
 
 (defn- usage-error [msg]
   (throw (ex-info msg {::usage true})))
