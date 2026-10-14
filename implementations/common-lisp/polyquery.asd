@@ -83,7 +83,10 @@
                  (:file "metrics")
                  (:file "server")))
    (:module "cli" :pathname "protocol" :serial t
-    :components ((:file "cli"))))
+    :components ((:file "cli")))
+   (:module "api" :serial t
+    :components ((:file "package")
+                 (:file "api"))))
   :in-order-to ((test-op (test-op "polyquery/tests"))))
 
 (defsystem "polyquery/tests"
