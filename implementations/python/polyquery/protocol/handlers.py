@@ -9,7 +9,6 @@ session and exec CLI modes and by the HTTP server, which passes a
 from __future__ import annotations
 
 import logging
-import os
 import platform
 import threading
 import time
@@ -21,6 +20,7 @@ from .. import ENGINE_NAME, ENGINE_VERSION, PROTOCOL_VERSION, SPEC_VERSION, erro
 from ..datatypes import InvalidTypeError, parse_type
 from ..execution.context import gc_paused, gc_paused_iter
 from ..ingest.loader import FORMATS
+from ..paths import decode_utf8, read_input_file, resolve_data_path
 from ..service import Engine, QueryOptions, StorageOptions
 from ..storage import pqcf
 from ..storage.catalog import Column
@@ -184,36 +184,6 @@ def _csv_options(raw: dict) -> dict[str, Any]:
     return {"header": header, "delimiter": delimiter}
 
 
-# ------------------------------------------------------------ path safety
-
-
-def resolve_data_path(data_dir: str, path: str) -> str:
-    """Resolves a request path inside the data directory (protocol.md §6)."""
-    if path == "" or "\x00" in path or os.path.isabs(path):
-        raise errors.access_denied("path must be a non-empty relative path")
-    parts = path.replace("\\", "/").split("/")
-    if ".." in parts:
-        raise errors.access_denied("path must not contain '..' components")
-    return os.path.join(data_dir, path)
-
-
-def _read_file(full_path: str, max_bytes: int) -> bytes:
-    try:
-        with open(full_path, "rb") as f:
-            size = os.fstat(f.fileno()).st_size
-            if size > max_bytes:
-                raise errors.resource_limit(f"input file exceeds the ingestion limit of {max_bytes} bytes")
-            return f.read()
-    except FileNotFoundError:
-        raise errors.not_found("file does not exist") from None
-    except PermissionError:
-        raise errors.access_denied("permission denied") from None
-    except IsADirectoryError:
-        raise errors.io_error("path is a directory") from None
-    except OSError as e:
-        raise errors.io_error(f"cannot read file: {e.strerror}") from None
-
-
 # ------------------------------------------------------------ handler
 
 
@@ -323,11 +293,8 @@ class RequestHandler:
         if path is not None:
             if not isinstance(path, str):
                 raise errors.invalid_request("field 'path' must be a string")
-            raw = _read_file(resolve_data_path(self.config.data_dir, path), limits.max_bytes)
-            try:
-                text = raw.decode("utf-8")
-            except UnicodeDecodeError:
-                raise errors.ingest_error("input is not valid UTF-8") from None
+            raw = read_input_file(resolve_data_path(self.config.data_dir, path), limits.max_bytes)
+            text = decode_utf8(raw)
         else:
             if not isinstance(data, str):
                 raise errors.invalid_request("field 'data' must be a string")
