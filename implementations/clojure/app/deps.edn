@@ -1,0 +1,7 @@
+;; pqledger — the personal-finance application (spec/apps/pqledger.md).
+;; It uses the engine as a library, exactly as a separate project would.
+{:paths ["src"]
+ :deps {polyquery/engine {:local/root ".."}}
+ :aliases
+ {:test {:extra-paths ["test"]
+         :main-opts ["-m" "pqledger.test-runner"]}}}

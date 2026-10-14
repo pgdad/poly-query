@@ -1,0 +1,21 @@
+#!/bin/sh
+# pqledger launcher: runs the AOT-compiled application with the engine
+# library in the same JVM (build with `make build`). Extra JVM options can
+# be passed via PQLEDGER_JAVA_OPTS (e.g. -Xmx8g).
+set -e
+HERE="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
+ROOT="$(dirname -- "$HERE")"
+CP_FILE="$ROOT/target/classpath"
+if [ ! -f "$CP_FILE" ] || [ ! -f "$ROOT/target/polyquery.jar" ] || [ ! -f "$ROOT/target/pqledger.jar" ]; then
+  echo "pqledger: error: pqledger is not built; run 'make -C $ROOT build'" >&2
+  exit 7
+fi
+JAVA="${JAVA_HOME:+$JAVA_HOME/bin/}java"
+# The JVM's ahead-of-time cache recorded by `make build` (ignored, with a
+# warning on stderr, if it does not match this JVM or class path).
+AOT=""
+if [ -f "$ROOT/target/pqledger.aot" ]; then
+  AOT="-XX:AOTCache=$ROOT/target/pqledger.aot"
+fi
+exec "$JAVA" -Xss16m -XX:+UseParallelGC -XX:+DisplayVMOutputToStderr -Xlog:disable -Xlog:all=warning:stderr \
+  $AOT ${PQLEDGER_JAVA_OPTS:-} -cp "$ROOT/target/polyquery.jar:$ROOT/target/pqledger.jar:$(cat "$CP_FILE")" pqledger.main "$@"

@@ -1,0 +1,14 @@
+#!/bin/sh
+# Launcher of the embedding example (examples/embed-demo; build with
+# `make build`): pq-embed-demo DATA_DIR CSV_FILE SQL
+set -e
+HERE="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
+ROOT="$(dirname -- "$HERE")"
+CP_FILE="$ROOT/target/classpath"
+if [ ! -f "$CP_FILE" ] || [ ! -f "$ROOT/target/polyquery.jar" ] || [ ! -f "$ROOT/target/pq-embed-demo.jar" ]; then
+  echo "pq-embed-demo: not built; run 'make -C $ROOT build'" >&2
+  exit 2
+fi
+JAVA="${JAVA_HOME:+$JAVA_HOME/bin/}java"
+exec "$JAVA" -Xss16m -XX:+DisplayVMOutputToStderr -Xlog:disable -Xlog:all=warning:stderr \
+  -cp "$ROOT/target/polyquery.jar:$ROOT/target/pq-embed-demo.jar:$(cat "$CP_FILE")" embed_demo.main "$@"

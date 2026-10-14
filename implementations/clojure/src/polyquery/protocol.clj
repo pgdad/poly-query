@@ -51,8 +51,16 @@
 ;; ---------------------------------------------------------------------------
 ;; Engine state
 
+(def default-limits
+  "Engine limits when not configured (the CLI's defaults)."
+  {:max-query-memory-mb 4096
+   :max-ingest-bytes (* 4 1024 1024 1024)
+   :max-table-rows 200000000
+   :max-join-rows 100000000})
+
 (defn make-state
-  "config: {:data-dir File :test-functions? bool :limits {...}}"
+  "config: {:data-dir File :test-functions? bool :limits {...} :threads n}
+  (:threads: default worker threads per query, nil for the engine default)"
   [config]
   {:config config
    :catalog (atom catalog/empty-catalog)})
@@ -208,12 +216,15 @@
 
 (defn open-query
   "Validates a query request and opens its statement (engine/open-statement!):
-  returns {:columns :rows reducible :ctx :count-only?}. Throws for invalid
-  requests and for errors detectable before execution."
-  [{:keys [catalog] :as state} req]
-  (let [sql (field req "sql" string? "a string" true)
-        opts (engine-options state req)]
-    (assoc (engine/open-statement! catalog sql opts) :count-only? (:count-only? opts))))
+  returns {:columns :types :rows reducible :ctx :count-only?}. Throws for
+  invalid requests and for errors detectable before execution. extra-opts
+  are merged into the engine options (e.g. :value-fn, see
+  polyquery.engine/open-statement!)."
+  ([state req] (open-query state req nil))
+  ([{:keys [catalog] :as state} req extra-opts]
+   (let [sql (field req "sql" string? "a string" true)
+         opts (merge (engine-options state req) extra-opts)]
+     (assoc (engine/open-statement! catalog sql opts) :count-only? (:count-only? opts)))))
 
 (defmethod handle-op "query" [state req]
   (let [started (System/nanoTime)
