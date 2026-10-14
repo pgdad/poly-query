@@ -389,7 +389,7 @@ FUNC areq_query_options
     call areq_int
 2:  mov PQ_QOPT_MAX_ROWS(%rbx), %rsi
     test %rsi, %rsi
-    js 3f
+    jle 3f                          /* <= 0: no limit */
     CSTR %rdi, "max_rows"
     call areq_int
 3:  mov PQ_QOPT_MODE(%rbx), %rsi

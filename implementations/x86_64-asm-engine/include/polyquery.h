@@ -115,7 +115,7 @@ typedef struct pq_load_options {
 typedef struct pq_query_options {
     int64_t threads;                 /*  0: >= 1, 0 = instance default      */
     int64_t timeout_ms;              /*  8: 0 = none (instance default)     */
-    int64_t max_rows;                /* 16: < 0 = no limit; else RESOURCE_LIMIT above */
+    int64_t max_rows;                /* 16: <= 0 = no limit; else RESOURCE_LIMIT above */
     const char *mode;                /* 24: "auto" (NULL), "row", "vectorized" */
     const char *join;                /* 32: "auto" (NULL), "hash", "merge", "nested_loop" */
     int64_t optimize;                /* 40: 0 = default (on), 1 on, 2 off   */
