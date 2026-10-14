@@ -244,8 +244,8 @@ func ParseAmount(field string, im config.Import) (int64, error) {
 		} else if strings.HasSuffix(s, sym) {
 			s = s[:len(s)-len(sym)]
 		}
-		s = config.TrimSpaceTab(s)
 	}
+	s = config.TrimSpaceTab(s)
 	if im.ThousandsSeparator != "" {
 		s = strings.ReplaceAll(s, im.ThousandsSeparator, "")
 	}

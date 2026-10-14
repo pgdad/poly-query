@@ -2,6 +2,7 @@ package config
 
 import (
 	"fmt"
+	"math"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -142,17 +143,12 @@ func Parse(path string, data []byte) (*Config, error) {
 			if !ok {
 				return nil, fail(l, "%s must be an integer ≥ 1, got %q", l.Key, v)
 			}
+			// Values beyond what the engine can use are capped.
 			switch l.Key {
 			case "threads":
-				if n > 1024 {
-					return nil, fail(l, "threads must be at most 1024")
-				}
-				c.Threads = int(n)
+				c.Threads = int(min(n, 256))
 			case "memory_mb":
-				if n > 1<<40 {
-					return nil, fail(l, "memory_mb is too large")
-				}
-				c.MemoryMB = n
+				c.MemoryMB = min(n, 1<<23)
 			default:
 				return nil, fail(l, "unknown key %q in [engine]", l.Key)
 			}
@@ -192,11 +188,15 @@ func positive(s string) (int64, bool) {
 	return n, ok && n >= 1
 }
 
-// nonNegative parses a decimal integer ≥ 0 (digits only).
+// nonNegative parses a decimal integer ≥ 0 (digits only); values beyond
+// the int64 range saturate.
 func nonNegative(s string) (int64, bool) {
 	if s == "" || strings.Trim(s, "0123456789") != "" {
 		return 0, false
 	}
 	n, err := strconv.ParseInt(s, 10, 64)
-	return n, err == nil
+	if err != nil {
+		return math.MaxInt64, true
+	}
+	return n, true
 }

@@ -31,8 +31,8 @@ func (r ColumnRef) String() string {
 }
 
 func parseColumnRef(v string) ColumnRef {
-	if n, ok := positive(v); ok && n <= 1<<20 {
-		return ColumnRef{Pos: int(n)}
+	if n, ok := positive(v); ok {
+		return ColumnRef{Pos: int(min(n, 1<<30))}
 	}
 	return ColumnRef{Name: v}
 }
