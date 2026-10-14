@@ -21,7 +21,7 @@
 // leaves the ledger unchanged.
 //
 //   cmd_*() -> w0 exit status (0, or 3 for an over-budget `budget`);
-//   output is appended to g_out (main.S). ledger_close() ends the engine.
+//   output is appended to g_out (options.S). ledger_close() ends the engine.
 // =============================================================================
 #include "ledger.inc"
 

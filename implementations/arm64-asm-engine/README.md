@@ -49,6 +49,23 @@ requirement change **CR-6 expression size limits**
 see [Change CR-6](#change-cr-6-expression-size-limits) — the engine's
 **limits** are listed there.
 
+## Library and application
+
+The engine is also a **library** and carries an application built on it:
+
+* **[EMBEDDING.md](EMBEDDING.md)** — developer guide to the embedding API
+  (`spec/apps/embedding.md`): `lib/libpolyquery.a`, `include/polyquery.h`
+  (C callers) and `include/polyquery.inc` (assembly callers); calling
+  convention, API reference, value layout, errors, ownership, thread safety,
+  a complete minimal program. Implementation: `src/api.S`. Minimal example:
+  `examples/embed-demo` (`bin/pq-embed-demo DATA_DIR CSV_FILE SQL`).
+* **[APP.md](APP.md)** — user guide to **pqledger** (`spec/apps/pqledger.md`),
+  a personal-finance CLI written in assembly in `app/` that uses the engine
+  in-process through the library only (`bin/pqledger`).
+
+`make build` builds the engine, the library, pqledger and the demo; `make test`
+also runs the application's module tests (`app/tests`).
+
 ## Build prerequisites
 
 * AArch64 Linux host
