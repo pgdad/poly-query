@@ -44,6 +44,29 @@ index.btree phase4 http.streaming phase5 exec.row exec.vectorized
 exec.parallel join.hash join.merge join.nested_loop native.kernels
 change.union_all change.decimal38 change.expression_limits`.
 
+## Library, application and example
+
+The engine is also an **embeddable library** (`spec/apps/embedding.md`): the
+namespace `polyquery.api` creates in-process engine instances that load CSV,
+run SQL with typed native results, save/open PQCF files, and report errors
+as `ex-info` carrying the specification's error codes. Use it from a
+separate project through `deps.edn` (`:local/root` on this directory or on
+`target/polyquery.jar`). Built on it:
+
+* **[EMBEDDING.md](EMBEDDING.md)** — developer guide to the library:
+  dependency set-up, API reference, value-type mapping, errors, resource
+  management, thread safety, a complete minimal program.
+* **[APP.md](APP.md)** — user guide to **pqledger** (`app/`, launcher
+  `bin/pqledger`, `spec/apps/pqledger.md`), a personal-finance CLI that
+  imports bank CSV exports into a PQCF ledger and prints reports and budgets,
+  all computed by SQL on the embedded engine.
+* `examples/embed-demo/` — the minimal embedding example, launcher
+  `bin/pq-embed-demo DATA_DIR CSV_FILE SQL`.
+
+`bin/polyquery` is unchanged and shares the implementation with the API (the
+API calls the protocol's operation handlers). Status and next steps of this
+work: [NOTES.md](NOTES.md).
+
 ## Prerequisites and build
 
 * OpenJDK (tested with 27) — `JAVA_HOME` or `java` on `PATH`
@@ -53,8 +76,10 @@ change.union_all change.decimal38 change.expression_limits`.
 ```sh
 make build    # AOT-compiles src/ into target/classes, packages target/polyquery.jar,
               # writes target/classpath and records the JVM AOT cache
-              # target/polyquery.aot (training session, ~10 s; see "Latency")
-make test     # clojure.test unit tests (test/)
+              # target/polyquery.aot (training session, ~10 s; see "Latency");
+              # then builds pqledger (target/pqledger.jar + .aot) and
+              # pq-embed-demo (target/pq-embed-demo.jar) against that jar
+make test     # clojure.test unit tests: engine and API (test/), pqledger (app/test/)
 make lint     # compiles with *warn-on-reflection*; fails on reflection warnings
 make fmt      # whitespace normalisation (no third-party formatter is allowed)
 make clean

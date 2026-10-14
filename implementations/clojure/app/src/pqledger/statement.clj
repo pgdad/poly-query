@@ -175,7 +175,7 @@
   ^String [^String description]
   (let [m (-> (text/ascii-upper description)
               (str/replace #"[ \t]+" " ")
-              (str/trim))
+              (text/trim))
         i (str/last-index-of m " ")]
     (if (and i (re-matches #"#[0-9]+|[0-9]{3,}" (subs m (inc i))))
       (subs m 0 i)
