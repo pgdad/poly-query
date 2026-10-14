@@ -259,6 +259,15 @@ impl Args {
     }
 }
 
+/// A transaction id: a decimal integer ≥ 1. Ids beyond `i64` cannot
+/// exist; they saturate (and are then reported as unknown).
+fn parse_id(v: &str) -> Option<i64> {
+    if v.is_empty() || !v.bytes().all(|b| b.is_ascii_digit()) || v.bytes().all(|b| b == b'0') {
+        return None;
+    }
+    Some(v.parse().unwrap_or(i64::MAX))
+}
+
 /// `--top N`: a decimal integer ≥ 1; values beyond `u64` saturate.
 fn parse_top(v: &str) -> Option<u64> {
     if v.is_empty() || !v.bytes().all(|b| b.is_ascii_digit()) || v.bytes().all(|b| b == b'0') {
@@ -419,10 +428,7 @@ fn parse_command(name: &str, args: &[String]) -> Result<Command> {
             let a = Args::parse(args, &[], &["--clear"])?;
             let clear = a.flag("--clear");
             let p = a.positionals(if clear { 1 } else { 2 }, "ID and CATEGORY")?;
-            let id = p[0]
-                .parse::<i64>()
-                .ok()
-                .filter(|&n| n >= 1 && p[0].bytes().all(|b| b.is_ascii_digit()))
+            let id = parse_id(&p[0])
                 .ok_or_else(|| AppError::usage(format!("invalid transaction id '{}'", p[0])))?;
             let category = if clear {
                 None
@@ -510,6 +516,8 @@ mod tests {
         assert_eq!(parse_top("99999999999999999999"), Some(u64::MAX));
         assert_eq!(parse_top("007"), Some(7));
         assert_eq!(parse_top("00"), None);
+        assert_eq!(parse_id("99999999999999999999"), Some(i64::MAX));
+        assert_eq!(parse_id("+1"), None);
         assert_eq!(
             command("budget --month 2026-02"),
             Command::Budget {
