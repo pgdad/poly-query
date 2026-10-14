@@ -483,12 +483,206 @@ FUNC hll_estimate
     ret
 ENDF hll_estimate
 
+/* ------------------------------------------------ column statistics
+ * table_col_stats computes a column's statistics in parallel over row ranges
+ * (par_run): every part counts its NULLs, keeps its first minimum / maximum,
+ * fills its own HyperLogLog registers and an exact set of its distinct
+ * values (cells of 24 bytes: the value cell and the row of the value's first
+ * occurrence in the part), each in a private arena (the statistics are
+ * cached table metadata, not query memory).  The merge reproduces the
+ * serial definition exactly:
+ *   NULLs   the sum;
+ *   min/max part order with strict comparisons (first occurrence wins);
+ *   HLL     register-wise maximum (order independent);
+ *   exact   the serial scan keeps a set of up to EXACT_MAX values and gives
+ *           it up at the first non-NULL row it sees when full: the count is
+ *           exact when the column has fewer than EXACT_MAX distinct values,
+ *           or exactly EXACT_MAX of them with no non-NULL row after the
+ *           first occurrence of the last new one; otherwise the HLL
+ *           estimate.  A part that sees more than EXACT_MAX distinct values
+ *           decides the HLL case at once (STK_OVER, also read by the other
+ *           parts to stop collecting); else the part sets are merged in
+ *           part order into part 0's set, so that each value keeps its
+ *           first row in the column. */
+#define STATS_MIN_ROWS 16384    /* rows per part at least */
+
+/* per part results (StatsPart) */
+#define SPT_NULLS 0
+#define SPT_HAS   8
+#define SPT_MIN   16
+#define SPT_MAX   24
+#define SPT_LAST  32            /* 1 + the part's last non-NULL row (0 = none) */
+#define SPT_HLL   40            /* u8[HLL_M] registers */
+#define SPT_SET   48            /* exact set (HashTable*), 0 when given up */
+#define SPT_ARENA 56            /* the part's private arena */
+#define SPT_SIZE  64
+#define SC_ROW    16            /* first row, after the value cell */
+#define SC_SIZE   24
+
+/* statistics task (on the stack of table_col_stats) */
+#define STK_COL   0             /* Column* */
+#define STK_TYPE  8             /* packed type (u64: the set's key type) */
+#define STK_PARTS 16            /* StatsPart[P] */
+#define STK_OVER  24            /* 1 = more than EXACT_MAX distinct values */
+#define STK_SIZE  32
+
+/* stats_part(task rdi, part rsi, lo rdx, hi rcx): statistics of rows [lo, hi) */
+FUNC stats_part
+    ENTER 48
+    mov %rdi, %rbx
+    imul $SPT_SIZE, %rsi, %r12
+    add STK_PARTS(%rbx), %r12       /* the part's results (zeroed) */
+    mov %rdx, %r14                  /* row */
+    mov %rcx, 0(%rsp)               /* hi */
+    mov %fs:t_arena@tpoff, %rax
+    mov %rax, 8(%rsp)               /* the thread's arena, restored below */
+    call arena_new
+    mov %rax, SPT_ARENA(%r12)
+    mov %rax, %fs:t_arena@tpoff
+    mov $1, %edi
+    lea STK_TYPE(%rbx), %rsi
+    call ht_new
+    mov %rax, SPT_SET(%r12)
+    mov $HLL_M, %edi
+    call tmp_zalloc
+    mov %rax, SPT_HLL(%r12)
+    mov STK_COL(%rbx), %r13
+1:  cmp 0(%rsp), %r14
+    jae 8f
+    mov %r13, %rdi
+    mov %r14, %rsi
+    call col_get
+    test %edx, %edx
+    jz 2f
+    incq SPT_NULLS(%r12)
+    jmp 7f
+2:  mov %rax, %r15                  /* value */
+    lea 1(%r14), %rcx
+    mov %rcx, SPT_LAST(%r12)
+    cmpq $0, SPT_HAS(%r12)
+    jne 3f
+    movq $1, SPT_HAS(%r12)
+    mov %rax, SPT_MIN(%r12)
+    mov %rax, SPT_MAX(%r12)
+    jmp 5f
+3:  mov STK_TYPE(%rbx), %rdi
+    mov %r15, %rsi
+    mov SPT_MIN(%r12), %rdx
+    call value_cmp
+    test %eax, %eax
+    jns 4f
+    mov %r15, SPT_MIN(%r12)
+4:  mov STK_TYPE(%rbx), %rdi
+    mov %r15, %rsi
+    mov SPT_MAX(%r12), %rdx
+    call value_cmp
+    test %eax, %eax
+    jle 5f
+    mov %r15, SPT_MAX(%r12)
+5:  mov %r15, 16(%rsp)              /* probe cell 16..31 */
+    movq $0, 24(%rsp)
+    lea 16(%rsp), %rdi              /* distinct values: sketch ... */
+    mov $1, %esi
+    lea STK_TYPE(%rbx), %rdx
+    call hash_cells
+    mov %rax, 40(%rsp)
+    mov SPT_HLL(%r12), %rdi
+    mov %rax, %rsi
+    call hll_add
+    cmpq $0, SPT_SET(%r12)          /* ... and the exact set */
+    je 7f
+    cmpq $0, STK_OVER(%rbx)         /* decided by another part */
+    jne 6f
+    mov SPT_SET(%r12), %rdi
+    lea 16(%rsp), %rsi
+    xor %edx, %edx
+    mov 40(%rsp), %rcx
+    call ht_lookup_h
+    test %rax, %rax
+    jnz 7f
+    mov $SC_SIZE, %edi              /* a new value */
+    call tmp_alloc
+    mov %r15, VAL_P(%rax)
+    movq $0, VAL_NULL(%rax)
+    mov %r14, SC_ROW(%rax)
+    mov SPT_SET(%r12), %rdi
+    mov %rax, %rsi
+    mov $1, %edx
+    mov 40(%rsp), %rcx
+    call ht_lookup_h
+    mov SPT_SET(%r12), %rax
+    cmpq $EXACT_MAX, HT_N(%rax)
+    jbe 7f
+    movq $1, STK_OVER(%rbx)
+6:  movq $0, SPT_SET(%r12)
+7:  inc %r14
+    jmp 1b
+8:  mov 8(%rsp), %rax
+    mov %rax, %fs:t_arena@tpoff
+    LEAVE
+ENDF stats_part
+
+/* stats_union(set0 rdi, set rsi) -> eax 1 when set0 grew past EXACT_MAX:
+ * adds the values of `set` missing in set0 (keeping their cells) */
+FUNC stats_union
+    ENTER 0
+    mov %rdi, %rbx
+    mov %rsi, %r12
+    xor %r13d, %r13d                /* bucket */
+1:  cmp HT_NB(%r12), %r13
+    jae 8f
+    mov HT_BKT(%r12), %rax
+    mov (%rax, %r13, 8), %r14       /* chain */
+2:  test %r14, %r14
+    jz 4f
+    mov %rbx, %rdi
+    mov EN_KEY(%r14), %rsi
+    mov $1, %edx
+    mov EN_HASH(%r14), %rcx
+    call ht_lookup_h
+    cmpq $EXACT_MAX, HT_N(%rbx)
+    ja 9f
+    mov EN_NEXT(%r14), %r14
+    jmp 2b
+4:  inc %r13
+    jmp 1b
+8:  xor %eax, %eax
+    LEAVE
+9:  mov $1, %eax
+    LEAVE
+ENDF stats_union
+
+/* stats_last_first(set rdi) -> rax the latest first-occurrence row of the
+ * set's values */
+FUNC stats_last_first
+    xor %eax, %eax
+    xor %ecx, %ecx                  /* bucket */
+1:  cmp HT_NB(%rdi), %rcx
+    jae 9f
+    mov HT_BKT(%rdi), %rdx
+    mov (%rdx, %rcx, 8), %rdx
+2:  test %rdx, %rdx
+    jz 3f
+    mov EN_KEY(%rdx), %rsi
+    mov SC_ROW(%rsi), %rsi
+    cmp %rax, %rsi
+    cmova %rsi, %rax
+    mov EN_NEXT(%rdx), %rdx
+    jmp 2b
+3:  inc %rcx
+    jmp 1b
+9:  ret
+ENDF stats_last_first
+
 /* table_col_stats(t rdi, c rsi) -> rax ColStats* of column c (computed on
  * first use and cached in the table: tables are immutable).  Distinct values
  * are counted exactly with a hash set up to EXACT_MAX, beyond that by a
- * HyperLogLog sketch (bounded memory, ~1% error). */
+ * HyperLogLog sketch (bounded memory, ~1% error); see above. */
+#define CS_P    (STK_SIZE + 0)      /* parts */
+#define CS_LAST (STK_SIZE + 8)      /* 1 + last non-NULL row */
+#define CS_ARENA (STK_SIZE + 16)    /* the thread's arena during the merge */
 FUNC table_col_stats
-    ENTER 64
+    ENTER STK_SIZE + 32
     mov %rdi, %rbx
     mov %rsi, %r12
     cmpq $0, TB_STATS(%rbx)
@@ -506,89 +700,144 @@ FUNC table_col_stats
     mov %r12, %r13
     shl $COL_SHIFT, %r13
     add TB_COLS(%rbx), %r13         /* Column* */
+    cmpq $0, TB_NROWS(%rbx)         /* workers only read: decode a lazily */
+    je 11f                          /* opened column first */
+    cmpb $0, COL_LAZY(%r13)
+    je 11f
+    mov %r13, %rdi
+    call pqcf_load_col
+11: mov %r13, STK_COL(%rsp)
     mov COL_TYPE(%r13), %rax
-    mov %rax, 8(%rsp)
-    mov $1, %edi
-    lea 8(%rsp), %rsi
-    call ht_new
-    mov %rax, 16(%rsp)
-    mov $HLL_M, %edi
+    mov %rax, STK_TYPE(%rsp)
+    movq $0, STK_OVER(%rsp)
+    /* parts: the request's threads, STATS_MIN_ROWS rows each at least */
+    mov TB_NROWS(%rbx), %rax
+    add $(STATS_MIN_ROWS - 1), %rax
+    xor %edx, %edx
+    mov $STATS_MIN_ROWS, %ecx
+    div %rcx
+    mov g_opt_threads(%rip), %rcx
+    mov $MAX_THREADS, %edx
+    cmp %rdx, %rcx
+    cmova %rdx, %rcx
+    cmp %rcx, %rax
+    cmova %rcx, %rax
+    mov $1, %ecx
+    cmp %rcx, %rax
+    cmovb %rcx, %rax
+    mov %rax, CS_P(%rsp)
+    imul $SPT_SIZE, %rax, %rdi
     call tmp_zalloc
-    mov %rax, 40(%rsp)              /* HyperLogLog registers */
-    movq $0, 48(%rsp)               /* 1 = exact set abandoned */
+    mov %rax, STK_PARTS(%rsp)
+    mov TB_NROWS(%rbx), %rdi
+    mov CS_P(%rsp), %rsi
+    lea stats_part(%rip), %rdx
+    lea 0(%rsp), %rcx
+    call par_run
+    /* merge: NULLs, min / max, last non-NULL row, HLL registers */
     movq $0, CST_NULLS(%r15)
     movq $0, CST_HAS(%r15)
-    xor %r14d, %r14d                /* row */
-2:  cmp TB_NROWS(%rbx), %r14
-    jae 8f
-    mov %r13, %rdi
-    mov %r14, %rsi
-    call col_get
-    test %edx, %edx
-    jz 3f
-    incq CST_NULLS(%r15)
-    jmp 7f
-3:  mov %rax, 24(%rsp)              /* value; probe cell 24..39 */
-    movq $0, 32(%rsp)
+    movq $0, CS_LAST(%rsp)
+    xor %r12d, %r12d                /* part */
+2:  cmp CS_P(%rsp), %r12
+    jae 5f
+    imul $SPT_SIZE, %r12, %r13
+    add STK_PARTS(%rsp), %r13
+    mov SPT_NULLS(%r13), %rax
+    add %rax, CST_NULLS(%r15)
+    mov SPT_LAST(%r13), %rax
+    cmp CS_LAST(%rsp), %rax
+    jbe 21f
+    mov %rax, CS_LAST(%rsp)
+21: cmpq $0, SPT_HAS(%r13)
+    je 4f
     cmpq $0, CST_HAS(%r15)
-    jne 4f
+    jne 22f
     movq $1, CST_HAS(%r15)
+    mov SPT_MIN(%r13), %rax
     mov %rax, CST_MIN(%r15)
+    mov SPT_MAX(%r13), %rax
     mov %rax, CST_MAX(%r15)
-    jmp 6f
-4:  mov 8(%rsp), %rdi
-    mov %rax, %rsi
+    jmp 4f
+22: mov STK_TYPE(%rsp), %rdi
+    mov SPT_MIN(%r13), %rsi
     mov CST_MIN(%r15), %rdx
     call value_cmp
     test %eax, %eax
-    jns 5f
-    mov 24(%rsp), %rax
+    jns 23f
+    mov SPT_MIN(%r13), %rax
     mov %rax, CST_MIN(%r15)
-5:  mov 8(%rsp), %rdi
-    mov 24(%rsp), %rsi
+23: mov STK_TYPE(%rsp), %rdi
+    mov SPT_MAX(%r13), %rsi
     mov CST_MAX(%r15), %rdx
     call value_cmp
     test %eax, %eax
-    jle 6f
-    mov 24(%rsp), %rax
+    jle 4f
+    mov SPT_MAX(%r13), %rax
     mov %rax, CST_MAX(%r15)
-6:  lea 24(%rsp), %rdi              /* distinct values: sketch ... */
-    mov $1, %esi
-    lea 8(%rsp), %rdx
-    call hash_cells
-    mov 40(%rsp), %rdi
-    mov %rax, %rsi
-    call hll_add
-    cmpq $0, 48(%rsp)               /* ... and exact set while small */
-    jne 7f
-    mov 16(%rsp), %rdi
-    cmpq $EXACT_MAX, HT_N(%rdi)
-    jb 61f
-    movq $1, 48(%rsp)
-    jmp 7f
-61: lea 24(%rsp), %rsi
-    xor %edx, %edx
-    call ht_lookup
-    test %rax, %rax
-    jnz 7f
-    mov $VAL_SIZE, %edi
-    call tmp_zalloc
-    mov 24(%rsp), %rcx
-    mov %rcx, VAL_P(%rax)
-    mov 16(%rsp), %rdi
-    mov %rax, %rsi
-    mov $1, %edx
-    call ht_lookup
-7:  inc %r14
+4:  test %r12, %r12                 /* registers into part 0's */
+    jz 45f
+    mov STK_PARTS(%rsp), %rax
+    mov SPT_HLL(%rax), %rdi
+    mov SPT_HLL(%r13), %rsi
+    xor %ecx, %ecx
+41: movdqu (%rdi, %rcx), %xmm0
+    movdqu (%rsi, %rcx), %xmm1
+    pmaxub %xmm1, %xmm0
+    movdqu %xmm0, (%rdi, %rcx)
+    add $16, %ecx
+    cmp $HLL_M, %ecx
+    jb 41b
+45: inc %r12
     jmp 2b
-8:  mov 16(%rsp), %rax
-    mov HT_N(%rax), %rax
-    cmpq $0, 48(%rsp)
-    je 81f
-    mov 40(%rsp), %rdi
+5:  /* distinct values */
+    mov STK_PARTS(%rsp), %r13       /* part 0 */
+    cmpq $0, STK_OVER(%rsp)
+    jne 7f
+    mov %fs:t_arena@tpoff, %rax     /* merge the sets in part 0's arena */
+    mov %rax, CS_ARENA(%rsp)
+    mov SPT_ARENA(%r13), %rax
+    mov %rax, %fs:t_arena@tpoff
+    mov $1, %r12d
+51: cmp CS_P(%rsp), %r12
+    jae 52f
+    imul $SPT_SIZE, %r12, %rax
+    add STK_PARTS(%rsp), %rax
+    mov SPT_SET(%r13), %rdi
+    mov SPT_SET(%rax), %rsi
+    call stats_union
+    test %eax, %eax
+    jnz 53f
+    inc %r12
+    jmp 51b
+53: movq $1, STK_OVER(%rsp)
+52: mov CS_ARENA(%rsp), %rax
+    mov %rax, %fs:t_arena@tpoff
+    cmpq $0, STK_OVER(%rsp)
+    jne 7f
+    mov SPT_SET(%r13), %rdi
+    mov HT_N(%rdi), %rax
+    cmp $EXACT_MAX, %rax
+    jb 8f                           /* exact */
+    call stats_last_first           /* exactly EXACT_MAX: given up at a */
+    inc %rax                        /* later non-NULL row */
+    cmp CS_LAST(%rsp), %rax
+    jb 7f
+    mov $EXACT_MAX, %eax
+    jmp 8f
+7:  mov SPT_HLL(%r13), %rdi
     call hll_estimate
-81: mov %rax, CST_DISTINCT(%r15)
+8:  mov %rax, CST_DISTINCT(%r15)
     movq $1, CST_DONE(%r15)
+    xor %r12d, %r12d                /* release the parts' memory */
+9:  cmp CS_P(%rsp), %r12
+    jae 99f
+    imul $SPT_SIZE, %r12, %rax
+    add STK_PARTS(%rsp), %rax
+    mov SPT_ARENA(%rax), %rdi
+    call arena_destroy
+    inc %r12
+    jmp 9b
 99: mov %r15, %rax
     LEAVE
 ENDF table_col_stats

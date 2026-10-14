@@ -377,7 +377,8 @@ FUNC main
     jne 23f
     cmpq $-1, g_srv_port(%rip)
     je m_no_port
-23: call install_fault_handlers
+23: call prof_start
+    call install_fault_handlers
     cmp $MODE_EXEC, %r14d
     jne 24f
     cmpq $0, opt_request(%rip)
@@ -445,6 +446,7 @@ FUNC resolve_threads
     mov opt_threads(%rip), %rax
     test %rax, %rax
     jnz 1f
+    movq $1, g_threads_auto(%rip)
     mov $SC_NPROCESSORS_ONLN, %edi
     call sysconf
     mov $DEFAULT_THREADS_MAX, %ecx

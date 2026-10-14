@@ -310,6 +310,69 @@ FUNC ts_append
     LEAVE
 ENDF ts_append
 
+/* ts_concat(sets rdi, P rsi) -> rax TupleSet* holding the tuples of the P
+ * sets (equal widths) in order: sets[0] itself when P = 1, else a set
+ * allocated once at its final size into which every part copies its own
+ * set in parallel (appending them one by one on this thread made the
+ * merge serial and re-copied the growing set at every doubling) */
+#define TC_SETS 0
+#define TC_DST  8
+#define TC_OFF  16      /* u64[P]: first tuple of each set */
+FUNC ts_concat
+    ENTER 32
+    mov %rdi, %rbx
+    mov %rsi, %r12
+    mov (%rbx), %rax
+    cmp $1, %r12
+    jbe 9f
+    lea (, %r12, 8), %rdi
+    call tmp_alloc
+    mov %rax, %r13                  /* offsets */
+    xor %r14d, %r14d                /* total */
+    xor %ecx, %ecx
+1:  mov %r14, (%r13, %rcx, 8)
+    mov (%rbx, %rcx, 8), %rax
+    add TS_N(%rax), %r14
+    inc %rcx
+    cmp %r12, %rcx
+    jb 1b
+    mov (%rbx), %rax
+    mov TS_W(%rax), %rdi
+    mov %r14, %rsi
+    call ts_new
+    mov %r14, TS_N(%rax)
+    mov %rbx, TC_SETS(%rsp)
+    mov %rax, TC_DST(%rsp)
+    mov %r13, TC_OFF(%rsp)
+    mov %r12, %rdi
+    mov %r12, %rsi
+    lea ts_cat_part(%rip), %rdx
+    lea 0(%rsp), %rcx
+    call par_run
+    mov TC_DST(%rsp), %rax
+9:  LEAVE
+ENDF ts_concat
+
+/* ts_cat_part(task rdi, part rsi, lo rdx, hi rcx): copies set lo */
+FUNC ts_cat_part
+    sub $8, %rsp
+    mov TC_SETS(%rdi), %rax
+    mov (%rax, %rdx, 8), %rsi       /* source set */
+    mov TC_DST(%rdi), %r8
+    mov TS_W(%r8), %rcx
+    shl $3, %rcx                    /* tuple bytes */
+    mov TC_OFF(%rdi), %rax
+    mov (%rax, %rdx, 8), %rdi
+    imul %rcx, %rdi
+    add TS_DATA(%r8), %rdi
+    mov TS_N(%rsi), %rdx
+    imul %rcx, %rdx
+    mov TS_DATA(%rsi), %rsi
+    call memcpy
+    add $8, %rsp
+    ret
+ENDF ts_cat_part
+
 /* ================================================================ row kernels
  * Batch kernels: ctx rdi (worker EvalCtx), tuples (W words each), n, W.
  * In vectorized mode they forward to the vector kernels of vec.S. */
@@ -628,19 +691,9 @@ FUNC pexec_scan
     lea scan_part(%rip), %rsi
     mov %r13, %rdx
     call par_for
-    mov %rax, %r14                  /* parts */
-    mov PT_OUT(%r13), %r15          /* part 0's set collects the others */
-    mov $1, %ebx
-1:  cmp %r14, %rbx
-    jae 9f
-    mov PT_OUT(%r13, %rbx, 8), %rax
-    mov %r15, %rdi
-    mov TS_DATA(%rax), %rsi
-    mov TS_N(%rax), %rdx
-    call ts_append
-    inc %rbx
-    jmp 1b
-9:  mov %r15, %rax
+    lea PT_OUT(%r13), %rdi          /* the parts' sets, in order */
+    mov %rax, %rsi
+    call ts_concat
     LEAVE
 ENDF pexec_scan
 
@@ -2663,13 +2716,20 @@ ENDF k_pred
 /* probe task: PT_A probe TupleSet, PT_B build TupleSet, PT_C HashTable,
  * PT_D next[] (build chains), PT_N 1 = ON is just the key equality */
 
-/* probe_part(task rdi, part rsi, lo rdx, hi rcx) */
+/* probe_part(task rdi, part rsi, lo rdx, hi rcx).  When ON is just the key
+ * equality (PT_N) every key match is a result: the joined tuples go
+ * straight to the output, followed by the NULL-padded tuple of an
+ * unmatched LEFT JOIN probe tuple (200(%rsp) = 1, "direct"); otherwise
+ * the candidates of a batch are collected, ON is evaluated on them and
+ * the passing ones are emitted in probe order. */
 FUNC probe_part
     ENTER 224
     mov %rdi, %rbx
     mov %rsi, 64(%rsp)
     mov %rdx, 136(%rsp)             /* batch start */
     mov %rcx, 72(%rsp)              /* hi */
+    mov PT_N(%rbx), %rax
+    mov %rax, 200(%rsp)             /* direct */
     mov PT_FP(%rbx), %r12
     mov PT_XS(%rbx), %r13
     lea 0(%rsp), %rdi
@@ -2726,6 +2786,7 @@ FUNC probe_part
     mov 152(%rsp), %rcx
     cmp 144(%rsp), %rcx
     jae 20f
+    movq $0, 208(%rsp)              /* direct: k matched */
     mov 112(%rsp), %rax
     cmpb $0, VNULL(%rax, %rcx)
     jne 19f                         /* NULL keys never match */
@@ -2751,6 +2812,8 @@ FUNC probe_part
     mov EN_D0(%rax), %r14           /* chain of build tuples */
 11: cmp $-1, %r14
     je 19f
+    cmpq $0, 200(%rsp)
+    jne 14f
     mov 88(%rsp), %rax              /* room for one more owner */
     mov TS_N(%rax), %rax
     cmp 104(%rsp), %rax
@@ -2781,6 +2844,27 @@ FUNC probe_part
     mov PT_D(%rbx), %rax
     mov (%rax, %r14, 8), %r14
     jmp 11b
+14: mov 80(%rsp), %rdi              /* direct: the joined tuple */
+    call ts_slot
+    mov %rax, %rdi
+    mov 152(%rsp), %rsi
+    imul %r15, %rsi
+    add 176(%rsp), %rsi             /* probe tuple */
+    mov PT_B(%rbx), %rdx
+    mov TS_DATA(%rdx), %rdx
+    mov %r14, %rcx
+    imul %r15, %rcx
+    add %rcx, %rdx                  /* build tuple */
+    cmpq $0, FP_BUILDL(%r12)
+    je 141f
+    xchg %rsi, %rdx                 /* the build side is the left input */
+141: mov %r12, %rcx
+    mov XS_W(%r13), %r8
+    call tuple_combine
+    movq $1, 208(%rsp)
+    mov PT_D(%rbx), %rax
+    mov (%rax, %r14, 8), %r14
+    jmp 11b
 15: mov %rax, %rsi                  /* fast table: key rsi, FHASH rax */
     mov $FHASH_MUL, %rcx
     imul %rcx, %rax
@@ -2804,10 +2888,28 @@ FUNC probe_part
     inc %rax
     and SB_MASK(%rcx), %rax
     jmp 16b
-19: incq 152(%rsp)
+19: cmpq $0, 200(%rsp)              /* direct: unmatched LEFT JOIN tuple */
+    je 191f
+    cmpq $0, 208(%rsp)
+    jne 191f
+    cmpq $JT_LEFT, FP_JTYPE(%r12)
+    jne 191f
+    mov 80(%rsp), %rdi
+    call ts_slot
+    mov %rax, %rdi
+    mov 152(%rsp), %rsi
+    imul %r15, %rsi
+    add 176(%rsp), %rsi
+    xor %edx, %edx
+    mov %r12, %rcx
+    mov XS_W(%r13), %r8
+    call tuple_combine
+191: incq 152(%rsp)
     jmp 10b
 
 20: /* ---- ON condition on the candidates */
+    cmpq $0, 200(%rsp)
+    jne 40f
     mov 88(%rsp), %rax
     mov TS_N(%rax), %r14            /* candidates */
     cmpq $0, PT_N(%rbx)
@@ -2973,21 +3075,13 @@ FUNC pexec_probe
     lea probe_part(%rip), %rsi
     mov %r13, %rdx
     call par_for
-    mov %rax, %r14                  /* parts */
-    mov PT_OUT(%r13), %r15
-    mov $1, %ebx
-3:  cmp %r14, %rbx
-    jae 9f
-    mov PT_OUT(%r13, %rbx, 8), %rax
-    mov %r15, %rdi
-    mov TS_DATA(%rax), %rsi
-    mov TS_N(%rax), %rdx
-    call ts_append
-    mov %r15, %rdi
+    lea PT_OUT(%r13), %rdi          /* the parts' sets, in order */
+    mov %rax, %rsi
+    call ts_concat
+    mov %rax, %r15
+    mov %rax, %rdi
     call check_join_rows
-    inc %rbx
-    jmp 3b
-9:  mov %r15, %rax
+    mov %r15, %rax
     LEAVE
 ENDF pexec_probe
 
@@ -3672,21 +3766,13 @@ FUNC pexec_nl
     lea nl_part(%rip), %rdx
     mov %r13, %rcx
     call par_run
-    mov %rax, %r14
-    mov PT_OUT(%r13), %r15
-    mov $1, %ebx
-2:  cmp %r14, %rbx
-    jae 9f
-    mov PT_OUT(%r13, %rbx, 8), %rax
-    mov %r15, %rdi
-    mov TS_DATA(%rax), %rsi
-    mov TS_N(%rax), %rdx
-    call ts_append
-    mov %r15, %rdi
+    lea PT_OUT(%r13), %rdi          /* the parts' sets, in order */
+    mov %rax, %rsi
+    call ts_concat
+    mov %rax, %r15
+    mov %rax, %rdi
     call check_join_rows
-    inc %rbx
-    jmp 2b
-9:  mov %r15, %rax
+    mov %r15, %rax
     LEAVE
 ENDF pexec_nl
 

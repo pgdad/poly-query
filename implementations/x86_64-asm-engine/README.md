@@ -320,7 +320,7 @@ later); the process exits 0 once nothing is left.
 |---|---|---|
 | `mode` | `"row"` | the unoptimized baseline: the original tuple-at-a-time interpreter of `exec.S` (every operator evaluates `eval()` once per tuple and materialises its output tuple set) |
 | | `"vectorized"`, `"auto"` (default) | batch execution: operators run over batches of 1024 tuples and evaluate expressions as column vectors (`vec.S`) |
-| `threads` | int ≥ 1 (default: `--threads N`, else the online CPUs up to 16; 1 with `mode: "row"`; capped at 64) | parallel parts for scans, filters, projections, hash-join probes and aggregation, in both modes |
+| `threads` | int ≥ 1 (default: `--threads N`, else the online CPUs up to 16 - in `serve` divided among the queries running; 1 with `mode: "row"`; capped at 64) | parallel parts for scans, filters, projections, hash-join probes and aggregation, in both modes |
 | `join` | `"auto"` (default), `"hash"`, `"merge"`, `"nested_loop"` | algorithm of every equi-join (see below); joins without an equi-key conjunct and CROSS joins are always nested loops |
 | `optimize` | `true` (default) / `false` | logical optimizer rules (`optimizer.S`, `rule_*.S`) on / off |
 | `native` | bool | accepted and ignored (`native.kernels` is not claimed) |
@@ -1140,6 +1140,166 @@ tables), `--transport http`, the concurrency suite, `make test` (whose
 short strings, NULL ordering, DISTINCT aggregates and the default thread
 count), and full-result comparisons against the old engine on the 1m data
 for many sort / group / DISTINCT queries beyond the workload.
+
+## Scaling optimization: 1m -> 10m rows
+
+Problem report: on `benchmarks/workloads/analytics.json` the engine grew
+24.8x from 1m to 10m rows (geometric mean of the 20 query medians), with
+large client-visible time outside `stats.elapsed_us`, latencies depending
+on the previous query, about 2.1 million minor page faults and 4.6 s of
+system CPU per round of the 20 queries, and HTTP throughput collapsing.
+Goal: remove the causes of the super-linear growth without changing any
+result.
+
+### Measurements
+
+`python3 benchmarks/harness/bench.py --engines x86_64-asm-engine --scale
+<1m|10m> --no-sandbox --cpus '' --mem-limit-gb 0` (one session: all nine
+tables, the two workload indexes, 3 warm-up and 7 measured rounds of the 20
+queries in random order; medians of the client-side latency in ms; same
+host - AMD Zen 5, 32 logical CPUs - and settings, "before" (the engine at
+the start of this task, commit `7b2edaf`) and "after" run back to back at
+each scale). Every query's result digest is identical before and after at
+both scales (q14 / q15 return counts only; their full ordered results were
+compared separately, see Verification).
+
+| query | 1m before | 1m after | 10m before | 10m after | 10m/1m before | 10m/1m after |
+|---|---:|---:|---:|---:|---:|---:|
+| q01_filter_selective | 0.052 | 0.049 | 2.02 | 0.08 | 38.7x | 1.5x |
+| q02_filter_low_selectivity | 1.954 | 1.683 | 35.15 | 19.38 | 18.0x | 11.5x |
+| q03_range_filter_time | 1.634 | 1.606 | 33.97 | 16.88 | 20.8x | 10.5x |
+| q04_arith_aggregate | 1.832 | 1.723 | 44.75 | 18.86 | 24.4x | 10.9x |
+| q05_groupby_low_card | 1.387 | 1.292 | 46.02 | 14.84 | 33.2x | 11.5x |
+| q06_groupby_high_card | 5.469 | 5.257 | 84.50 | 66.67 | 15.4x | 12.7x |
+| q07_groupby_skewed | 6.696 | 6.613 | 153.71 | 112.10 | 23.0x | 17.0x |
+| q08_groupby_uniform_multi | 3.535 | 3.384 | 53.52 | 24.46 | 15.1x | 7.2x |
+| q09_distinct_count | 5.924 | 6.283 | 110.10 | 78.78 | 18.6x | 12.5x |
+| q10_join_customers | 7.102 | 6.271 | 180.75 | 94.94 | 25.5x | 15.1x |
+| q11_join_star | 5.700 | 5.133 | 122.48 | 60.05 | 21.5x | 11.7x |
+| q12_left_join_anti | 6.785 | 5.094 | 174.67 | 90.76 | 25.7x | 17.8x |
+| q13_sort_topn | 2.896 | 2.669 | 61.38 | 35.27 | 21.2x | 13.2x |
+| q14_sort_full_string | 14.682 | 13.454 | 343.37 | 270.99 | 23.4x | 20.1x |
+| q15_sort_multi_key | 16.443 | 16.003 | 369.99 | 301.48 | 22.5x | 18.8x |
+| q16_timeseries_hourly | 0.754 | 0.689 | 20.53 | 3.14 | 27.2x | 4.6x |
+| q17_wide_projection | 0.275 | 0.211 | 6.49 | 1.58 | 23.6x | 7.5x |
+| q18_nulls | 2.202 | 2.049 | 56.50 | 21.12 | 25.7x | 10.3x |
+| q19_cte_subquery | 8.762 | 8.187 | 161.15 | 128.02 | 18.4x | 15.6x |
+| q20_string_functions | 3.259 | 3.036 | 59.17 | 36.48 | 18.2x | 12.0x |
+
+Peak RSS (harness, whole session): 1m 1406 -> 1235 MiB; 10m 11292 -> 12669
+MiB (+12 %, the chunk pool keeping up to half the peak chunk memory, see 1).
+CPU time of the 10m query phase: 192.1 s -> 175.0 s, wall 22.4 s -> 14.4 s.
+An earlier back-to-back pair gave the same picture (10m 63.77 -> 27.54 ms,
+1m 2.772 -> 2.579 ms). The 1m queries that came out slightly slower in one
+of the two pairs (q06, q09, q13, q20) alternate between the two engines in
+repeated interleaved runs (measurement noise, +-10 % on this shared host).
+
+HTTP (`--http`, 10m, `transactions` and `customers` loaded, q01 / q03 /
+q05 / q09 at random, 20 s per client count; same host, back to back):
+
+| clients | before qps | after qps | before p50 (ms) | after p50 (ms) |
+|---:|---:|---:|---:|---:|
+| 1 | 5.4 | 30.7 | 137.1 | 11.1 |
+| 4 | 15.3 | 34.7 | 192.5 | 60.1 |
+| 16 | 17.7 | 26.0 | 813.9 | 119.7 |
+
+With several clients the throughput is now bound by the CPU work of q09
+(two COUNT(DISTINCT) over 10m rows: 1-2 CPU-seconds per query).
+
+### Causes found and changes
+
+Tools: `perf` is not permitted on the host, so `src/prof.S` adds an opt-in
+sampling profiler (`PQ_PROF=FILE`: SIGPROF every millisecond of process
+CPU time records the interrupted address, thread, time stamp counter and
+the word at the stack pointer; `bench/prof.sh FILE` prints a flat profile).
+Comparing per-function samples per query at 1m and 10m and per-phase
+timelines located the growth; `strace` showed the memory behaviour.
+
+1. **Arena chunk pool** (`util.S`; the main cause). Arena chunks are
+   mmap'd; released chunks were kept in a pool of at most 1 GiB and reused
+   only by requests that fit. At 10m a query's chunks run to gigabytes, so
+   nearly every query mapped fresh memory (every first touch a page fault
+   plus zeroing: the 2.1 million faults and 4.6 s system CPU per round) and
+   unmapped it again (TLB shootdowns on all CPUs of the process). The
+   unmapping happened when the next request reset the arenas, before its
+   timer started: that is the time outside `stats.elapsed_us` and why a
+   query's latency depended on the query before it. Now:
+   * chunk sizes are rounded to size classes (four per power of two,
+     multiples of 2 MiB from 2 MiB on), so released chunks fit later
+     requests;
+   * the pool keeps up to max(1 GiB, peak chunk bytes - chunk bytes in use,
+     peak / 2), unmapping the least recently released chunks beyond that
+     (with only the first two terms, differently sized queries kept
+     evicting each other's chunks: about 1.5 GB of fresh mappings per round
+     at 10m);
+   * one free list per size class plus a release-order list, both doubly
+     linked through the free chunks (a single list walked under the spin
+     lock had become a hot spot with thousands of pooled chunks);
+   * chunks of 2 MiB or more are 2 MiB aligned and use transparent huge
+     pages (`madvise`): 512 times fewer faults for fresh memory, fewer TLB
+     misses in hash / scatter phases, and a cheap `fork` of a `serve`
+     process holding 10m-row tables.
+   Steady state at 10m: about 20 faults and 0.05 s system CPU per round.
+2. **Column statistics** (`table.S` `table_col_stats`). The planner's
+   per-column statistics (NULLs, distinct values, min / max) were computed
+   on first use by one row-at-a-time pass (about 260 ms per 10m-row column).
+   They are now computed in parallel parts and merged with exactly the
+   serial semantics (strict first-occurrence min / max, register-wise
+   HyperLogLog maximum, exact distinct count up to 200,000 including the
+   serial loop's rule for giving up the exact set); the `stats` op output
+   is identical at 1m and 10m.
+3. **Statistics in `serve`** (`server.S` `srv_prepare_table`). Every query
+   runs in a forked child, which computed the statistics its plan
+   consulted and lost them at exit - on every query (q01 over HTTP: 420
+   ms at 10m). The server now computes all statistics when a table is
+   loaded or opened (on the catalog worker, before publishing), so children
+   inherit them.
+4. **Serial merges of per-part tuple sets** (`pexec.S` `ts_concat`). Scans,
+   hash-join probes and nested-loop joins appended the parts' outputs one
+   by one on the calling thread, re-copying the growing set at every
+   doubling. The result is now allocated once and every part copies its
+   own output in parallel.
+5. **Hash-join probe** (`pexec.S` `probe_part`). When ON is just the key
+   equality, joined tuples go straight to the part's output instead of
+   through a candidate set and a per-tuple copy (LEFT JOIN: the unmatched
+   probe tuple's NULL-padded tuple follows in order). This matters most
+   for skewed joins (q12: 80 % of the orders belong to the customers of
+   the first probe part).
+6. **Sort** (`keysort.S` `ks_msd`). The per-bucket MSD radix sort copied
+   every level back from the scratch buffer; levels now alternate between
+   the two buffers. Digits that are constant inside a bucket are skipped a
+   key word at a time (one OR/AND pass instead of one histogram pass per
+   byte: many equal short strings in q14), and a range already in key
+   order (complete key words; ties are in sequence order because every
+   scatter is stable) is left as it is.
+7. **Concurrent queries in `serve`** (`server.S` `child_threads`,
+   `par.S`). Unless `--threads` is given, a forked query process uses
+   ceil(default threads / running queries) threads and polls only briefly
+   before sleeping: 16 concurrent queries of 16 threads each took more
+   than twice the CPU time per query.
+
+### Verification
+
+Conformance suite 660/660, `--modes` 3870/3870 (also with `PQ_PAR_MIN=1`),
+`--transport http` 660/660, `tests/concurrency/http_suite.py` 19/19,
+`robustness_probe.py --only expression_limits` pass, `make build test lint`.
+Beyond the harness digests: full ordered results of q13-q15 and seven more
+ORDER BY queries (three option sets) and of nine join queries (LEFT /
+INNER, build on either side, multi-match and NULL keys; four option sets)
+are byte-identical to the old engine at 1m, and the `stats` op output for
+every column of the nine tables at 1m and 10m.
+
+### What still grows faster than the data
+
+Per-function samples (1m -> 10m, per query) still grow 25-40x in the
+radix sort's scatter (q14 / q15: 25 MB of 40-byte entries per thread no
+longer fit the caches), in chained hash tables of high-cardinality GROUP
+BY (q07 / q19: one million groups) and in the probe of a one-million-key
+join table (q10). These are cache effects of the operators' data
+structures rather than overheads around them; candidates for a later
+change are an open-addressing integer-key aggregation table, smaller sort
+entries, and an anti-join for LEFT JOIN ... WHERE right.non_null_column
+IS NULL.
 
 ## Implementation-defined choices
 

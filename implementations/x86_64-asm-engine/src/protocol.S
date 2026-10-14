@@ -380,6 +380,7 @@ hr_unknown_op:
     RAISE E_INVALID_REQUEST, "unknown op"
 hr_error:
     movq $0, g_deadline_ns(%rip)
+    movq $0, %fs:t_arena@tpoff      /* left set by a failed table_col_stats */
     mov g_pending_map(%rip), %rdi   /* PQCF file mapped by a failed open */
     test %rdi, %rdi
     jz 0f
@@ -1313,6 +1314,8 @@ FUNC op_load
     mov LD_LAYOUT(%rsp), %rsi
     mov LD_DICT(%rsp), %rdx
     call table_finalize
+    mov %r12, %rdi
+    call srv_prepare_table
     call cat_parse_end
     movq $0, g_pending_arena(%rip)
     mov %r12, %rdi
@@ -1494,6 +1497,8 @@ FUNC op_open
     mov OP_LAYOUT(%rsp), %rsi
     mov OP_DICT(%rsp), %rdx
     call table_finalize
+    mov OP_TABLE(%rsp), %rdi
+    call srv_prepare_table
     call cat_parse_end
     /* index names: unique in the file, and free in the catalog (the replaced
      * table's own indexes are dropped with it) */

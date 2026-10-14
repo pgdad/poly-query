@@ -75,6 +75,8 @@ g_opt_threads:  .quad 1         /* requested worker threads */
 /* threads of a query without the `threads` option (not in mode "row"):
  * --threads N, else the online CPUs up to DEFAULT_THREADS_MAX (main.S) */
 g_default_threads: .quad 1
+    .globl g_threads_auto
+g_threads_auto: .quad 0         /* 1 = default threads not given (--threads) */
 /* physical execution settings (phys_exec_settings) */
 g_exec_mode:    .quad MODE_VEC  /* MODE_ROW or MODE_VEC */
 g_exec_threads: .quad 1         /* worker threads for scans / aggregation */

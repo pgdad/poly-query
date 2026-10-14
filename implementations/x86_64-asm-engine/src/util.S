@@ -154,20 +154,52 @@ ENDF xrealloc
 #define CHUNK_MIN (256*1024)
 
 /* ------------------------------------------------ arena chunk pool
- * Chunks of released arenas are kept (up to POOL_MAX bytes) and reused by
- * later arenas: large fresh allocations are mmap'd by malloc and every
- * first touch of their pages faults, which costs more than many queries
- * themselves.  A chunk starts with a 16-byte header: the next chunk of its
- * arena (or of the pool) and its real size.  A reused chunk serves exactly
- * the requested size, so arena accounting (AR_TOTAL, AR_LIMIT) does not
- * depend on the pool.  The pool is shared by all threads (spin lock). */
-#define POOL_MAX (1024*1024*1024)
+ * Arena chunks are mmap'd directly (not malloc'd) and released chunks are
+ * kept in a pool shared by all threads (spin lock) for later arenas: every
+ * first touch of a fresh page faults and has the kernel zero it, and
+ * unmapping a chunk shoots down its TLB entries on every CPU of the
+ * process; with 10m-row tables a query's chunks run to gigabytes, and
+ * mapping, faulting and unmapping them cost more than the query itself.
+ *
+ * A chunk starts with a 16-byte header: the next chunk of its arena (or of
+ * an unmap list) and its real size.  Sizes are rounded up to size classes
+ * (four per power of two, multiples of 2 MiB from 2 MiB on) so that the
+ * chunks a query releases fit the next run of a query; a pooled chunk is
+ * reused for requests of at least half its size.  A reused chunk serves
+ * exactly the requested size, so arena accounting (AR_TOTAL, AR_LIMIT)
+ * does not depend on the pool.  The pool keeps one list per size class
+ * (lookups touch at most five lists) and a list of all pooled chunks in
+ * release order, both doubly linked through the free chunk's body (PC_*).
+ *
+ * Bound: the pool holds at most max(POOL_MIN, chunk_peak - chunk_live,
+ * chunk_peak / 2) bytes, chunk_peak being the most chunk bytes ever in use
+ * at once (tables included).  Up to the first term the pool only refills
+ * memory the process has already used; the last one lets it keep the
+ * differently sized chunks of different queries (with only the first two,
+ * queries kept evicting each other's chunks at 10m rows).  When a fresh
+ * chunk would break the bound, the least recently released chunks are
+ * unmapped first (pool_trim). */
+#define POOL_MIN  (1024*1024*1024)
+#define HUGE_PAGE (2*1024*1024)
+#define POOL_NCLS 256           /* size class lists (4 * log2 of the size) */
+/* a pooled chunk */
+#define PC_NEXT    0            /* its class list */
+#define PC_SIZE    8
+#define PC_PREV    16
+#define PC_LRU_NEXT 24          /* release order: towards older chunks */
+#define PC_LRU_PREV 32
 
     .data
     .p2align 3
-pool_head:  .quad 0             /* free chunks */
 pool_bytes: .quad 0
 pool_lock:  .quad 0
+pool_new:   .quad 0             /* most recently released chunk */
+pool_old:   .quad 0             /* least recently released chunk */
+chunk_live: .quad 0             /* bytes of chunks in use by arenas */
+chunk_peak: .quad 0             /* highest chunk_live so far */
+    .bss
+    .p2align 3
+pool_cls:   .zero 8 * POOL_NCLS /* per size class: most recently released first */
     .text
 
 /* pool_acquire / pool_release: the pool's spin lock (leaf helpers) */
@@ -184,47 +216,245 @@ pool_release:
     movq $0, pool_lock(%rip)
     ret
 
+/* chunk_class(size rdi) -> rax: the size class of a chunk of `size` bytes
+ * (leaf: clobbers rcx, rdx); sizes of 2^62 and more stay as they are (the
+ * mapping fails: RESOURCE_LIMIT) */
+chunk_class:
+    mov $CHUNK_MIN, %eax
+    cmp %rax, %rdi
+    jbe 9f
+    mov %rdi, %rax
+    bt $62, %rax
+    jc 9f
+    bt $63, %rax
+    jc 9f
+    lea -1(%rdi), %rax
+    bsr %rax, %rcx                  /* 2^cl < size <= 2^(cl+1) */
+    sub $2, %ecx
+    mov $1, %edx
+    shl %cl, %rdx                   /* step: a quarter of 2^cl */
+    mov $HUGE_PAGE, %eax
+    cmp %rax, %rdi
+    jbe 1f
+    cmp %rax, %rdx
+    cmovb %rax, %rdx
+1:  lea -1(%rdi, %rdx), %rax
+    neg %rdx
+    and %rdx, %rax
+9:  ret
+
+/* class_list(class size rdi) -> rax the index of its pool list: 4 * cl + j
+ * for the size 2^cl * (5 + j) / 4 (leaf: clobbers rcx, rdx) */
+class_list:
+    lea -1(%rdi), %rdx
+    bsr %rdx, %rax
+    lea -2(%rax), %ecx
+    shr %cl, %rdx
+    and $3, %edx
+    lea (%rdx, %rax, 4), %rax
+    ret
+
+/* pool_insert(chunk rdi): pools a chunk as the most recently released one
+ * (lock held; leaf: clobbers rax, rcx, rdx, rsi) */
+pool_insert:
+    mov %rdi, %rsi
+    mov PC_SIZE(%rsi), %rdi
+    add %rdi, pool_bytes(%rip)
+    call class_list
+    lea pool_cls(%rip), %rcx
+    lea (%rcx, %rax, 8), %rcx       /* the list head */
+    mov (%rcx), %rax
+    mov %rax, PC_NEXT(%rsi)
+    movq $0, PC_PREV(%rsi)
+    test %rax, %rax
+    jz 1f
+    mov %rsi, PC_PREV(%rax)
+1:  mov %rsi, (%rcx)
+    mov pool_new(%rip), %rax        /* release order */
+    mov %rax, PC_LRU_NEXT(%rsi)
+    movq $0, PC_LRU_PREV(%rsi)
+    test %rax, %rax
+    jz 2f
+    mov %rsi, PC_LRU_PREV(%rax)
+    jmp 3f
+2:  mov %rsi, pool_old(%rip)
+3:  mov %rsi, pool_new(%rip)
+    mov %rsi, %rdi
+    ret
+
+/* pool_remove(chunk rdi): takes a chunk out of the pool (lock held; leaf:
+ * clobbers rax, rcx, rdx, rsi) */
+pool_remove:
+    mov %rdi, %rsi
+    mov PC_SIZE(%rsi), %rdi
+    sub %rdi, pool_bytes(%rip)
+    call class_list
+    mov PC_NEXT(%rsi), %rdx
+    mov PC_PREV(%rsi), %rcx
+    test %rcx, %rcx
+    jz 1f
+    mov %rdx, PC_NEXT(%rcx)
+    jmp 2f
+1:  lea pool_cls(%rip), %rcx
+    mov %rdx, (%rcx, %rax, 8)
+2:  test %rdx, %rdx
+    jz 3f
+    mov PC_PREV(%rsi), %rcx
+    mov %rcx, PC_PREV(%rdx)
+3:  mov PC_LRU_NEXT(%rsi), %rdx     /* release order */
+    mov PC_LRU_PREV(%rsi), %rcx
+    test %rcx, %rcx
+    jz 4f
+    mov %rdx, PC_LRU_NEXT(%rcx)
+    jmp 5f
+4:  mov %rdx, pool_new(%rip)
+5:  test %rdx, %rdx
+    jz 6f
+    mov %rcx, PC_LRU_PREV(%rdx)
+    jmp 7f
+6:  mov %rcx, pool_old(%rip)
+7:  mov %rsi, %rdi
+    ret
+
+/* pool_trim() -> rax list of the chunks taken out of the pool to keep it
+ * within its bound, least recently released first (lock held; clobbers
+ * rcx, rdx, rsi, rdi, r8, r9) */
+pool_trim:
+    mov chunk_peak(%rip), %r9
+    sub chunk_live(%rip), %r9
+    jae 0f
+    xor %r9d, %r9d
+0:  mov $POOL_MIN, %rcx
+    cmp %rcx, %r9
+    cmovb %rcx, %r9
+    mov chunk_peak(%rip), %rcx
+    shr $1, %rcx
+    cmp %rcx, %r9
+    cmovb %rcx, %r9                 /* allowance */
+    xor %r8d, %r8d                  /* taken chunks */
+1:  cmp %r9, pool_bytes(%rip)
+    jbe 9f
+    mov pool_old(%rip), %rdi
+    test %rdi, %rdi
+    jz 9f
+    call pool_remove
+    mov %r8, (%rdi)
+    mov %rdi, %r8
+    jmp 1b
+9:  mov %r8, %rax
+    ret
+
+/* chunk_unmap_list(list rdi): unmaps a list of chunks linked through
+ * their headers */
+chunk_unmap_list:
+    push %rbx
+    mov %rdi, %rbx
+1:  test %rbx, %rbx
+    jz 2f
+    mov %rbx, %rdi
+    mov 8(%rbx), %rsi
+    mov (%rbx), %rbx
+    call munmap
+    jmp 1b
+2:  pop %rbx
+    ret
+
+/* chunk_map(size rdi) -> rax a fresh anonymous mapping (-1 = failed).
+ * Chunks of 2 MiB or more (their size classes are multiples of 2 MiB) are
+ * 2 MiB-aligned and backed by transparent huge pages where the system
+ * allows them on request (madvise mode): one fault per 2 MiB instead of
+ * 512 and far fewer TLB misses in operators that hash or scatter over
+ * hundreds of megabytes; a fork()ed `serve` child also copies one entry
+ * per 2 MiB of table data instead of 512. */
+chunk_map:
+    push %rbx
+    push %r12
+    push %r13
+    mov %rdi, %rbx                  /* size */
+    xor %esi, %esi                  /* alignment slack */
+    cmp $HUGE_PAGE, %rdi
+    jb 1f
+    mov $HUGE_PAGE, %esi
+1:  mov %rsi, %r12
+    add %rbx, %rsi
+    xor %edi, %edi                  /* mmap(0, size + slack, PROT_READ|PROT_WRITE, */
+    mov $3, %edx                    /* MAP_PRIVATE|MAP_ANONYMOUS, -1, 0) */
+    mov $0x22, %ecx
+    mov $-1, %r8d
+    xor %r9d, %r9d
+    call mmap
+    cmp $-1, %rax
+    je 9f
+    test %r12, %r12
+    jz 9f
+    mov %rax, %r13                  /* the mapping */
+    lea (HUGE_PAGE-1)(%rax), %r12
+    and $-HUGE_PAGE, %r12           /* the aligned chunk */
+    mov %r12, %rsi                  /* unmap the slack before ... */
+    sub %r13, %rsi
+    jz 2f
+    mov %r13, %rdi
+    call munmap
+2:  lea (%r12, %rbx), %rdi          /* ... and after it */
+    lea HUGE_PAGE(%r13, %rbx), %rsi
+    sub %rdi, %rsi
+    jz 3f
+    call munmap
+3:  mov %r12, %rdi
+    mov %rbx, %rsi
+    mov $14, %edx                   /* MADV_HUGEPAGE */
+    call madvise
+    mov %r12, %rax
+9:  pop %r13
+    pop %r12
+    pop %rbx
+    ret
+
 /* chunk_get(size rdi) -> rax chunk of at least `size` bytes (header
- * included): the smallest pooled chunk that fits, else a new one */
+ * included): the most recently released pooled chunk of the smallest class
+ * from the size class to twice its size, else a new one */
 FUNC chunk_get
     push %rbx
     push %r12
     push %r13
-    mov %rdi, %rbx
+    call chunk_class
+    mov %rax, %rbx                  /* size class */
+    mov %rax, %rdi
+    call class_list
+    mov %rax, %r12                  /* its list */
+    lea 5(%rax), %r13               /* lists up to twice the size */
+    mov $POOL_NCLS, %eax
+    cmp %rax, %r13
+    cmova %rax, %r13
     call pool_acquire
-    lea pool_head(%rip), %rcx       /* link to the current chunk */
-    xor %r12d, %r12d                /* link to the best chunk */
-    mov $-1, %r13                   /* its size */
-1:  mov (%rcx), %rax
-    test %rax, %rax
-    jz 3f
-    mov 8(%rax), %rdx
-    cmp %rbx, %rdx
-    jb 2f
-    cmp %r13, %rdx
-    jae 2f
-    mov %rcx, %r12
-    mov %rdx, %r13
-2:  mov %rax, %rcx
-    jmp 1b
-3:  test %r12, %r12
-    jz 5f
-    mov (%r12), %rax                /* unlink the best chunk */
-    mov (%rax), %rdx
-    mov %rdx, (%r12)
-    sub %r13, pool_bytes(%rip)
+1:  lea pool_cls(%rip), %rcx
+    mov (%rcx, %r12, 8), %rdi
+    test %rdi, %rdi
+    jnz 3f
+    inc %r12
+    cmp %r13, %r12
+    jb 1b
+    jmp 5f
+3:  call pool_remove
+    mov %rdi, %r12
+    mov PC_SIZE(%rdi), %rbx
+    call chunk_count
     call pool_release
+    mov %r12, %rax
     jmp 9f
-5:  call pool_release
-    xor %edi, %edi                  /* mapped directly (not malloc): a */
-    mov %rbx, %rsi                  /* released chunk returns its memory */
-    mov $3, %edx                    /* to the system instead of staying in */
-    mov $0x22, %ecx                 /* a fragmented malloc heap */
-    mov $-1, %r8d                   /* PROT_READ|PROT_WRITE, */
-    xor %r9d, %r9d                  /* MAP_PRIVATE|MAP_ANONYMOUS */
-    call mmap
+5:  call chunk_count
+    call pool_trim
+    mov %rax, %r12
+    call pool_release
+    mov %r12, %rdi
+    call chunk_unmap_list
+    mov %rbx, %rdi
+    call chunk_map
     cmp $-1, %rax
     jne 6f
+    call pool_acquire
+    sub %rbx, chunk_live(%rip)
+    call pool_release
     RAISE E_RESOURCE_LIMIT, "out of memory"
 6:  mov %rbx, 8(%rax)
 9:  pop %r13
@@ -233,27 +463,31 @@ FUNC chunk_get
     ret
 ENDF chunk_get
 
-/* chunk_put(chunk rdi): keeps the chunk in the pool, or frees it when the
- * pool is full */
+/* chunk_count: chunk_live += rbx, raising chunk_peak (lock held; leaf) */
+chunk_count:
+    mov chunk_live(%rip), %rax
+    add %rbx, %rax
+    mov %rax, chunk_live(%rip)
+    cmp chunk_peak(%rip), %rax
+    jbe 1f
+    mov %rax, chunk_peak(%rip)
+1:  ret
+
+/* chunk_put(chunk rdi): keeps the chunk in the pool (unmapping the least
+ * recently released chunks beyond the pool's bound) */
 FUNC chunk_put
     push %rbx
     mov %rdi, %rbx
     call pool_acquire
-    mov pool_bytes(%rip), %rax
-    add 8(%rbx), %rax
-    cmp $POOL_MAX, %rax
-    ja 1f
-    mov %rax, pool_bytes(%rip)
-    mov pool_head(%rip), %rax
-    mov %rax, (%rbx)
-    mov %rbx, pool_head(%rip)
-    call pool_release
-    pop %rbx
-    ret
-1:  call pool_release
+    mov 8(%rbx), %rax
+    sub %rax, chunk_live(%rip)
     mov %rbx, %rdi
-    mov 8(%rbx), %rsi
-    call munmap
+    call pool_insert
+    call pool_trim
+    mov %rax, %rbx
+    call pool_release
+    mov %rbx, %rdi
+    call chunk_unmap_list
     pop %rbx
     ret
 ENDF chunk_put
@@ -261,7 +495,12 @@ ENDF chunk_put
 /* chunk_pool_forget(): drops the pool without freeing it (a fork()ed child:
  * another thread of the parent may have held the lock) */
 FUNC chunk_pool_forget
-    movq $0, pool_head(%rip)
+    lea pool_cls(%rip), %rdi
+    xor %eax, %eax
+    mov $POOL_NCLS, %ecx
+    rep stosq
+    movq $0, pool_new(%rip)
+    movq $0, pool_old(%rip)
     movq $0, pool_bytes(%rip)
     movq $0, pool_lock(%rip)
     ret

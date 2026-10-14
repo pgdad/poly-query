@@ -49,6 +49,8 @@ par_arenas: .zero 8 * MAX_THREADS
  * mutex 40 bytes, two condition variables 48 bytes each */
 #define POOL_SYNC_SIZE 192
 #define POOL_SPIN 20000             /* pause iterations before sleeping */
+#define CHILD_SPIN 1000              /* the same in fork()ed serve children, whose
+                                       concurrent queries share the CPUs */
     .p2align 6
 pool_mutex:   .zero 64
 pool_cv_work: .zero 64
@@ -64,6 +66,7 @@ pool_caller_pinned: .quad 0
     .p2align 3
 pool_pending: .quad 0               /* posted parts not finished yet */
 pool_pin_on:  .quad 1               /* pin the pool's threads to CPUs */
+pool_spin:    .quad POOL_SPIN       /* polling before sleeping */
     .globl g_par_min
 g_par_min:  .quad 0             /* minimum items per part (env PQ_PAR_MIN) */
 
@@ -112,14 +115,17 @@ ENDF par_body
  * waits until pool_pending drops to 0 (pool_cv_done).  Both sides poll for
  * POOL_SPIN pause iterations (~0.1-0.3 ms) before sleeping, since the
  * operators of a query post parts in quick succession.  Workers are started
- * on first use; a forked child starts without any (par_after_fork). */
+ * on first use; a forked child starts without any (par_after_fork) and
+ * polls only briefly (CHILD_SPIN). */
 
 /* par_worker(slot rdi): pthread entry point of a pool worker */
 FUNC par_worker
     push %rbx
     mov %rdi, %rbx
     call thread_stack_init          /* STACK_CHECK limit, signal stack */
-0:  mov $POOL_SPIN, %ecx            /* poll a while: operators of a query */
+0:  mov pool_spin(%rip), %ecx       /* poll a while: operators of a query */
+    test %ecx, %ecx
+    jz 2f
 1:  cmpq $1, PW_STATE(%rbx)         /* follow each other closely */
     je 2f
     pause
@@ -271,6 +277,7 @@ ENDF pool_pin
 FUNC par_after_fork
     sub $8, %rsp
     movq $0, pool_pin_on(%rip)
+    movq $CHILD_SPIN, pool_spin(%rip)
     lea pool_started(%rip), %rdi
     xor %esi, %esi
     mov $MAX_THREADS, %edx
@@ -435,13 +442,15 @@ FUNC par_run
     call par_body
 81: inc %r15
     jmp 8b
-9:  mov $POOL_SPIN, %ecx            /* wait for the workers: poll, */
+9:  mov pool_spin(%rip), %ecx       /* wait for the workers: poll, */
+    test %ecx, %ecx
+    jz 94f
 93: cmpq $0, pool_pending(%rip)     /* then sleep */
     je 10f
     pause
     dec %ecx
     jnz 93b
-    lea pool_mutex(%rip), %rdi
+94: lea pool_mutex(%rip), %rdi
     call pthread_mutex_lock
 91: cmpq $0, pool_pending(%rip)
     je 92f
