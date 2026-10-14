@@ -259,6 +259,14 @@ impl Args {
     }
 }
 
+/// `--top N`: a decimal integer ≥ 1; values beyond `u64` saturate.
+fn parse_top(v: &str) -> Option<u64> {
+    if v.is_empty() || !v.bytes().all(|b| b.is_ascii_digit()) || v.bytes().all(|b| b == b'0') {
+        return None;
+    }
+    Some(v.parse().unwrap_or(u64::MAX))
+}
+
 const FILTERS: [&str; 4] = ["--month", "--from", "--to", "--account"];
 
 fn with_filters(extra: &[&'static str]) -> Vec<&'static str> {
@@ -353,15 +361,9 @@ fn parse_command(name: &str, args: &[String]) -> Result<Command> {
                 _ => {
                     let top = match a.value("--top") {
                         None => 10,
-                        Some(v) => v
-                            .parse::<u64>()
-                            .ok()
-                            .filter(|&n| n >= 1 && v.bytes().all(|b| b.is_ascii_digit()))
-                            .ok_or_else(|| {
-                                AppError::usage(format!(
-                                    "--top: expected an integer >= 1, not '{v}'"
-                                ))
-                            })?,
+                        Some(v) => parse_top(v).ok_or_else(|| {
+                            AppError::usage(format!("--top: expected an integer >= 1, not '{v}'"))
+                        })?,
                     };
                     ReportKind::Merchants { top }
                 }
@@ -505,6 +507,9 @@ mod tests {
             }
         );
         assert_eq!(command("--help"), Command::Help);
+        assert_eq!(parse_top("99999999999999999999"), Some(u64::MAX));
+        assert_eq!(parse_top("007"), Some(7));
+        assert_eq!(parse_top("00"), None);
         assert_eq!(
             command("budget --month 2026-02"),
             Command::Budget {

@@ -203,15 +203,17 @@ impl Ledger {
     /// Adds the table `ledger`: the transactions followed by their resolved
     /// category (override, else the first matching rule, else
     /// `uncategorized`). Requires the `rules` table. The rule patterns
-    /// become LIKE patterns (`*` → `%`, `?` → `_`; patterns contain neither
-    /// `%` nor `_`), matched against the distinct merchants only.
+    /// (stored upper-cased) become LIKE patterns (`*` → `%`, `?` → `_`;
+    /// patterns contain neither `%` nor `_`) and are matched against the
+    /// upper-cased distinct merchants only; `UPPER` maps ASCII letters only,
+    /// so matching is ASCII case-insensitive.
     pub fn add_categorized_ledger(&self) -> Result<()> {
         let sql = format!(
             "WITH merchants AS (SELECT DISTINCT merchant FROM transactions), \
              patterns AS (SELECT rule_no, category, \
                  REPLACE(REPLACE(pattern, '*', '%'), '?', '_') AS like_pattern FROM rules), \
              first_match AS (SELECT m.merchant, MIN(p.rule_no) AS rule_no \
-                 FROM merchants m JOIN patterns p ON m.merchant LIKE p.like_pattern \
+                 FROM merchants m JOIN patterns p ON UPPER(m.merchant) LIKE p.like_pattern \
                  GROUP BY m.merchant), \
              merchant_category AS (SELECT f.merchant, p.category \
                  FROM first_match f JOIN patterns p ON p.rule_no = f.rule_no) \

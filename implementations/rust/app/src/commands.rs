@@ -238,8 +238,9 @@ fn report(ledger: &Ledger, kind: ReportKind, filter: &Filter) -> Result<Outcome>
             ledger
                 .query(&format!(
                     "SELECT merchant, -SUM(amount) AS spent, COUNT(*) AS transactions \
-                     FROM transactions{} GROUP BY merchant ORDER BY spent DESC, merchant LIMIT {top}",
-                    where_clause(&conditions)
+                     FROM transactions{} GROUP BY merchant ORDER BY spent DESC, merchant LIMIT {}",
+                    where_clause(&conditions),
+                    top.min(i64::MAX as u64)
                 ))?
                 .into()
         }

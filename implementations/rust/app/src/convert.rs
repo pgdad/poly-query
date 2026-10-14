@@ -43,6 +43,12 @@ enum Amounts {
 /// Converts the records of a file (header first when configured).
 pub fn convert(records: &[Record], s: &ImportSettings) -> Result<Vec<Entry>, ConvertError> {
     let Some(first) = records.first() else {
+        if s.header {
+            return Err(ConvertError {
+                line: s.skip_lines + 1,
+                message: "no header record (the file is empty)".into(),
+            });
+        }
         return Ok(Vec::new());
     };
     let width = first.fields.len();
@@ -324,5 +330,10 @@ mod tests {
         };
         let records = bankcsv::parse("2026-01-05,x,1.5\n", b',', 0).unwrap();
         assert_eq!(convert(&records, &s).unwrap()[0].cents, -150);
+        assert!(convert(&[], &s).unwrap().is_empty());
+        assert_eq!(
+            convert(&[], &ImportSettings::default()).unwrap_err().line,
+            1
+        );
     }
 }
