@@ -94,7 +94,8 @@ FUNC api_init
     jne 1f
     call arena_new
     mov %rax, g_arena(%rip)
-1:  mov g_max_query_mem(%rip), %rax
+1:  call par_no_pin                 /* leave the host's CPU affinity alone */
+    mov g_max_query_mem(%rip), %rax
     mov %rax, api_def_mem(%rip)
     mov g_max_ingest_bytes(%rip), %rax
     mov %rax, api_def_ingest(%rip)

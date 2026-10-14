@@ -272,6 +272,13 @@ FUNC pool_pin
     ret
 ENDF pool_pin
 
+/* par_no_pin(): never pin threads to CPUs (embedding API: the library
+ * must not change the CPU affinity of its host's threads) */
+FUNC par_no_pin
+    movq $0, pool_pin_on(%rip)
+    ret
+ENDF par_no_pin
+
 /* par_after_fork(): a fork()ed child has none of the parent's workers,
  * and does not pin threads (concurrent children would share the cores) */
 FUNC par_after_fork
