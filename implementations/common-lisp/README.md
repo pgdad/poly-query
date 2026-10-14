@@ -905,7 +905,7 @@ fail with `RESOURCE_LIMIT` while the engine keeps serving.
   (11 columns) takes about 650 MB; the 9 workload tables about 4 GB.
 * *Heap guard* (`util/memory.lisp`). A soft heap limit — the dynamic space
   minus a reserve of 15 % (at least 2 GiB) for the collector, and at most
-  80 % of the host's physical memory or cgroup limit, i.e. about 54 GiB on
+  80 % of the host's physical memory or cgroup limit, i.e. 54.4 GiB (55,705 MB) on
   the reference host — is checked by `CHECK-HEAP` wherever work can grow:
   every 4,096 rows of a load and every builder chunk, in every query loop
   through `CHECK-INTERRUPTS` and `CHARGE-MEMORY`, in the JSON reader, and
@@ -962,11 +962,11 @@ and column builders for the final columns.
 
 | check | result | peak RSS |
 |---|---|---|
-| `workload` — 9 tables at 10m (loads 0.3–12 s each, 44 s in total), 20 queries | all ok (0.007–5.2 s; the full sorts q14/q15 return 10M rows) | 6.2 GiB |
-| `query_budget` — `--max-query-memory-mb 64` | 9 queries `RESOURCE_LIMIT`, 11 ok, engine answers afterwards | 4.8 GiB |
+| `workload` — 9 tables at 10m (loads 0.0–6.7 s each, 27.5 s in total), 20 queries | all ok (0.007–5.6 s; the full sorts q14/q15 return 10M rows) | 6.4 GiB |
+| `query_budget` — `--max-query-memory-mb 64` | 9 queries `RESOURCE_LIMIT`, 11 ok, engine answers afterwards | 5.0 GiB |
 | `ingest_limit` — `--max-ingest-bytes 100000000` | `RESOURCE_LIMIT` before reading, engine answers | 0.0 GiB |
-| `exhaustion` — 6 copies of `transactions` | all ok (7 s each), engine answers | 4.1 GiB |
-| EXHAUSTION_ROW
+| `exhaustion` — 6 copies of `transactions` | all ok (5.4–6.5 s each), engine answers | 3.9 GiB |
+| 95 copies of `transactions` (own driver, default limits) | copies 1–85 ok (55.4 GB); 86–95 `RESOURCE_LIMIT` after 2.3 s each (heap limit 55,705 MB); afterwards `COUNT(*)` and a sort on `t1` answer, joins needing more memory get `RESOURCE_LIMIT` | 55.8 GB |
 
 Before the fix the first load died at 8 GiB. At scale 1m the loads take
 3.2–3.6 s instead of 6.8 s and the 20 queries return identical rows with
