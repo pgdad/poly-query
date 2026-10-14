@@ -471,6 +471,24 @@ before and after the optimize-latency run, identical result digests on both side
 Raw data: [`optimize-latency-before-after-x86_64-asm-engine.json`](../../results/performance/optimize-latency-before-after-x86_64-asm-engine.json),
 [`optimize-latency-before-after-arm64-asm-engine.json`](../../results/performance/optimize-latency-before-after-arm64-asm-engine.json).
 
+10m scaling (x86-64 only). The x86-64 engine grew 24.8× from 1m to 10m; the cause was
+an arena chunk pool capped at 1 GiB, which at 10m made almost every query unmap and
+re-fault gigabytes of scratch memory (2.1 M minor faults per round, part of it before
+the engine's own timer). CR-6 did not contribute (current engine at 1m: 2.86 ms, same as
+before CR-6). Fixed by the orchestrated run `a-optimize-scaling-x86_64-asm-engine-a1-20261013T235906Z`
+(success, $17.53, 91 min; size-classed pool bounded by peak use, THP chunks, parallel
+column statistics and tuple-set merges, join-probe and sort changes). Independent
+back-to-back benchmark (`before_after.sh`), identical result digests at both scales:
+
+| scale | before | after | speedup | notes |
+|---|---|---|---|---|
+| 10m | 63.67 ms | 27.37 ms | 2.33× | q01 31×, q16 6.8×, q17 5.4×, q05 3.2×; peak RSS 11.1 → 12.4 GiB |
+| 1m | 2.78 ms | 2.73 ms | 1.02× | 3 pairs: 2.78/2.78/3.02 → 2.73/2.78/2.53 ms; no consistent regression |
+| HTTP 10m qps (1 / 4 / 16 clients) | 6.0 / 14.6 / 17.7 | 24.9 / 36.2 / 28.7 | | 1-client p50 140 → 19 ms |
+
+10m/1m growth after the fix: 10.0× (was 22.9× in this pair). Details:
+[`x86-asm-10m-scaling.md`](../../results/performance/x86-asm-10m-scaling.md).
+
 ## AArch64 end to end
 
 All six engines and the native kernel library were built natively on spark
