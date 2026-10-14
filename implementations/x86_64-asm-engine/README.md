@@ -1165,33 +1165,34 @@ compared separately, see Verification).
 
 | query | 1m before | 1m after | 10m before | 10m after | 10m/1m before | 10m/1m after |
 |---|---:|---:|---:|---:|---:|---:|
-| q01_filter_selective | 0.051 | 0.047 | 1.96 | 0.07 | 38.3x | 1.5x |
-| q02_filter_low_selectivity | 2.033 | 1.777 | 35.17 | 20.06 | 17.3x | 11.3x |
-| q03_range_filter_time | 1.645 | 1.620 | 33.54 | 16.85 | 20.4x | 10.4x |
-| q04_arith_aggregate | 1.755 | 1.736 | 44.20 | 18.29 | 25.2x | 10.5x |
-| q05_groupby_low_card | 1.357 | 1.354 | 49.28 | 14.46 | 36.3x | 10.7x |
-| q06_groupby_high_card | 5.377 | 5.570 | 94.49 | 66.27 | 17.6x | 11.9x |
-| q07_groupby_skewed | 7.060 | 6.504 | 147.25 | 125.47 | 20.9x | 19.3x |
-| q08_groupby_uniform_multi | 3.297 | 3.237 | 55.93 | 24.48 | 17.0x | 7.6x |
-| q09_distinct_count | 5.841 | 6.072 | 118.15 | 79.15 | 20.2x | 13.0x |
-| q10_join_customers | 7.298 | 5.963 | 180.64 | 91.89 | 24.8x | 15.4x |
-| q11_join_star | 5.614 | 5.025 | 133.55 | 60.33 | 23.8x | 12.0x |
-| q12_left_join_anti | 6.755 | 5.189 | 171.61 | 89.96 | 25.4x | 17.3x |
-| q13_sort_topn | 2.724 | 2.932 | 61.23 | 34.49 | 22.5x | 11.8x |
-| q14_sort_full_string | 14.235 | 13.489 | 353.66 | 271.33 | 24.8x | 20.1x |
-| q15_sort_multi_key | 16.513 | 15.510 | 375.23 | 296.57 | 22.7x | 19.1x |
-| q16_timeseries_hourly | 0.827 | 0.703 | 21.75 | 2.96 | 26.3x | 4.2x |
-| q17_wide_projection | 0.266 | 0.224 | 6.30 | 1.67 | 23.7x | 7.5x |
-| q18_nulls | 2.175 | 1.923 | 59.26 | 21.65 | 27.2x | 11.3x |
-| q19_cte_subquery | 9.018 | 8.011 | 170.57 | 128.86 | 18.9x | 16.1x |
-| q20_string_functions | 3.151 | 3.246 | 57.37 | 32.24 | 18.2x | 9.9x |
+| q01_filter_selective | 0.052 | 0.049 | 2.02 | 0.08 | 38.7x | 1.5x |
+| q02_filter_low_selectivity | 1.954 | 1.683 | 35.15 | 19.38 | 18.0x | 11.5x |
+| q03_range_filter_time | 1.634 | 1.606 | 33.97 | 16.88 | 20.8x | 10.5x |
+| q04_arith_aggregate | 1.832 | 1.723 | 44.75 | 18.86 | 24.4x | 10.9x |
+| q05_groupby_low_card | 1.387 | 1.292 | 46.02 | 14.84 | 33.2x | 11.5x |
+| q06_groupby_high_card | 5.469 | 5.257 | 84.50 | 66.67 | 15.4x | 12.7x |
+| q07_groupby_skewed | 6.696 | 6.613 | 153.71 | 112.10 | 23.0x | 17.0x |
+| q08_groupby_uniform_multi | 3.535 | 3.384 | 53.52 | 24.46 | 15.1x | 7.2x |
+| q09_distinct_count | 5.924 | 6.283 | 110.10 | 78.78 | 18.6x | 12.5x |
+| q10_join_customers | 7.102 | 6.271 | 180.75 | 94.94 | 25.5x | 15.1x |
+| q11_join_star | 5.700 | 5.133 | 122.48 | 60.05 | 21.5x | 11.7x |
+| q12_left_join_anti | 6.785 | 5.094 | 174.67 | 90.76 | 25.7x | 17.8x |
+| q13_sort_topn | 2.896 | 2.669 | 61.38 | 35.27 | 21.2x | 13.2x |
+| q14_sort_full_string | 14.682 | 13.454 | 343.37 | 270.99 | 23.4x | 20.1x |
+| q15_sort_multi_key | 16.443 | 16.003 | 369.99 | 301.48 | 22.5x | 18.8x |
+| q16_timeseries_hourly | 0.754 | 0.689 | 20.53 | 3.14 | 27.2x | 4.6x |
+| q17_wide_projection | 0.275 | 0.211 | 6.49 | 1.58 | 23.6x | 7.5x |
+| q18_nulls | 2.202 | 2.049 | 56.50 | 21.12 | 25.7x | 10.3x |
+| q19_cte_subquery | 8.762 | 8.187 | 161.15 | 128.02 | 18.4x | 15.6x |
+| q20_string_functions | 3.259 | 3.036 | 59.17 | 36.48 | 18.2x | 12.0x |
 
-Peak RSS (harness, whole session): 1m 1406 -> 1234 MiB; 10m 11326 -> 12702
+Peak RSS (harness, whole session): 1m 1406 -> 1235 MiB; 10m 11292 -> 12669
 MiB (+12 %, the chunk pool keeping up to half the peak chunk memory, see 1).
-CPU time of the 10m query phase: 192.6 s -> 174.9 s, wall 22.6 s -> 14.4 s.
-Repeated interleaved runs of the 1m queries that came out slightly slower
-here (q06, q09, q13, q20) alternate between the two engines from run to
-run (measurement noise, +-10 % on this shared host).
+CPU time of the 10m query phase: 192.1 s -> 175.0 s, wall 22.4 s -> 14.4 s.
+An earlier back-to-back pair gave the same picture (10m 63.77 -> 27.54 ms,
+1m 2.772 -> 2.579 ms). The 1m queries that came out slightly slower in one
+of the two pairs (q06, q09, q13, q20) alternate between the two engines in
+repeated interleaved runs (measurement noise, +-10 % on this shared host).
 
 HTTP (`--http`, 10m, `transactions` and `customers` loaded, q01 / q03 /
 q05 / q09 at random, 20 s per client count; same host, back to back):

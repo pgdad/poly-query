@@ -3,7 +3,7 @@
 ## Current task: scaling 1m -> 10m rows (TASK.md "optimize-scaling") — DONE
 
 README "Scaling optimization: 1m -> 10m rows" has the before/after table
-(10m geomean 63.8 -> 27.5 ms, 1m 2.77 -> 2.58 ms, digests identical, peak
+(10m geomean 62.5 -> 27.7 ms, 1m 2.79 -> 2.57 ms, digests identical, peak
 RSS 11.3 -> 12.7 GB at 10m), HTTP numbers, the causes and changes.
 Measure: data via `python3 datasets/generators/pqgen.py generate --scale 10m
 --families <fam> --jobs 1` (one process per family in parallel; `--jobs` > 1
