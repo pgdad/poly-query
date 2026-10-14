@@ -18,7 +18,7 @@ from .execution.context import DEFAULT_PARALLEL_MIN_ROWS, ExecutionContext
 from .execution.executor import QueryResult, count_plan, run_plan, stream_plan
 from .execution.native_ops import kernel_plan
 from .execution.workers import WorkerPool, available_cpus
-from .ingest.limits import DEFAULT_MAX_INGEST_BYTES, DEFAULT_MAX_TABLE_ROWS, IngestLimits
+from .ingest.limits import DEFAULT_MAX_INGEST_BYTES, DEFAULT_MAX_TABLE_ROWS, IngestLimits, check_column_names
 from .ingest.loader import load_table
 from .limits import Check, deadline_check
 from .native import NativeKernels, load_kernels
@@ -29,7 +29,7 @@ from .sql.parser import parse
 from .storage import pqcf
 from .storage.catalog import Catalog, Column, Table
 from .storage.indexes import Index, build_index
-from .storage.table import COLUMN
+from .storage.table import COLUMN, make_table
 
 
 @dataclass
@@ -56,6 +56,9 @@ class EngineConfig:
     parallel_min_rows: int = DEFAULT_PARALLEL_MIN_ROWS
     log_level: str = "info"
     native_kernels: str | None = None  # path of libpqkernels (--native-kernels)
+    # False: never fork worker processes (parallel partitions run in-process;
+    # used by the embedding API, see polyquery/api.py)
+    worker_processes: bool = True
 
 
 @dataclass
@@ -129,6 +132,38 @@ class Engine:
         )
         self.catalog.put(table, replace=replace)
         return table
+
+    def create_table(
+        self,
+        name: str,
+        columns: list[Column],
+        data: list[list[Any]],
+        row_count: int,
+        replace: bool,
+        storage: StorageOptions | None = None,
+    ) -> Table:
+        """Adds a table built from column-wise runtime values (``data[i]``
+        holds the ``row_count`` values of ``columns[i]``)."""
+        storage = storage or StorageOptions()
+        if not replace and self.catalog.exists(name):
+            raise errors.already_exists(f"table '{name}' already exists", table=name)
+        if not columns:
+            raise errors.invalid_argument("a table needs at least one column")
+        check_column_names([c.name for c in columns])
+        self.ingest_limits.check_rows(row_count)
+        table = make_table(name, list(columns), data, row_count, storage.layout, storage.dictionary)
+        self.catalog.put(table, replace=replace)
+        return table
+
+    def materialize(
+        self, name: str, sql: str, options: QueryOptions, replace: bool, storage: StorageOptions | None = None
+    ) -> Table:
+        """Runs a query and stores its result as table ``name`` (the
+        statement completes before the catalog changes, so it may read the
+        table it replaces)."""
+        result = self.query(sql, options)
+        data = [list(values) for values in zip(*result.rows)] if result.rows else [[] for _ in result.columns]
+        return self.create_table(name, result.columns, data, len(result.rows), replace, storage)
 
     # ------------------------------------------------------------ storage
 
@@ -226,6 +261,7 @@ class Engine:
             native=plan.native,
             pool=self.pool,
         )
+        ctx.processes = self.config.worker_processes
         return plan, ctx
 
     def _explicit_threads(self, options: QueryOptions) -> int | None:

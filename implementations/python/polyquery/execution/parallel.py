@@ -34,9 +34,8 @@ from .workers import Prepare, Task, read_frames, write_frame
 warnings.filterwarnings("ignore", message=r".*fork\(\).*", category=DeprecationWarning)
 
 
-
 def use_processes(gather: pp.Gather, ctx: ExecutionContext) -> bool:
-    if ctx.in_worker or not hasattr(os, "fork"):
+    if ctx.in_worker or not ctx.processes or not hasattr(os, "fork"):
         return False
     return native_ops.python_rows(gather, ctx) >= ctx.parallel_min_rows
 

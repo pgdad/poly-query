@@ -1,5 +1,14 @@
 # PolyQuery — Python engine
 
+> **Also a library and an application.** The engine is usable in-process
+> from any Python program through the embedding API `polyquery.Database`
+> — see **[EMBEDDING.md](EMBEDDING.md)** (developer guide) and the minimal
+> example [`examples/embed-demo`](examples/embed-demo/embed_demo.py)
+> (`bin/pq-embed-demo`). **[APP.md](APP.md)** is the user guide of
+> **pqledger** (`bin/pqledger`, source in [`app/`](app/)), a
+> personal-finance command-line application built on that API
+> (spec/apps/pqledger.md, spec/apps/embedding.md).
+
 An analytical database engine implementing the PolyQuery specification
 (`spec/`) in pure Python. Current status: **Phase 5** (SQL v1 query engine
 with row/column in-memory layouts, persistent PQCF v1 storage, statistics,
@@ -44,8 +53,8 @@ naming the measure (`details.measure`: `text_length`, `nesting_depth`,
   `sqlite3` is not used.
 
 ```sh
-make build    # byte-compiles the package and smoke-tests the launcher
-make test     # unit tests (unittest)
+make build    # byte-compiles engine, app and example; smoke-tests the launchers
+make test     # unit tests (unittest): engine + API (tests/), pqledger (app/tests/)
 make lint     # compile with -W error + small stdlib-only lint (tools/lint.py)
 make fmt      # whitespace normalisation (tools/fmt.py); no third-party formatter
 make clean
@@ -92,10 +101,14 @@ logical plan → optimizer → physical plan → execution**.
 
 | `polyquery/execution/` | `compiler.py` (bound expression → row closure, incl. subquery evaluation), `vcompiler.py` (bound expression → vector function over column batches), `row_engine.py` (row-at-a-time Volcano operators, `mode:"row"`), `vector_engine.py` (column-batch operators, `mode:"vectorized"`/`auto`; parallel range-partitioned sorts and hash-exchange aggregation), `parallel.py` (partitioned execution of `Gather` pipelines: in-process, in the worker pool or in per-query forked workers), `workers.py` (the persistent pool of forked worker processes), `common.py` (algorithms shared by both engines: merge pairing, sort orders, join limits, LookupScan tables), `group_states.py` (columnar aggregation state of the vectorized engine), `aggregates.py` (accumulators of the row engine), `functions.py` (scalar function kernels), `casts.py`, `executor.py` (mode dispatch, result streaming), `context.py` (timeout / cancellation / memory budget / join-row limit, correlation parameters, per-statement caches, GC pausing) |
 | `polyquery/execution/native_ops.py` | Execution paths that use the kernels (`native: true`): scan filtering, gathers, scan aggregation, group sums, hash partitioning; `kernel_plan` compiles the kernel plan of an operator for the physical planner |
-| `polyquery/service.py` | `Engine` facade: owns the catalog, runs `load`, SQL and `explain` |
+| `polyquery/service.py` | `Engine` facade: owns the catalog, runs `load`, SQL and `explain`; tables from runtime values or query results (`create_table`, `materialize`) |
+| `polyquery/api.py` | The public embedding API (`Database`, `Result`, `TableInfo`, `ColumnInfo`, `Error`): native value mapping, option validation, error mapping, no forked worker processes by default ([EMBEDDING.md](EMBEDDING.md)) |
+| `polyquery/paths.py` | Data-directory path safety (protocol.md §6) and input-file reading, shared by the protocol handlers and the API |
 | `polyquery/protocol/` | Transport-independent request handler (validation, path safety, responses, streaming cursor), JSON-lines session loop, exec mode, canonical value serialization |
 | `polyquery/server/` | `serve` mode: `http.py` (HTTP/1.1 routing, bodies, JSON / NDJSON responses, query lifecycle), `queries.py` (query registry + admission control), `watcher.py` (client-disconnect detection), `metrics.py` (Prometheus text), `app.py` (server lifecycle, signals, graceful shutdown) |
 | `polyquery/cli.py` | Command line (`version`, `capabilities`, `session`, `exec`, `serve`), JSON-lines log formatter |
+| `app/pqledger/` | The pqledger application, a client of `polyquery.api` only ([APP.md](APP.md)): `main.py` (entry point, exit statuses), `cli.py` (argument parsing), `config.py` + `inifile.py` (configuration syntax and validation), `rules.py` (rules and budget files), `bankcsv.py` (bank CSV records with line numbers, date/amount conversion), `merchant.py` (normalization), `importer.py` (duplicate detection, appending batches), `ledger.py` (the three PQCF tables through one `polyquery.Database`), `sql.py` (filters and the category-resolving `ledger` CTE), `commands.py` (one SQL statement per report), `output.py` (table/csv/json); `app/tests/` its unit tests |
+| `examples/embed-demo/` | The minimal embedding example (embedding.md §5) |
 
 ### Storage (Phase 3)
 

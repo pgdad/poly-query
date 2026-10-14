@@ -1,0 +1,6 @@
+#!/bin/sh
+# pq-embed-demo launcher: runs examples/embed-demo as a separate program that
+# finds the polyquery package through PYTHONPATH (embedding.md §2, §5).
+HERE=$(dirname "$(readlink -f "$0")")
+ROOT=$(dirname "$HERE")
+PYTHONPATH="$ROOT" exec python3 -s -P "$ROOT/examples/embed-demo/embed_demo.py" "$@"

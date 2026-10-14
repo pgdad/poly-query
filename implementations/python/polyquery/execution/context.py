@@ -46,6 +46,9 @@ class ExecutionContext:
     # processes (which never fork again)
     partitions: dict[int, tuple[int, int]] = field(default_factory=dict, init=False)
     in_worker: bool = field(default=False, init=False)
+    # False: parallel pipelines never fork worker processes; their partitions
+    # run one after the other in the calling thread (EngineConfig.worker_processes)
+    processes: bool = field(default=True, init=False)
     # physical plans of subqueries (by Subquery.id) and the current values of
     # correlation parameters (by column key)
     subplans: dict[int, Any] = field(default_factory=dict, init=False)
