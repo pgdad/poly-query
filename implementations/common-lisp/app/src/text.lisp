@@ -51,7 +51,7 @@
   (name-p s))
 
 (defun category-name-p (s)
-  (and (name-p s) (string/= s "uncategorized")))
+  (and (name-p s) (not (string= s "uncategorized"))))
 
 ;;; ------------------------------------------------------------------
 ;;; Months and dates
