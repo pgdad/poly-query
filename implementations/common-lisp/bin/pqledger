@@ -1,0 +1,18 @@
+#!/bin/sh
+# pqledger launcher: runs the executable produced by `make build`.
+# Works from any current directory (resolves its own location, following symlinks).
+self="$0"
+while [ -L "$self" ]; do
+  target="$(readlink "$self")"
+  case "$target" in
+    /*) self="$target" ;;
+    *) self="$(dirname "$self")/$target" ;;
+  esac
+done
+root="$(cd "$(dirname "$self")/.." && pwd)"
+exe="$root/build/pqledger"
+if [ ! -x "$exe" ]; then
+  echo "pqledger: error: not built; run 'make -C $root build'" >&2
+  exit 7
+fi
+exec "$exe" "$@"
