@@ -1,0 +1,79 @@
+{
+ "schema": "polyquery-telemetry/1",
+ "run_id": "a-app-pqledger-python-a1-20261014T155131Z",
+ "language": "python",
+ "task": "app-pqledger",
+ "track": "A",
+ "attempt": 1,
+ "model": "claude-opus-5-5",
+ "effort": "high",
+ "agent_harness_version": "2.1.299",
+ "prompt_id": "track-a-app-pqledger",
+ "prompt_sha256": "24c7d524c56659fcf5d3a560cafa161df5c9b0605576f6b31fa5bdf06f3217b5",
+ "session_id": "839f23ea-4c79-4367-a746-926ef33c7ed8",
+ "tokens": {
+  "input": 192,
+  "output": 143262,
+  "cache_read": 18408104,
+  "cache_creation": 289952,
+  "thinking": null,
+  "thinking_estimated": 46802,
+  "source": "result events (summed over 2 segments)",
+  "api_messages": 96
+ },
+ "rate_limit": {
+  "events": 10,
+  "max_utilization": {
+   "seven_day": 0.72,
+   "five_hour": 0.05
+  },
+  "statuses": [
+   "allowed"
+  ]
+ },
+ "cost_usd": 8.867244799999996,
+ "cost_basis": "platform-reported list price (total_cost_usd)",
+ "agent_turns": 98,
+ "result_segments": 2,
+ "assistant_messages": 198,
+ "tool_calls": {
+  "Bash": 89,
+  "Read": 1,
+  "Write": 4,
+  "ScheduleWakeup": 2
+ },
+ "tool_calls_total": 96,
+ "tool_failures": 4,
+ "build_invocations": 29,
+ "build_failures_heuristic": 5,
+ "conformance_runs": 2,
+ "conformance_progress": [],
+ "repair_iterations": 0,
+ "time": {
+  "wall_seconds": 1932.4,
+  "model_api_seconds": 1715.7,
+  "tool_seconds": 154.6,
+  "waiting_seconds": null,
+  "human_seconds": 0
+ },
+ "human_interventions": 0,
+ "git": {
+  "commits": 7,
+  "files_changed": 37,
+  "lines_added": 4280,
+  "lines_removed": 50,
+  "uncommitted_changes": false,
+  "paths_outside_language_dir": []
+ },
+ "agent_exit_code": 0,
+ "result_subtype": "success",
+ "is_error": false,
+ "stop_reason": "completed",
+ "final_message": "The task is done: every check in the definition of done passes on the final commit, and the working tree is clean.\n\n## Test results\n- `make build test`: build ok; engine and library tests \"Ran 225 tests \u2026 OK (skipped=10)\"; app tests \"Ran 35 tests \u2026 OK\"\n- pqledger runner with `--embed-demo \u2026 --trace`: **pqledger cases: 24/24 pass; embed-demo cases: 3/3 pass**\n- Conformance: **660/660**; with `--modes` **3870/3870**; with `--transport http` **660/660**\n- `http_suite.py`: **19/19 passed**; `robustness_probe --only expression_limits --require-pass`: **pass**\n- The engine reports exactly the capabilities it reported before; the list wasn't touched.\n\n## Library API (`polyquery/api.py`, exported from `polyquery`)\n- **`polyquery.Database(data_dir, *, max_query_memory_mb, threads, max_ingest_bytes, max_table_rows, max_join_rows, worker_processes=False, native_kernels)`**, usable as a context manager or closed with `close()`.\n- **Operations:**\n  - `load` (from a file path or in-memory text, with optional schema, `header`, `delimiter`, `replace`)\n  - `query(sql, threads=, timeout_ms=, max_rows=, mode=, join=, \u2026)`, which returns a `Result` with `columns`, `types` (canonical names), `rows`, `row_count`, `column()`, `scalar()`\n  - `save`, `open`, `drop`, `tables`, `schema`, `exists`\n  - two additions beyond the spec: `create_table` (from native values) and `create_table_as` (store a query result as a table).\n- **Values:** INT64 \u2192 `int`, DECIMAL \u2192 exact `Decimal` with exponent \u2212scale, FLOAT64 \u2192 `float`, STRING \u2192 `str`, BOOLEAN \u2192 `bool`, DATE \u2192 `datetime.date`, TIMESTAMP \u2192 naive UTC `datetime`, NULL \u2192 `None`.\n- **Errors:** every failure raises `polyquery.Error` with `code`, `message` and `details`, and the instance stays usable.\n- **Packaging:** a plain importable package. EMBEDDING.md shows three ways to depend on it: a venv with a `.pth` path entry (I tested this), `PYTHONPATH`, or a `sys.path` entry.\n\n## How pqledger is structured\n- The code is in `app/pqledger/`, one module per concern (configuration, rules and budgets, bank CSV parsing, merchant normalization, import, ledger storage, SQL, commands, output). It uses only the public API. `bin/pqledger` runs `python3 -I app/entry.py`.\n- Every report, list, budget and the category resolution is a single SQL statement run by the embedded engine. Categories come from a CTE: overrides first, then a LIKE join against the `rules` table using `MIN(rule_no)` per distinct merchant, else `uncategorized`.\n- The program itself parses the files, decides duplicates and formats output. It also computes `share` exactly, in integer cents.\n- Every change rebuilds the table in memory (`UNION ALL \u2026 ORDER BY` key) and replaces the PQCF file atomically. Output is buffered, so a failing command prints nothing to stdout.\n\n## Main design decisions\n- **No forked processes in the library:** before this, the engine forked worker processes for parallel queries. I added an engine option, `worker_processes`, which the library sets to `False` by default, so parallel partitions run in the calling thread. strace confirms pqledger never forks, starts threads or opens sockets, even with `[engine] threads = 4`. `bin/polyquery` keeps its old behaviour.\n- **Small engine refactors:** path-safety helpers moved to `polyquery/paths.py`, and the engine gained `create_table`/`materialize`. Behaviour is unchanged.\n- **Configuration checks at load time:** the separator conflict and \"names need `header = true`\" are checked for `[import]` and every `[account]` section when the file is read, so they fail with exit 2 even on `init`.\n- **Two lenient choices where the spec is silent:**\n  - `list --category uncategorized` is accepted and means the same as `--uncategorized`.\n  - A ledger with a missing `batches.pqcf` or `overrides.pqcf` is read as if those tables were empty.\n\n## Known limitations\n- Performance on this machine: on a 1M-transaction ledger every command takes under 2 s, and importing a 970k-record file takes about 6 s. Since paral",
+ "notes": {
+  "human_seconds": "0 by construction: unattended run, no human input after launch",
+  "waiting_seconds": "not exposed by the platform",
+  "build_failures_heuristic": "Bash build commands whose output matched compiler-error patterns",
+  "repair_iterations": "conformance runner invocations after the first one reporting failures"
+ }
+}

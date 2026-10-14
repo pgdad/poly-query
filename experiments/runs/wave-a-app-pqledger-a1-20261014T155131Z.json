@@ -1,0 +1,46 @@
+{
+ "wave_id": "wave-a-app-pqledger-a1-20261014T155131Z",
+ "task": "app-pqledger",
+ "track": "A",
+ "attempt": 1,
+ "seed": 1791993091,
+ "order": [
+  "python",
+  "go"
+ ],
+ "run_ids": [
+  "a-app-pqledger-python-a1-20261014T155131Z",
+  "a-app-pqledger-go-a1-20261014T155133Z"
+ ],
+ "started": "2026-10-14T15:51:34+00:00",
+ "parallel": 2,
+ "base_refs": {},
+ "attempts": {},
+ "record_only": false,
+ "limits": {
+  "timeout_min": 180,
+  "budget_usd": 40.0,
+  "max_turns": null
+ },
+ "loadavg_start": [
+  1.6962890625,
+  1.3740234375,
+  1.1015625
+ ],
+ "finished": "2026-10-14T17:00:28+00:00",
+ "loadavg_end": [
+  0.96484375,
+  0.66455078125,
+  0.8291015625
+ ],
+ "results": [
+  {
+   "run_id": "a-app-pqledger-python-a1-20261014T155131Z",
+   "outcome": "success"
+  },
+  {
+   "run_id": "a-app-pqledger-go-a1-20261014T155133Z",
+   "outcome": "success"
+  }
+ ]
+}
