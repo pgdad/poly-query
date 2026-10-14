@@ -44,3 +44,9 @@ Status (session 2, 2026-10-14): **done**. Every check of the task's definition o
 * Import is not atomic across the two files: a crash between writing `transactions.pqcf`
   and `batches.pqcf` would leave a batch unrecorded.
 * The whole ledger is opened per invocation (memory-mapped PQCF, so cheap).
+* No locking between concurrent pqledger processes on one ledger.
+* A header-name column reference with `header = false` is reported (exit 2) only by `import`,
+  because `[import]` defaults may legitimately be overridden by every `[account]`.
+* `[engine] threads` above 1024 is clamped; `memory_mb` is capped by the API at 70% of the heap.
+* The launchers do not check the Java version (an old `java` on PATH fails with exit 1).
+* Docs: APP.md and EMBEDDING.md (examples in them were captured from real runs).

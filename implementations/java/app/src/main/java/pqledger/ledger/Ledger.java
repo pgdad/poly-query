@@ -8,6 +8,7 @@ import polyquery.api.Column;
 import polyquery.api.ColumnType;
 import polyquery.api.Database;
 import polyquery.api.DatabaseConfig;
+import polyquery.api.DatabaseException;
 import polyquery.api.QueryOptions;
 import polyquery.api.Result;
 import polyquery.api.TableSchema;
@@ -90,7 +91,7 @@ public final class Ledger implements AutoCloseable {
         Ledger ledger = new Ledger(Database.create(databaseConfig(config)), queryOptions(config));
         try {
             for (String table : List.of(TRANSACTIONS, BATCHES, OVERRIDES)) {
-                ledger.openTable(table);
+                ledger.openTable(table, config.dataDir());
             }
         } catch (AppException | RuntimeException e) {
             ledger.close();
@@ -99,8 +100,14 @@ public final class Ledger implements AutoCloseable {
         return ledger;
     }
 
-    private void openTable(String table) throws AppException {
-        TableSchema schema = db.open(table, fileName(table));
+    private void openTable(String table, Path dataDir) throws AppException {
+        TableSchema schema;
+        try {
+            schema = db.open(table, fileName(table));
+        } catch (DatabaseException e) {
+            throw AppException.other("cannot open " + dataDir.resolve(fileName(table)) + ": " + e.code()
+                    + ": " + e.getMessage());
+        }
         List<Column> expected = columns(table);
         boolean ok = schema.columns().size() == expected.size();
         for (int i = 0; ok && i < expected.size(); i++) {
