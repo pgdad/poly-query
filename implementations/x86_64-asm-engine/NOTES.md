@@ -1,5 +1,30 @@
 # Working notes — x86-64 assembly engine
 
+## Current task: embedding API + pqledger (TASK.md "app-pqledger")
+
+Spec: `spec/apps/embedding.md`, `spec/apps/pqledger.md`; tests
+`tests/apps/pqledger/runner.py` (cases + embed). Layout:
+* `src/api.S` + `include/polyquery.h` / `polyquery.inc`: the library.
+  `make build` pre-links all engine objects except main.o into
+  `out/libpolyquery.o` (`ld -r`), keeps only the public `pq_*` symbols global
+  (`objcopy --keep-global-symbol`, list `API_SYMS` in the Makefile) and
+  archives it as `lib/libpolyquery.a` (git-ignored). Clients link with
+  `-no-pie -lpolyquery -lm -lpthread`.
+* API calls build a JSON request and run it through `proto_handle_line` with
+  `g_http_capture=1` (response stays in g_out); queries set `g_api_capture`
+  so `op_query` (protocol.S) hands the result to `api_capture_result`
+  (typed pq_result) or `api_capture_table` (pq_create_table). Instances:
+  `cat_swap` (catalog.S) swaps the catalog in; limits are set per call.
+  Engine runs on a 1 GiB NORESERVE stack (STACK_CHECK limit set per call).
+  `par_no_pin` (par.S): library never pins threads.
+* `examples/embed-demo/` (own Makefile, builds like a separate project),
+  `bin/pq-embed-demo`.
+* `app/`: pqledger (main, util, config, ledger, output, report, import),
+  `app/app.inc` documents the module interfaces; `bin/pqledger`.
+* Tests: `tests/test_api.S` (API unit test), `app/tests/*.S` (app units),
+  `tests/pqledger_test.sh` (end to end).
+Status: see the end of this section (updated as work proceeds).
+
 ## Current task: scaling 1m -> 10m rows (TASK.md "optimize-scaling") — DONE
 
 README "Scaling optimization: 1m -> 10m rows" has the before/after table

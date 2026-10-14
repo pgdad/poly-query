@@ -33,6 +33,23 @@ requirement change CR-6: statement size limits (capability
 `change.expression_limits`, see
 [expression size limits](#change-cr-6-expression-size-limits)).
 
+## Library and application
+
+The engine is also an in-process **library** with a C-ABI embedding API
+(`lib/libpolyquery.a`, `include/polyquery.h`, `include/polyquery.inc`,
+implemented in `src/api.S`), and `pqledger` is a personal-finance
+command-line application written in assembly on top of it (`app/`,
+`bin/pqledger`). Both are built by `make build`.
+
+* [EMBEDDING.md](EMBEDDING.md) — developer guide: building and linking the
+  library from assembly or C, API reference, value-type mapping, errors,
+  memory ownership, thread safety, a complete minimal program; the minimal
+  example program is [`examples/embed-demo/`](examples/embed-demo/)
+  (`bin/pq-embed-demo DATA_DIR CSV_FILE SQL`).
+* [APP.md](APP.md) — user guide of `pqledger`: building, configuration
+  reference, rules and budget files, every command with example output,
+  exit codes, troubleshooting.
+
 ## Build prerequisites
 
 | Tool | Version | Use |
@@ -88,6 +105,7 @@ structure layouts and macros in `include/`:
 | execution (row baseline) | `eval.S`, `exec.S`, `join.S`, `hash.S` | expression interpreter (exact DECIMAL with 128-bit intermediates, CAST matrix); materialising tuple-at-a-time operators: scan, hash / sort-merge / nested-loop join, filter, hash aggregation, projection, DISTINCT, sort, offset/limit; subquery evaluation; generic hash table on value cells |
 | execution (batch / parallel) | `pexec.S`, `vec.S`, `par.S` | batch operator drivers split into parallel parts; vectorized expression evaluator and kernels (filter, projection, group keys, aggregation, join keys / ON re-check); worker threads with thread-local arenas and error handlers |
 | protocol | `protocol.S`, `main.S` | CLI, JSON-lines session loop, `exec` mode, request validation, operations (`query`, `explain`, …), path safety, fault guard |
+| embedding API | `api.S` | the C-ABI library (`include/polyquery.h`): instances (catalog swapped in per call under a process-wide lock), API calls run as protocol operations in capture mode, typed `pq_result` construction, `pq_create_table`; see [EMBEDDING.md](EMBEDDING.md) |
 | HTTP | `http.S` | HTTP/1.1 message layer: incremental request parsing (Content-Length and chunked bodies, size limits, malformed framing), response / chunk writing, URL decoding, query parameters, error code → status mapping |
 | server | `server.S` | `serve`: poll() event loop, connections and keep-alive, routing, admission control (workers, FIFO queue, `OVERLOADED`), fork-per-query execution, catalog worker thread, timeouts, cancellation, streaming, metrics, JSON logs, graceful shutdown |
 
