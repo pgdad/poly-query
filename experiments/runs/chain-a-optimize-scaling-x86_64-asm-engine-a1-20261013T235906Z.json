@@ -1,0 +1,21 @@
+{
+ "chain_id": "chain-a-optimize-scaling-x86_64-asm-engine-a1-20261013T235906Z",
+ "task": "optimize-scaling",
+ "language": "x86_64-asm-engine",
+ "track": "A",
+ "attempt": 1,
+ "max_sessions": 1,
+ "total_budget_usd": 60.0,
+ "timeout_min": 180,
+ "sessions": [
+  {
+   "run_id": "a-optimize-scaling-x86_64-asm-engine-a1-20261013T235906Z",
+   "session": 1,
+   "outcome": "success",
+   "cost_usd": 17.528893000000007
+  }
+ ],
+ "spent_usd": 17.53,
+ "outcome": "success",
+ "finished": "2026-10-14T01:50:11+00:00"
+}

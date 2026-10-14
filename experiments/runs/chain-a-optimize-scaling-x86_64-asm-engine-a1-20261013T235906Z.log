@@ -1,2 +1,6 @@
 2026-10-13T23:59:06+00:00 chain chain-a-optimize-scaling-x86_64-asm-engine-a1-20261013T235906Z: session 1 -> a-optimize-scaling-x86_64-asm-engine-a1-20261013T235906Z (budget $60.00)
 2026-10-13T23:59:06+00:00 [a-optimize-scaling-x86_64-asm-engine-a1-20261013T235906Z] agent queued (usage gate, then launch)
+2026-10-14T01:49:55+00:00 [a-optimize-scaling-x86_64-asm-engine-a1-20261013T235906Z] agent finished; collecting telemetry
+2026-10-14T01:49:55+00:00 [a-optimize-scaling-x86_64-asm-engine-a1-20261013T235906Z] validating (clean clone, sandboxed)
+2026-10-14T01:50:11+00:00 [a-optimize-scaling-x86_64-asm-engine-a1-20261013T235906Z] outcome=success cost=$17.528893000000007 turns=195 wall=5449.4s
+2026-10-14T01:50:11+00:00 chain chain-a-optimize-scaling-x86_64-asm-engine-a1-20261013T235906Z finished: outcome=success sessions=1 spent=$17.53

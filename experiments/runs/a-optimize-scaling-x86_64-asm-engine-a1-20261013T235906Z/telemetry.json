@@ -1,0 +1,123 @@
+{
+ "schema": "polyquery-telemetry/1",
+ "run_id": "a-optimize-scaling-x86_64-asm-engine-a1-20261013T235906Z",
+ "language": "x86_64-asm-engine",
+ "task": "optimize-scaling",
+ "track": "A",
+ "attempt": 1,
+ "model": "claude-opus-5-5",
+ "effort": "high",
+ "agent_harness_version": "2.1.296",
+ "prompt_id": "track-a-optimize-scaling",
+ "prompt_sha256": "399a351a274732ac0f153e8886a93caa0f31241fede87cd60e2911d109be5f23",
+ "session_id": "ccd40d72-87f4-41a8-a79f-98d89d2a1e73",
+ "tokens": {
+  "input": 384,
+  "output": 226232,
+  "cache_read": 47322905,
+  "cache_creation": 442267,
+  "thinking": null,
+  "thinking_estimated": 133994,
+  "source": "result events",
+  "api_messages": 192
+ },
+ "rate_limit": {
+  "events": 11,
+  "max_utilization": {
+   "five_hour": 0.09,
+   "seven_day": 0.71
+  },
+  "statuses": [
+   "allowed"
+  ]
+ },
+ "cost_usd": 17.528893000000007,
+ "cost_basis": "platform-reported list price (total_cost_usd)",
+ "agent_turns": 195,
+ "result_segments": 1,
+ "assistant_messages": 458,
+ "tool_calls": {
+  "Bash": 191,
+  "Read": 2,
+  "Edit": 1
+ },
+ "tool_calls_total": 194,
+ "tool_failures": 3,
+ "build_invocations": 32,
+ "build_failures_heuristic": 0,
+ "conformance_runs": 11,
+ "conformance_progress": [
+  [
+   660,
+   660
+  ],
+  [
+   660,
+   660
+  ],
+  [
+   3870,
+   3870
+  ],
+  [
+   0,
+   569
+  ],
+  [
+   3870,
+   3870
+  ],
+  [
+   660,
+   660
+  ],
+  [
+   3870,
+   3870
+  ],
+  [
+   660,
+   660
+  ],
+  [
+   3870,
+   3870
+  ],
+  [
+   660,
+   660
+  ],
+  [
+   660,
+   660
+  ]
+ ],
+ "repair_iterations": 7,
+ "time": {
+  "wall_seconds": 5449.4,
+  "model_api_seconds": 2300.6,
+  "tool_seconds": 3155.1,
+  "waiting_seconds": null,
+  "human_seconds": 0
+ },
+ "human_interventions": 0,
+ "git": {
+  "commits": 11,
+  "files_changed": 13,
+  "lines_added": 1321,
+  "lines_removed": 201,
+  "uncommitted_changes": true,
+  "paths_outside_language_dir": []
+ },
+ "agent_exit_code": 0,
+ "result_subtype": "success",
+ "is_error": false,
+ "stop_reason": "completed",
+ "final_message": "The engine now grows about 10.8x from 1m to 10m rows instead of 22.4x, and every query's result digest is unchanged at both scales. Everything is committed, and all the required checks pass on the final build.\n\n**Results** (benchmark harness, baseline and new engine run back to back on the same host; the full table is in the README):\n\n| | before | after |\n|---|---:|---:|\n| 10m geometric mean | 62.5 ms | 27.7 ms |\n| 1m geometric mean | 2.79 ms | 2.57 ms |\n| page faults / system CPU per round at 10m | 2.1 million / 4.6 s | about 20 / 0.05 s |\n| HTTP at 10m, 1 client | 5.4 qps, p50 137 ms | 30.7 qps, p50 11 ms |\n| HTTP at 10m, 4 clients | 15.3 qps | 34.7 qps |\n| HTTP at 10m, 16 clients | 17.7 qps, p50 814 ms | 26.0 qps, p50 120 ms |\n| peak RSS at 10m | 11.3 GB | 12.7 GB (+12%) |\n\nIn one of the two 1m runs, q06, q09, q13 and q20 came out 3\u20138% slower. Repeated interleaved runs alternate between the two engines, so I treat that as noise on this shared host.\n\n**Causes found and fixed:**\n1. **Memory pool (the main cause).** Query memory was cached only up to 1 GiB, so at 10m nearly every query mapped, faulted and unmapped gigabytes. The unmapping ran at the start of the next request, before its timer started. That is the time outside `elapsed_us` and why a query's latency depended on the one before it. The pool now uses size classes, keeps up to half the peak memory (this is the +12% RSS), and uses huge pages for large chunks.\n2. **Column statistics.** The planner computed them in a slow single-threaded pass on first use (about 260 ms per 10m-row column). They are now computed in parallel, with identical output at 1m and 10m.\n3. **HTTP mode recomputed those statistics on every query**, because each query runs in a forked process that discards them (q01 took 420 ms). The server now computes them when a table is loaded.\n4. **Concurrent HTTP queries** each used 16 threads and oversubscribed the CPUs. Each query process now uses its share of the default threads (unless `--threads` is given).\n5. **Smaller fixes:** parallel instead of serial merging of per-thread results, joined tuples written directly for key-only joins, and three changes to the sort.\n\n**Checks on the final build:**\n- `TOTAL: 660/660 pass`, `--modes` 3870/3870, `--transport http` 660/660\n- `http suite: 19/19 passed`\n- `expression_limits: pass`\n- `make build test lint` all pass; capability set unchanged.\n\nBeyond the harness digests, I compared full ordered outputs of 10 sort queries and 9 join queries (several option sets) and the `stats` output for every column against the old engine; all identical. The other robustness probes give the same verdicts as before.\n\n**Known limitations:** some operators still grow 17\u201320x, from data structures that no longer fit in cache at 10m:\n- the full sorts (q14, q15);\n- grouping by one million customer ids (q07, q19);\n- the skewed left join (q12).\n\nFixing them needs larger redesigns; the README and NOTES.md list the candidates. With several HTTP clients, throughput is now limited by q09's two COUNT(DISTINCT) over 10m rows (1\u20132 CPU-seconds per query).\n\nI also added an opt-in sampling profiler (`PQ_PROF=FILE` plus `bench/prof.sh`), because `perf` isn't permitted on this host. Benchmark output in `results/` is left uncommitted.",
+ "notes": {
+  "human_seconds": "0 by construction: unattended run, no human input after launch",
+  "waiting_seconds": "not exposed by the platform",
+  "build_failures_heuristic": "Bash build commands whose output matched compiler-error patterns",
+  "repair_iterations": "conformance runner invocations after the first one reporting failures"
+ }
+}
