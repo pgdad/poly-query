@@ -410,28 +410,140 @@ FUNC ks_isort
 9:  LEAVE
 ENDF ks_isort
 
-/* ks_msd(task rdi, lo rsi, hi rdx, digit rcx): sorts A[lo, hi) (B[lo, hi)
- * is scratch), whose entries agree on every digit before `digit` (digit 0
- * = the most significant byte of word 0) */
+/* ks_to_a(task rdi, lo rsi, hi rdx, in_b ecx): copies B[lo, hi) to A[lo, hi)
+ * when the entries are in B (ks_msd's result belongs in A) */
+FUNC ks_to_a
+    test %ecx, %ecx
+    jz 9f
+    sub $8, %rsp
+    mov KS_STRIDE(%rdi), %rax
+    sub %rsi, %rdx
+    imul %rax, %rdx                 /* bytes */
+    imul %rax, %rsi
+    mov KS_B(%rdi), %rax
+    mov KS_A(%rdi), %rdi
+    add %rsi, %rdi
+    add %rax, %rsi
+    call memcpy
+    add $8, %rsp
+9:  ret
+ENDF ks_to_a
+
+/* ks_sorted(task rdi, base rsi, lo rdx, hi rcx, word r8) -> eax 1 when the
+ * entries base[lo, hi) are already ordered by their key words from `word`
+ * on (the earlier ones are equal) - entries with equal words are in
+ * sequence order since every scatter is stable, so the range is sorted
+ * (leaf; only for complete key words) */
+FUNC ks_sorted
+    push %rbx
+    mov KS_STRIDE(%rdi), %r9
+    mov KS_TW(%rdi), %r10
+    mov %rdx, %rax
+    imul %r9, %rax
+    add %rax, %rsi                  /* entry lo */
+    mov $1, %eax
+    inc %rdx
+1:  cmp %rcx, %rdx
+    jae 9f
+    lea (%rsi, %r9), %rdi           /* the next entry */
+    mov %r8, %r11
+2:  cmp %r10, %r11
+    jae 3f                          /* equal words */
+    mov (%rsi, %r11, 8), %rbx
+    cmp (%rdi, %r11, 8), %rbx
+    jb 3f
+    ja 8f
+    inc %r11
+    jmp 2b
+3:  mov %rdi, %rsi
+    inc %rdx
+    jmp 1b
+8:  xor %eax, %eax
+9:  pop %rbx
+    ret
+ENDF ks_sorted
+
+/* ks_word_vary(task rdi, base rsi, lo rdx, hi rcx, word r8) -> rax the bits
+ * of key word `word` that differ between the entries base[lo, hi) (leaf) */
+FUNC ks_word_vary
+    mov KS_STRIDE(%rdi), %r9
+    mov %rdx, %rax
+    imul %r9, %rax
+    add %rax, %rsi
+    lea (%rsi, %r8, 8), %rsi        /* &entry[lo].word */
+    sub %rdx, %rcx                  /* n */
+    xor %eax, %eax                  /* OR */
+    mov $-1, %rdx                   /* AND */
+1:  mov (%rsi), %r10
+    or %r10, %rax
+    and %r10, %rdx
+    add %r9, %rsi
+    dec %rcx
+    jnz 1b
+    xor %rdx, %rax
+    ret
+ENDF ks_word_vary
+
+/* ks_msd(task rdi, lo rsi, hi rdx, digit rcx, in_b r8d): sorts the entries
+ * [lo, hi) - in A, or in B when in_b - into A[lo, hi), the other buffer's
+ * range serving as scratch.  The entries agree on every digit before
+ * `digit` (digit 0 = the most significant byte of word 0).  Each scatter
+ * level moves the entries to the other buffer (no copy back); digits that
+ * are constant within the range are skipped a word at a time, and a range
+ * that is already ordered (complete key words) is left as it is. */
 #define MS_CNT   0      /* u64[256] bucket counts, then bucket ends */
 #define MS_LO    2048
 #define MS_HI    2056
 #define MS_D     2064
 #define MS_SHIFT 2072
 #define MS_WORD  2080
+#define MS_INB   2088   /* 1 = the entries are in B */
+#define MS_SRC   2096   /* buffer holding the entries */
+#define MS_DST   2104   /* the other one */
 FUNC ks_msd
-    ENTER 2088
+    ENTER 2112
     mov %rdi, %rbx
     mov %rsi, MS_LO(%rsp)
     mov %rdx, MS_HI(%rsp)
     mov %rcx, MS_D(%rsp)
+    mov %r8d, %r8d
+    mov %r8, MS_INB(%rsp)
+    mov KS_A(%rbx), %rax
+    mov KS_B(%rbx), %rcx
+    test %r8, %r8
+    jz 0f
+    xchg %rax, %rcx
+0:  mov %rax, MS_SRC(%rsp)
+    mov %rcx, MS_DST(%rsp)
     sub %rsi, %rdx                  /* n */
     cmp $KS_SMALL, %rdx
     ja 1f
+    mov MS_HI(%rsp), %rdx           /* small: insertion sort in A */
+    mov MS_INB(%rsp), %rcx
+    call ks_to_a
+    mov %rbx, %rdi
+    mov MS_LO(%rsp), %rsi
     mov MS_HI(%rsp), %rdx
     call ks_isort
     LEAVE
-1:  /* next digit that varies in this bucket */
+1:  cmpq $0, KS_INCOMP(%rbx)        /* already ordered? */
+    jne 10f
+    mov %rbx, %rdi
+    mov MS_SRC(%rsp), %rsi
+    mov MS_LO(%rsp), %rdx
+    mov MS_HI(%rsp), %rcx
+    mov MS_D(%rsp), %r8
+    shr $3, %r8
+    call ks_sorted
+    test %eax, %eax
+    jz 10f
+    mov %rbx, %rdi
+    mov MS_LO(%rsp), %rsi
+    mov MS_HI(%rsp), %rdx
+    mov MS_INB(%rsp), %rcx
+    call ks_to_a
+    LEAVE
+10: /* next digit that varies in this bucket */
     mov MS_D(%rsp), %rax
     mov KS_TW(%rbx), %rcx
     shl $3, %rcx
@@ -450,17 +562,18 @@ FUNC ks_msd
     test $0xff, %esi
     jnz 2f
     incq MS_D(%rsp)                 /* constant in every entry */
-    jmp 1b
+    jmp 10b
 2:  /* histogram */
     lea MS_CNT(%rsp), %rdi
     xor %eax, %eax
     mov $256, %ecx
     rep stosq
     mov KS_STRIDE(%rbx), %r12
-    mov MS_LO(%rsp), %rax
-    KS_ENTRY %rbx, %rax, %rsi
+    mov MS_LO(%rsp), %rsi
+    imul %r12, %rsi
+    add MS_SRC(%rsp), %rsi
     mov MS_WORD(%rsp), %rdx
-    lea (%rsi, %rdx, 8), %rsi       /* &A[lo].word */
+    lea (%rsi, %rdx, 8), %rsi       /* &src[lo].word */
     mov MS_HI(%rsp), %r13
     sub MS_LO(%rsp), %r13           /* n */
     mov MS_SHIFT(%rsp), %rcx
@@ -478,8 +591,32 @@ FUNC ks_msd
     movzbl %al, %eax
     cmp %r13, MS_CNT(%rsp, %rax, 8)
     jne 4f
-    incq MS_D(%rsp)
-    jmp 1b
+    mov %rbx, %rdi                  /* skip to the next byte of the word */
+    mov MS_SRC(%rsp), %rsi          /* that varies in this bucket */
+    mov MS_LO(%rsp), %rdx
+    mov MS_HI(%rsp), %rcx
+    mov MS_WORD(%rsp), %r8
+    call ks_word_vary
+    mov MS_D(%rsp), %rcx
+    and $7, %ecx
+    inc %ecx                        /* bytes of the word done */
+    shl $3, %ecx
+    shl %cl, %rax                   /* (a shift by 64 is not possible: */
+    cmp $64, %ecx                   /* the word is done then) */
+    jb 31f
+    xor %eax, %eax
+31: mov MS_D(%rsp), %rdx
+    or $7, %rdx                     /* last digit of the word */
+32: inc %rdx
+    test %rax, %rax
+    jz 33f                          /* nothing varies further: next word */
+    mov MS_D(%rsp), %rdx
+    lzcnt %rax, %rcx
+    shr $3, %ecx
+    add %rcx, %rdx
+    inc %rdx                        /* next varying digit */
+33: mov %rdx, MS_D(%rsp)
+    jmp 10b
 4:  cmp $65536, %r13
     jb 41f
     call check_deadline
@@ -492,9 +629,10 @@ FUNC ks_msd
     inc %ecx
     cmp $256, %ecx
     jb 5b
-    /* scatter A[lo, hi) into B by the digit (stable) */
-    mov MS_LO(%rsp), %rax
-    KS_ENTRY %rbx, %rax, %r14       /* source entry */
+    /* scatter src[lo, hi) into dst by the digit (stable) */
+    mov MS_LO(%rsp), %r14
+    imul %r12, %r14
+    add MS_SRC(%rsp), %r14          /* source entry */
     mov KS_W(%rbx), %r15
     add $2, %r15                    /* qwords per entry */
     mov MS_WORD(%rsp), %rdx
@@ -505,7 +643,7 @@ FUNC ks_msd
     mov MS_CNT(%rsp, %rax, 8), %rdi
     incq MS_CNT(%rsp, %rax, 8)
     imul %r12, %rdi
-    add KS_B(%rbx), %rdi
+    add MS_DST(%rsp), %rdi
     mov %r14, %rsi
     mov %r15, %rcx
     call ks_copy
@@ -513,29 +651,26 @@ FUNC ks_msd
     add %r12, %r14
     dec %r13
     jnz 6b
-    /* back into A */
-    mov MS_LO(%rsp), %rsi
-    imul %r12, %rsi
-    mov KS_A(%rbx), %rdi
-    add %rsi, %rdi
-    add KS_B(%rbx), %rsi
-    mov MS_HI(%rsp), %rdx
-    sub MS_LO(%rsp), %rdx
-    imul %r12, %rdx
-    call memcpy
-    /* recurse into the buckets (MS_CNT now holds the bucket ends) */
+    /* sort the buckets (MS_CNT now holds the bucket ends), now in dst */
     mov MS_LO(%rsp), %r14           /* bucket start */
     xor %r15d, %r15d
 7:  mov MS_CNT(%rsp, %r15, 8), %r13 /* bucket end */
     mov %r13, %rax
     sub %r14, %rax
-    cmp $1, %rax
-    jbe 71f
+    jz 71f
     mov %rbx, %rdi
     mov %r14, %rsi
     mov %r13, %rdx
-    mov MS_D(%rsp), %rcx
+    cmp $1, %rax
+    ja 70f
+    mov MS_INB(%rsp), %ecx          /* one entry: in place when dst is A */
+    xor $1, %ecx
+    call ks_to_a
+    jmp 71f
+70: mov MS_D(%rsp), %rcx
     inc %rcx
+    mov MS_INB(%rsp), %r8d
+    xor $1, %r8d
     call ks_msd
 71: mov %r13, %r14
     inc %r15
@@ -543,6 +678,11 @@ FUNC ks_msd
     jb 7b
     LEAVE
 80: /* equal key words: production order, or row_cmp when incomplete */
+    mov %rbx, %rdi
+    mov MS_LO(%rsp), %rsi
+    mov MS_HI(%rsp), %rdx
+    mov MS_INB(%rsp), %rcx
+    call ks_to_a
     cmpq $0, KS_INCOMP(%rbx)
     je 89f
     mov MS_LO(%rsp), %rax
@@ -743,6 +883,7 @@ FUNC ks_bucket_part
     cmp $1, %rax
     jbe 1f
     xor %ecx, %ecx
+    xor %r8d, %r8d
     call ks_msd
 1:  add $8, %rsp
     ret
@@ -1004,6 +1145,7 @@ FUNC keysort
     xor %esi, %esi
     mov %r12, %rdx
     xor %ecx, %ecx
+    xor %r8d, %r8d
     call ks_msd
     jmp 8f
 3:  mov %r15, %rdi                  /* (2) splitters */
