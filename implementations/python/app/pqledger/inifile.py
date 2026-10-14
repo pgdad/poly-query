@@ -22,7 +22,7 @@ class Line:
 
 
 def read_text(path: str, what: str) -> str:
-    """The UTF-8 text of a file (a leading BOM removed)."""
+    """The UTF-8 text of a file."""
     try:
         with open(path, "rb") as f:
             raw = f.read()
@@ -34,7 +34,7 @@ def read_text(path: str, what: str) -> str:
         text = raw.decode("utf-8")
     except UnicodeDecodeError as e:
         raise ConfigError(f"{path}: {what} is not valid UTF-8 (byte {e.start})") from None
-    return text[1:] if text.startswith("﻿") else text
+    return text
 
 
 def unquote(value: str) -> str:
@@ -54,10 +54,12 @@ def unquote(value: str) -> str:
 
 
 def parse_lines(text: str, source: str, *, sections: bool) -> list[Line]:
-    """Splits ``text`` into section headers and assignments, skipping blank
-    lines and comments. Any other line is a ConfigError naming
+    """Splits ``text`` into section headers and assignments, skipping a
+    leading BOM, blank lines and comments. Any other line is a ConfigError naming
     ``source:LINE``."""
     out: list[Line] = []
+    if text.startswith("\ufeff"):
+        text = text[1:]
     lines = text.split("\n")
     for number, raw in enumerate(lines, 1):
         if raw.endswith("\r"):

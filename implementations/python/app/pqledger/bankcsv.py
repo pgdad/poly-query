@@ -151,7 +151,7 @@ def read_file(path: str, source: str) -> str:
     except UnicodeDecodeError as e:
         line = raw[: e.start].count(b"\n") + 1
         raise ImportDataError(f"{source}:{line}: invalid UTF-8") from None
-    return text[1:] if text.startswith("﻿") else text
+    return text[1:] if text.startswith("\ufeff") else text
 
 
 def _resolve(ref: ColumnRef, header: list[str] | None, width: int, key: str, source: str) -> int:

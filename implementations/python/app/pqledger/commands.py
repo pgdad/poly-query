@@ -19,7 +19,7 @@ from .config import Config
 from .errors import ConfigError, LedgerStateError, QueryError
 from .ledger import Ledger
 from .rules import Budget, Rule, load_budgets, load_rules
-from .sql import BUDGETS_COLUMNS, RULES_COLUMNS, Filters, date_literal, literal, where, with_ledger
+from .sql import BUDGETS_COLUMNS, RULES_COLUMNS, date_literal, literal, where, with_ledger
 
 LIST_COLUMNS = 'id, "date", account, description, amount, category'
 EXPORT_COLUMNS = 'id, account, "date", description, merchant, amount, category, batch'

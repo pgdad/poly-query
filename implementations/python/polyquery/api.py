@@ -38,7 +38,6 @@ from .execution.context import gc_paused
 from .ingest.limits import DEFAULT_MAX_INGEST_BYTES, DEFAULT_MAX_TABLE_ROWS
 from .limits import configure_interpreter
 from .paths import decode_utf8, read_input_file, resolve_data_path
-from .protocol.handlers import error_of
 from .service import Engine, EngineConfig, QueryOptions, StorageOptions
 from .storage import pqcf
 from .storage.catalog import Column
@@ -420,8 +419,12 @@ def _call(fn: Callable[[], Any]) -> Any:
             return fn()
     except errors.PolyQueryError:
         raise
-    except Exception as e:  # noqa: BLE001 - RecursionError, MemoryError, bugs
-        raise error_of(e) from e
+    except RecursionError:
+        raise errors.resource_limit("statement is too deeply nested") from None
+    except MemoryError:
+        raise errors.resource_limit("out of memory") from None
+    except Exception as e:  # noqa: BLE001 - an engine bug: reported, not logged
+        raise errors.PolyQueryError(errors.INTERNAL_ERROR, f"internal error: {e!r}") from e
 
 
 def _check_int(name: str, value: Any, minimum: int) -> None:
