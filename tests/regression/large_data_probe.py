@@ -97,8 +97,10 @@ class Guarded:
 def ensure_data(scale: str) -> Path:
     d = ROOT / "datasets/generated" / scale
     if not (d / "transactions.csv").exists() or not (d / "manifest.json").exists():
-        subprocess.run([sys.executable, str(ROOT / "datasets/generators/pqgen.py"), "generate", "--scale", scale,
-                        "--jobs", "8"], check=True)
+        gen = [sys.executable, str(ROOT / "datasets/generators/pqgen.py"), "generate", "--scale", scale, "--jobs"]
+        # Parallel generation needs POSIX semaphores (/dev/shm), which the sandbox does not provide.
+        if subprocess.run([*gen, "8"]).returncode != 0:
+            subprocess.run([*gen, "1"], check=True)
     return d
 
 
