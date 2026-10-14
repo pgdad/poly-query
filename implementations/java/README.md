@@ -76,6 +76,23 @@ bin/polyquery serve --port N [--host H] [--workers N] [--queue-depth N] [--query
                     [--shutdown-grace-ms N] [--max-request-bytes N] [common options]
 ```
 
+## Embedding API and the pqledger application
+
+The engine is also a **library**: `make build` produces the modular jar `build/polyquery.jar`
+whose exported package `polyquery.api` (`Database`, `Result`, `DatabaseException`, …) lets any
+Java program use the engine in-process (`spec/apps/embedding.md`). On top of it:
+
+* [**EMBEDDING.md**](EMBEDDING.md) — developer guide: depending on the jar (javac/java, Maven),
+  API reference, value-type mapping, errors, resource management, thread safety, a complete
+  minimal program. Minimal example: `examples/embed-demo` (`bin/pq-embed-demo DATA_DIR CSV SQL`).
+* [**APP.md**](APP.md) — user guide of **`pqledger`** (`bin/pqledger`, source in `app/`), a
+  personal-finance command-line application (`spec/apps/pqledger.md`): bank-statement CSV
+  import with duplicate detection, rule-based categories, reports, budgets, ad-hoc SQL, and a
+  ledger stored as PQCF files.
+
+`make test` also runs the API tests (`ApiTest`) and the application's unit tests
+(`app/src/test/java`). Working notes for this task: [NOTES.md](NOTES.md).
+
 ## Libraries
 
 None. `ENGINE.json`: `{"language": "java", "track": "A", "libraries": []}`.

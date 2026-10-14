@@ -1,0 +1,14 @@
+#!/bin/sh
+# Launcher of the embedding example examples/embed-demo: pq-embed-demo DATA_DIR CSV_FILE SQL
+SELF=$0
+if command -v readlink >/dev/null 2>&1; then
+    RESOLVED=$(readlink -f "$0" 2>/dev/null) && SELF=$RESOLVED
+fi
+HERE=$(cd "$(dirname "$SELF")/.." && pwd)
+. "$HERE/bin/jvm-options"
+DEMO_JAR="$HERE/build/pq-embed-demo.jar"
+if [ ! -f "$DEMO_JAR" ] || [ ! -f "$JAR" ]; then
+    echo "pq-embed-demo: $DEMO_JAR not found; run 'make -C $HERE build' first" >&2
+    exit 2
+fi
+exec "$JAVA" $JVM_OPTS --module-path "$JAR" --add-modules polyquery -cp "$DEMO_JAR" demo.EmbedDemo "$@"
