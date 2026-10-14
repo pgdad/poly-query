@@ -1,0 +1,78 @@
+{
+ "schema": "polyquery-telemetry/1",
+ "run_id": "a-app-pqledger-common-lisp-a1-20261014T170049Z",
+ "language": "common-lisp",
+ "task": "app-pqledger",
+ "track": "A",
+ "attempt": 1,
+ "model": "claude-opus-5-5",
+ "effort": "high",
+ "agent_harness_version": "2.1.299",
+ "prompt_id": "track-a-app-pqledger",
+ "prompt_sha256": "bb6ae7f34754a2551ea615a84733c1c7e1a4b47db2a51c1dfa38db0eec4ffbdb",
+ "session_id": "754755dd-f814-4dc0-bb0b-bcab5d33dde0",
+ "tokens": {
+  "input": 178,
+  "output": 910,
+  "cache_read": 17500315,
+  "cache_creation": 309983,
+  "thinking": null,
+  "thinking_estimated": 52129,
+  "source": "summed per-message usage (no final result event; output tokens are a lower bound)",
+  "api_messages": 89
+ },
+ "rate_limit": {
+  "events": 28,
+  "max_utilization": {
+   "five_hour": 0.29,
+   "seven_day": 0.75
+  },
+  "statuses": [
+   "allowed",
+   "allowed_warning"
+  ]
+ },
+ "cost_usd": null,
+ "cost_basis": "platform-reported list price (total_cost_usd)",
+ "agent_turns": null,
+ "result_segments": 0,
+ "assistant_messages": 191,
+ "tool_calls": {
+  "Bash": 78,
+  "Write": 17
+ },
+ "tool_calls_total": 95,
+ "tool_failures": 2,
+ "build_invocations": 19,
+ "build_failures_heuristic": 2,
+ "conformance_runs": 1,
+ "conformance_progress": [],
+ "repair_iterations": 0,
+ "time": {
+  "wall_seconds": 1412.8,
+  "model_api_seconds": null,
+  "tool_seconds": 101.1,
+  "waiting_seconds": null,
+  "human_seconds": 0
+ },
+ "human_interventions": 0,
+ "git": {
+  "commits": 4,
+  "files_changed": 34,
+  "lines_added": 4077,
+  "lines_removed": 95,
+  "uncommitted_changes": false,
+  "paths_outside_language_dir": []
+ },
+ "agent_exit_code": -15,
+ "result_subtype": null,
+ "is_error": null,
+ "stop_reason": null,
+ "final_message": "",
+ "notes": {
+  "human_seconds": "0 by construction: unattended run, no human input after launch",
+  "waiting_seconds": "not exposed by the platform",
+  "build_failures_heuristic": "Bash build commands whose output matched compiler-error patterns",
+  "repair_iterations": "conformance runner invocations after the first one reporting failures"
+ }
+}

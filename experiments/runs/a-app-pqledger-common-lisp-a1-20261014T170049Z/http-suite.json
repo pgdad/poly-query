@@ -1,0 +1,126 @@
+{
+ "schema": "polyquery-http-suite/1",
+ "engine": "/srv/polyquery/runs/a-app-pqledger-common-lisp-a1-20261014T170049Z/validate/implementations/common-lisp/bin/polyquery",
+ "summary": {
+  "total": 19,
+  "passed": 19,
+  "failed": 0
+ },
+ "checks": [
+  {
+   "check": "health_version_capabilities",
+   "status": "pass",
+   "seconds": 0.1
+  },
+  {
+   "check": "table_lifecycle",
+   "status": "pass",
+   "seconds": 0.1
+  },
+  {
+   "check": "query_and_error_mapping",
+   "status": "pass",
+   "seconds": 0.1
+  },
+  {
+   "check": "keep_alive",
+   "status": "pass",
+   "seconds": 0.1
+  },
+  {
+   "check": "streaming",
+   "status": "pass",
+   "seconds": 0.13
+  },
+  {
+   "check": "metrics",
+   "status": "pass",
+   "seconds": 0.1
+  },
+  {
+   "check": "timeout",
+   "status": "pass",
+   "seconds": 0.31
+  },
+  {
+   "check": "server_default_timeout",
+   "status": "pass",
+   "seconds": 0.41
+  },
+  {
+   "check": "cancellation",
+   "status": "pass",
+   "seconds": 0.11
+  },
+  {
+   "check": "backpressure_overloaded",
+   "status": "pass",
+   "seconds": 4.1
+  },
+  {
+   "check": "queued_time_counts_toward_timeout",
+   "status": "pass",
+   "seconds": 1.61
+  },
+  {
+   "check": "snapshot_isolation",
+   "status": "pass",
+   "seconds": 1.53
+  },
+  {
+   "check": "concurrent_readers",
+   "status": "pass",
+   "seconds": 0.11
+  },
+  {
+   "check": "client_disconnect_cancels",
+   "status": "pass",
+   "seconds": 0.59
+  },
+  {
+   "check": "request_size_limit",
+   "status": "pass",
+   "seconds": 0.09
+  },
+  {
+   "check": "malformed_chunked_body",
+   "status": "pass",
+   "seconds": 0.09
+  },
+  {
+   "check": "structured_logs",
+   "status": "pass",
+   "seconds": 0.39
+  },
+  {
+   "check": "graceful_shutdown",
+   "status": "pass",
+   "seconds": 1.54
+  },
+  {
+   "check": "grace_expiry",
+   "status": "pass",
+   "seconds": 0.75
+  }
+ ],
+ "startup_seconds": [
+  0.02274654700886458,
+  0.023162130964919925,
+  0.023749765008687973,
+  0.02668632206041366,
+  0.02653084509074688,
+  0.02508536004461348,
+  0.027818668051622808,
+  0.024392455001361668,
+  0.031100154970772564,
+  0.021743428078480065,
+  0.03058639110531658,
+  0.026124225929379463,
+  0.019661615951918066,
+  0.021768164937384427,
+  0.01944578206166625,
+  0.01947852596640587,
+  0.020554031943902373
+ ],
+ "logs": "/tmp/pqhttp-logs-moh1qd02"
+}

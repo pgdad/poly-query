@@ -11,3 +11,4 @@
 2026-10-14T17:24:27+00:00 [a-app-pqledger-java-a1-20261014T170051Z] validating (clean clone, sandboxed)
 2026-10-14T17:24:46+00:00 [a-app-pqledger-rust-a1-20261014T170050Z] agent finished; collecting telemetry
 2026-10-14T17:24:46+00:00 [a-app-pqledger-rust-a1-20261014T170050Z] validating (clean clone, sandboxed)
+2026-10-14T17:25:09+00:00 [a-app-pqledger-common-lisp-a1-20261014T170049Z] outcome=success cost=$None turns=None wall=1412.8s
