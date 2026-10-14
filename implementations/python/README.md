@@ -107,7 +107,7 @@ logical plan → optimizer → physical plan → execution**.
 | `polyquery/protocol/` | Transport-independent request handler (validation, path safety, responses, streaming cursor), JSON-lines session loop, exec mode, canonical value serialization |
 | `polyquery/server/` | `serve` mode: `http.py` (HTTP/1.1 routing, bodies, JSON / NDJSON responses, query lifecycle), `queries.py` (query registry + admission control), `watcher.py` (client-disconnect detection), `metrics.py` (Prometheus text), `app.py` (server lifecycle, signals, graceful shutdown) |
 | `polyquery/cli.py` | Command line (`version`, `capabilities`, `session`, `exec`, `serve`), JSON-lines log formatter |
-| `app/pqledger/` | The pqledger application, a client of `polyquery.api` only ([APP.md](APP.md)); `app/tests/` its unit tests |
+| `app/pqledger/` | The pqledger application, a client of `polyquery.api` only ([APP.md](APP.md)): `main.py` (entry point, exit statuses), `cli.py` (argument parsing), `config.py` + `inifile.py` (configuration syntax and validation), `rules.py` (rules and budget files), `bankcsv.py` (bank CSV records with line numbers, date/amount conversion), `merchant.py` (normalization), `importer.py` (duplicate detection, appending batches), `ledger.py` (the three PQCF tables through one `polyquery.Database`), `sql.py` (filters and the category-resolving `ledger` CTE), `commands.py` (one SQL statement per report), `output.py` (table/csv/json); `app/tests/` its unit tests |
 | `examples/embed-demo/` | The minimal embedding example (embedding.md §5) |
 
 ### Storage (Phase 3)
