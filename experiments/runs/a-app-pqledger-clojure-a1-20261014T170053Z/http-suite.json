@@ -1,0 +1,126 @@
+{
+ "schema": "polyquery-http-suite/1",
+ "engine": "/srv/polyquery/runs/a-app-pqledger-clojure-a1-20261014T170053Z/validate/implementations/clojure/bin/polyquery",
+ "summary": {
+  "total": 19,
+  "passed": 19,
+  "failed": 0
+ },
+ "checks": [
+  {
+   "check": "health_version_capabilities",
+   "status": "pass",
+   "seconds": 0.18
+  },
+  {
+   "check": "table_lifecycle",
+   "status": "pass",
+   "seconds": 0.19
+  },
+  {
+   "check": "query_and_error_mapping",
+   "status": "pass",
+   "seconds": 0.21
+  },
+  {
+   "check": "keep_alive",
+   "status": "pass",
+   "seconds": 0.18
+  },
+  {
+   "check": "streaming",
+   "status": "pass",
+   "seconds": 0.29
+  },
+  {
+   "check": "metrics",
+   "status": "pass",
+   "seconds": 0.19
+  },
+  {
+   "check": "timeout",
+   "status": "pass",
+   "seconds": 0.38
+  },
+  {
+   "check": "server_default_timeout",
+   "status": "pass",
+   "seconds": 0.47
+  },
+  {
+   "check": "cancellation",
+   "status": "pass",
+   "seconds": 0.2
+  },
+  {
+   "check": "backpressure_overloaded",
+   "status": "pass",
+   "seconds": 4.23
+  },
+  {
+   "check": "queued_time_counts_toward_timeout",
+   "status": "pass",
+   "seconds": 1.98
+  },
+  {
+   "check": "snapshot_isolation",
+   "status": "pass",
+   "seconds": 2.15
+  },
+  {
+   "check": "concurrent_readers",
+   "status": "pass",
+   "seconds": 0.4
+  },
+  {
+   "check": "client_disconnect_cancels",
+   "status": "pass",
+   "seconds": 0.67
+  },
+  {
+   "check": "request_size_limit",
+   "status": "pass",
+   "seconds": 0.26
+  },
+  {
+   "check": "malformed_chunked_body",
+   "status": "pass",
+   "seconds": 0.18
+  },
+  {
+   "check": "structured_logs",
+   "status": "pass",
+   "seconds": 0.49
+  },
+  {
+   "check": "graceful_shutdown",
+   "status": "pass",
+   "seconds": 1.73
+  },
+  {
+   "check": "grace_expiry",
+   "status": "pass",
+   "seconds": 0.82
+  }
+ ],
+ "startup_seconds": [
+  0.16681786603294313,
+  0.15556134702637792,
+  0.1734105460345745,
+  0.1709821199765429,
+  0.1380350450053811,
+  0.1350578119745478,
+  0.14678734599146992,
+  0.14339502702932805,
+  0.12856634508352727,
+  0.1699873770121485,
+  0.37645849597174674,
+  0.489214536966756,
+  0.30905343405902386,
+  0.14814887393731624,
+  0.2447253509890288,
+  0.16276570793706924,
+  0.16141712910030037
+ ],
+ "logs": "/tmp/pqhttp-logs-wsnwmoba"
+}

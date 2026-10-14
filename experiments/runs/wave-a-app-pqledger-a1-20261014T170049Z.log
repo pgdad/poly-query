@@ -12,3 +12,7 @@
 2026-10-14T17:24:46+00:00 [a-app-pqledger-rust-a1-20261014T170050Z] agent finished; collecting telemetry
 2026-10-14T17:24:46+00:00 [a-app-pqledger-rust-a1-20261014T170050Z] validating (clean clone, sandboxed)
 2026-10-14T17:25:09+00:00 [a-app-pqledger-common-lisp-a1-20261014T170049Z] outcome=success cost=$None turns=None wall=1412.8s
+2026-10-14T17:25:24+00:00 [a-app-pqledger-rust-a1-20261014T170050Z] outcome=success cost=$8.549238799999998 turns=98 wall=1427.0s
+2026-10-14T17:25:45+00:00 [a-app-pqledger-java-a1-20261014T170051Z] outcome=tests_failed cost=$None turns=None wall=1403.5s
+2026-10-14T17:26:32+00:00 [a-app-pqledger-clojure-a1-20261014T170053Z] outcome=tests_failed cost=$None turns=None wall=1395.2s
+2026-10-14T17:26:32+00:00 wave wave-a-app-pqledger-a1-20261014T170049Z finished: pqledger=success, pqledger=success, pqledger=tests_failed, pqledger=tests_failed

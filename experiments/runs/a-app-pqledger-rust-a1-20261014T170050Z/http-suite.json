@@ -1,0 +1,126 @@
+{
+ "schema": "polyquery-http-suite/1",
+ "engine": "/srv/polyquery/runs/a-app-pqledger-rust-a1-20261014T170050Z/validate/implementations/rust/bin/polyquery",
+ "summary": {
+  "total": 19,
+  "passed": 19,
+  "failed": 0
+ },
+ "checks": [
+  {
+   "check": "health_version_capabilities",
+   "status": "pass",
+   "seconds": 0.01
+  },
+  {
+   "check": "table_lifecycle",
+   "status": "pass",
+   "seconds": 0.01
+  },
+  {
+   "check": "query_and_error_mapping",
+   "status": "pass",
+   "seconds": 0.01
+  },
+  {
+   "check": "keep_alive",
+   "status": "pass",
+   "seconds": 0.01
+  },
+  {
+   "check": "streaming",
+   "status": "pass",
+   "seconds": 0.04
+  },
+  {
+   "check": "metrics",
+   "status": "pass",
+   "seconds": 0.01
+  },
+  {
+   "check": "timeout",
+   "status": "pass",
+   "seconds": 0.21
+  },
+  {
+   "check": "server_default_timeout",
+   "status": "pass",
+   "seconds": 0.32
+  },
+  {
+   "check": "cancellation",
+   "status": "pass",
+   "seconds": 0.07
+  },
+  {
+   "check": "backpressure_overloaded",
+   "status": "pass",
+   "seconds": 4.01
+  },
+  {
+   "check": "queued_time_counts_toward_timeout",
+   "status": "pass",
+   "seconds": 1.51
+  },
+  {
+   "check": "snapshot_isolation",
+   "status": "pass",
+   "seconds": 1.46
+  },
+  {
+   "check": "concurrent_readers",
+   "status": "pass",
+   "seconds": 0.05
+  },
+  {
+   "check": "client_disconnect_cancels",
+   "status": "pass",
+   "seconds": 0.51
+  },
+  {
+   "check": "request_size_limit",
+   "status": "pass",
+   "seconds": 0.01
+  },
+  {
+   "check": "malformed_chunked_body",
+   "status": "pass",
+   "seconds": 0.02
+  },
+  {
+   "check": "structured_logs",
+   "status": "pass",
+   "seconds": 0.31
+  },
+  {
+   "check": "graceful_shutdown",
+   "status": "pass",
+   "seconds": 1.52
+  },
+  {
+   "check": "grace_expiry",
+   "status": "pass",
+   "seconds": 0.62
+  }
+ ],
+ "startup_seconds": [
+  0.001683620037510991,
+  0.0017727200174704194,
+  0.0014519569231197238,
+  0.0013894479488953948,
+  0.001393395010381937,
+  0.002477739006280899,
+  0.0024143269984051585,
+  0.00217427802272141,
+  0.0015144560020416975,
+  0.0013926529791206121,
+  0.005921024014241993,
+  0.00141730101313442,
+  0.002400119905360043,
+  0.002723829005844891,
+  0.0026255709817633033,
+  0.006517705973237753,
+  0.00540697097312659
+ ],
+ "logs": "/tmp/pqhttp-logs-fmjobdac"
+}

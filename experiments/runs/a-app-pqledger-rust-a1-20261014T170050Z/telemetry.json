@@ -1,0 +1,80 @@
+{
+ "schema": "polyquery-telemetry/1",
+ "run_id": "a-app-pqledger-rust-a1-20261014T170050Z",
+ "language": "rust",
+ "task": "app-pqledger",
+ "track": "A",
+ "attempt": 1,
+ "model": "claude-opus-5-5",
+ "effort": "high",
+ "agent_harness_version": "2.1.299",
+ "prompt_id": "track-a-app-pqledger",
+ "prompt_sha256": "400c3f3448d9e717836f3c4bf4ea2be3c1eb89b732baad738285f377a20ae00b",
+ "session_id": "251b1fe7-a703-4264-9fe5-7f519eef1c74",
+ "tokens": {
+  "input": 176,
+  "output": 148612,
+  "cache_read": 16389514,
+  "cache_creation": 287299,
+  "thinking": null,
+  "thinking_estimated": 45534,
+  "source": "result events",
+  "api_messages": 89
+ },
+ "rate_limit": {
+  "events": 24,
+  "max_utilization": {
+   "five_hour": 0.29,
+   "seven_day": 0.75
+  },
+  "statuses": [
+   "allowed",
+   "allowed_warning"
+  ]
+ },
+ "cost_usd": 8.549238799999998,
+ "cost_basis": "platform-reported list price (total_cost_usd)",
+ "agent_turns": 98,
+ "result_segments": 1,
+ "assistant_messages": 193,
+ "tool_calls": {
+  "Bash": 77,
+  "Read": 2,
+  "Write": 18,
+  "ScheduleWakeup": 1
+ },
+ "tool_calls_total": 98,
+ "tool_failures": 2,
+ "build_invocations": 23,
+ "build_failures_heuristic": 7,
+ "conformance_runs": 2,
+ "conformance_progress": [],
+ "repair_iterations": 0,
+ "time": {
+  "wall_seconds": 1427.0,
+  "model_api_seconds": 1245.8,
+  "tool_seconds": 145.4,
+  "waiting_seconds": null,
+  "human_seconds": 0
+ },
+ "human_interventions": 0,
+ "git": {
+  "commits": 4,
+  "files_changed": 29,
+  "lines_added": 5759,
+  "lines_removed": 6,
+  "uncommitted_changes": false,
+  "paths_outside_language_dir": []
+ },
+ "agent_exit_code": -15,
+ "result_subtype": "success",
+ "is_error": false,
+ "stop_reason": "completed",
+ "final_message": "A full clean rebuild and all test suites are running in the background. I'll report once they finish.",
+ "notes": {
+  "human_seconds": "0 by construction: unattended run, no human input after launch",
+  "waiting_seconds": "not exposed by the platform",
+  "build_failures_heuristic": "Bash build commands whose output matched compiler-error patterns",
+  "repair_iterations": "conformance runner invocations after the first one reporting failures"
+ }
+}
