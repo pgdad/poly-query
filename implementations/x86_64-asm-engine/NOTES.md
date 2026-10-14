@@ -1,7 +1,10 @@
 # Working notes — x86-64 assembly engine
 
-## Current task: scaling 1m -> 10m rows (TASK.md "optimize-scaling") — IN PROGRESS
+## Current task: scaling 1m -> 10m rows (TASK.md "optimize-scaling") — DONE
 
+README "Scaling optimization: 1m -> 10m rows" has the before/after table
+(10m geomean 63.8 -> 27.5 ms, 1m 2.77 -> 2.58 ms, digests identical, peak
+RSS 11.3 -> 12.7 GB at 10m), HTTP numbers, the causes and changes.
 Measure: data via `python3 datasets/generators/pqgen.py generate --scale 10m
 --families <fam> --jobs 1` (one process per family in parallel; `--jobs` > 1
 fails here: no POSIX semaphores; afterwards copy
@@ -9,23 +12,30 @@ fails here: no POSIX semaphores; afterwards copy
 every per-family run overwrites it).  Bench: `python3
 benchmarks/harness/bench.py --engines x86_64-asm-engine --scale 10m
 --no-sandbox --cpus '' --mem-limit-gb 0 --label X` (+ `--http`).  Baseline
-engine binary for comparisons: build commit 7b2edaf.  results/ is NOT
+engine for comparisons: build commit 7b2edaf.  When swapping engine
+binaries for A/B runs, install with cp + mv (cp onto a binary a lingering
+server still executes fails: text file busy) and `make clean build`
+afterwards (a copied binary looks up to date to make).  results/ is NOT
 git-ignored: never `git add` outside implementations/.
 Profiling: perf is not permitted (paranoid 4) and ptrace is limited to
 descendants; use `PQ_PROF=/tmp/p.txt bin/polyquery session ...` (src/prof.S,
-SIGPROF samples: rip, thread, tsc) and `sh bench/prof.sh /tmp/p.txt`.
-Done:
-1. util.S chunk pool: size classes, pool bounded by the peak of live chunk
-   bytes (was 1 GiB, so at 10m every query mmap'd/faulted/munmap'd GBs: 2.1M
-   faults + 4.6 s sys per round; the munmaps ran at the start of the next
-   request, outside elapsed_us), THP (madvise) for chunks >= 2 MiB.
-   10m geomean 62.7 -> 32.0 ms, peak RSS 11.3 -> 10.7 GB.
-2. table.S table_col_stats parallel (identical `stats` output at 1m/10m);
-   server.S srv_prepare_table computes all stats at load/open in serve
-   (children used to recompute per query: HTTP q01 420 -> 3.5 ms at 10m).
-Next ideas: keysort bucket MSD phase at 10m (~150 ms of q14's 310 ms: 25 MB
-buckets per thread, memcpy back after each scatter level), q07/q10/q12/q19.
-Then README before/after table (1m + 10m, back to back) and final checks.
+SIGPROF samples: rip, thread, tsc, [rsp]) and `sh bench/prof.sh /tmp/p.txt`.
+Done (each verified: conformance 660/660, --modes 3870/3870 incl.
+PQ_PAR_MIN=1, http 660/660, http_suite 19/19, expression_limits, make test):
+1. util.S chunk pool: size classes, per-class lists + release-order list,
+   allowance max(1 GiB, peak - live, peak / 2), THP for chunks >= 2 MiB.
+2. table.S parallel table_col_stats (identical `stats` output 1m / 10m);
+   server.S srv_prepare_table computes all stats at load/open in serve.
+3. pexec.S ts_concat (parallel merge of per-part tuple sets).
+4. pexec.S probe_part: key-only ON joins emit directly.
+5. keysort.S: ping-pong MSD levels, word-wise constant-digit skip,
+   presorted-range check.
+6. server.S child_threads + par.S CHILD_SPIN: serve children use their
+   share of the default threads.
+Ideas left (README "What still grows faster than the data"): open-addressing
+integer-key GROUP BY table (q07 / q19 / q06), smaller sort entries (q14 /
+q15), anti-join for LEFT JOIN ... WHERE right.not_null_col IS NULL (q12),
+cheaper COUNT(DISTINCT) (q09 dominates HTTP throughput).
 
 ## Previous task: CR-6 expression size limits (`change.expression_limits`) — DONE
 
