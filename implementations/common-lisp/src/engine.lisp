@@ -231,16 +231,20 @@ which shows up as pauses of 100 ms and more in later queries."
   table)
 
 (defun load-table (session spec source &key replace (layout :column) (dictionary :auto))
-  "Create a table from SOURCE (octets for CSV, a string for JSON/JSONL) per the
-INGEST-SPEC and publish it atomically. Returns the new table."
-  (multiple-value-bind (defs data row-count)
-      (ecase (ingest-spec-format spec)
-        (:csv (ingest-csv source spec))
-        ((:json :jsonl) (ingest-json source spec)))
-    (settle-heap (catalog-add-table (session-catalog session)
-                                    (make-table (ingest-spec-table-name spec) defs data row-count
-                                                :layout layout :dictionary dictionary)
-                                    :replace replace))))
+  "Create a table from SOURCE per the INGEST-SPEC and publish it atomically.
+SOURCE is, for CSV, an octet vector or the native path of the input file
+(streamed); for JSON/JSONL a string. Returns the new table."
+  (let ((name (ingest-spec-table-name spec)))
+    (settle-heap
+     (catalog-add-table
+      (session-catalog session)
+      (multiple-value-bind (defs stores row-count)
+          (funcall (ecase (ingest-spec-format spec)
+                     (:csv #'ingest-csv)
+                     ((:json :jsonl) #'ingest-json))
+                   source spec :dictionary (if (eq layout :row) nil dictionary))
+        (make-table-from-stores name defs stores row-count :layout layout))
+      :replace replace))))
 
 ;;; ------------------------------------------------------------------
 ;;; Persistent storage

@@ -14,6 +14,18 @@
   (delimiter #\,)
   (max-rows 200000000))
 
+(defun call-with-input-file-checked (native-path fn)
+  "Call FN with an octet input stream on NATIVE-PATH, mapping failures to
+open it to NOT_FOUND / IO_ERROR."
+  (let ((stream (handler-case (open (sb-ext:parse-native-namestring native-path)
+                                    :element-type '(unsigned-byte 8))
+                  (file-error ()
+                    (if (probe-file (sb-ext:parse-native-namestring native-path))
+                        (signal-pq-error "IO_ERROR" "cannot read ~A" native-path)
+                        (signal-pq-error "NOT_FOUND" "file not found"))))))
+    (unwind-protect (funcall fn stream)
+      (close stream))))
+
 (defun check-column-names (names)
   "Reject empty and (case-insensitively) duplicated column names."
   (let ((seen (make-hash-table :test 'equal)))
@@ -64,16 +76,3 @@
         ((logtest mask +cand-date+) :date)
         ((logtest mask +cand-timestamp+) :timestamp)
         (t :string)))
-
-(defun infer-text-column-type (texts)
-  "Infer the type of a column from its field texts (a sequence of strings and
-NULL markers). Texts are trimmed; texts empty after trimming are not considered."
-  (let ((mask +cand-all+) (any nil))
-    (map nil (lambda (s)
-               (when (and (stringp s) (plusp mask))
-                 (let ((text (trim-spaces-tabs s)))
-                   (when (plusp (length text))
-                     (setf any t)
-                     (setf mask (text-candidates text mask))))))
-         texts)
-    (if any (candidates-to-type mask) :string)))

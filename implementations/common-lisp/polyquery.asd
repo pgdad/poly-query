@@ -12,6 +12,7 @@
    (:file "version")
    (:module "util" :serial t
     :components ((:file "errors")
+                 (:file "memory")
                  (:file "numbers")
                  (:file "json")
                  (:file "system")))
@@ -23,6 +24,7 @@
    (:file "exec/context")
    (:module "storage" :serial t
     :components ((:file "columns")
+                 (:file "builders")
                  (:file "table")
                  (:file "stats")
                  (:file "index")
@@ -105,7 +107,8 @@
                (:file "test-plan")
                (:file "test-sort")
                (:file "test-latency")
-               (:file "test-limits"))
+               (:file "test-limits")
+               (:file "test-memory"))
   :perform (test-op (o c)
              (unless (uiop:symbol-call '#:polyquery-tests '#:run-all-tests)
                (error "unit tests failed"))))

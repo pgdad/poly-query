@@ -89,6 +89,7 @@ alternating keys and JSON values appended after ts, level and msg."
     (sb-kernel::control-stack-exhausted ()
       (error-response id "RESOURCE_LIMIT" "statement too complex: stack exhausted"))
     (storage-condition ()
+      (note-memory-failure)
       (error-response id "RESOURCE_LIMIT" "out of memory while processing the request"))
     (error (e)
       (log-message :error "internal error: ~A" e)
@@ -300,22 +301,29 @@ serializing each value according to the type of its column in COLUMNS."
     (signal-pq-error "ACCESS_DENIED" "path ~S is not permitted" path))
   (concatenate 'string (engine-config-data-dir config) path))
 
+(defun check-input-file-size (native-path max-bytes)
+  "Signal RESOURCE_LIMIT when the file is larger than MAX-BYTES."
+  (call-with-input-file-checked
+   native-path
+   (lambda (in)
+     (let ((size (file-length in)))
+       (when (> size max-bytes)
+         (resource-limit-error "input of ~D bytes exceeds the ingestion limit" size))))))
+
 (defun read-file-octets (native-path max-bytes)
-  (handler-case
-      (with-open-file (in (sb-ext:parse-native-namestring native-path)
-                          :element-type '(unsigned-byte 8))
-        (let ((size (file-length in)))
-          (when (> size max-bytes)
-            (resource-limit-error "input of ~D bytes exceeds the ingestion limit" size))
-          (let* ((buf (make-array size :element-type '(unsigned-byte 8)))
-                 (n (read-sequence buf in)))
-            (if (= n size) buf (subseq buf 0 n)))))
-    (file-error ()
-      (if (probe-file (sb-ext:parse-native-namestring native-path))
-          (signal-pq-error "IO_ERROR" "cannot read ~A" native-path)
-          (signal-pq-error "NOT_FOUND" "file not found")))
-    (stream-error ()
-      (signal-pq-error "IO_ERROR" "cannot read input file"))))
+  (call-with-input-file-checked
+   native-path
+   (lambda (in)
+     (let ((size (file-length in)))
+       (when (> size max-bytes)
+         (resource-limit-error "input of ~D bytes exceeds the ingestion limit" size))
+       (ensure-heap-room size)
+       (handler-case
+           (let* ((buf (make-array size :element-type '(unsigned-byte 8)))
+                  (n (read-sequence buf in)))
+             (if (= n size) buf (subseq buf 0 n)))
+         (stream-error ()
+           (signal-pq-error "IO_ERROR" "cannot read input file")))))))
 
 (defun octets-to-text (octets)
   "Decode UTF-8 OCTETS, ignoring a leading BOM."
@@ -374,16 +382,23 @@ replaces the request's path/data fields."
     (when (and (not replace) (catalog-table-exists-p (session-catalog session) name))
       (signal-pq-error "ALREADY_EXISTS" "table ~A already exists" name))
     (let* ((max-bytes (engine-config-max-ingest-bytes config))
+           (native (and (null octets) path (resolve-data-path config path)))
+           ;; CSV files are streamed; everything else is read into memory
            (octets (cond (octets)
-                         (path (read-file-octets (resolve-data-path config path) max-bytes))
+                         ((and native (eq format :csv))
+                          (check-input-file-size native max-bytes)
+                          nil)
+                         (native (read-file-octets native max-bytes))
                          (t (sb-ext:string-to-octets data :external-format :utf-8))))
            (spec (make-ingest-spec :table-name name :format format :schema schema
                                    :header header :delimiter delimiter
                                    :max-rows (engine-config-max-table-rows config))))
-      (when (> (length octets) max-bytes)
+      (when (and octets (> (length octets) max-bytes))
         (resource-limit-error "input exceeds the ingestion limit of ~D bytes" max-bytes))
       (let ((table (load-table session spec
-                               (if (eq format :csv) octets (octets-to-text octets))
+                               (cond ((null octets) native)
+                                     ((eq format :csv) octets)
+                                     (t (octets-to-text octets)))
                                :replace replace :layout layout :dictionary dictionary)))
         (success-response id
                           "table" (table-name table)

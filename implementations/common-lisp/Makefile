@@ -4,7 +4,10 @@ SBCL       ?= sbcl
 # The control stack size applies to every thread (saved in the executable):
 # expression trees are processed recursively, and a statement at the
 # operand limit (src/sql/limits.lisp) needs about 256 MB in the worst case.
-SBCL_FLAGS  = --dynamic-space-size 8192 --control-stack-size 1024 \
+# The heap (dynamic space, 64 GiB) is address space reserved up front and
+# only backed by memory as it is used; the engine's heap guard
+# (src/util/memory.lisp) keeps its use below a soft limit inside it.
+SBCL_FLAGS  = --dynamic-space-size 65536 --control-stack-size 1024 \
               --non-interactive --no-sysinit --no-userinit
 SOURCES    := polyquery.asd build.lisp $(shell find src -name '*.lisp')
 

@@ -29,7 +29,9 @@
              (let ((obj (parse-json-for-ingest text :start b :end e)))
                (unless (json-object-p obj)
                  (ingest-error "line ~D is not a JSON object" line-no))
-               (push obj objects)))
+               (push obj objects)
+               (when (zerop (mod line-no 4096))
+                 (check-heap))))
            (setf start (1+ nl))))
        (nreverse objects)))))
 
@@ -114,8 +116,9 @@
                    (t (ingest-error "nested objects or arrays are not supported as values")))))
       (if (eq result :fail) (fail) result))))
 
-(defun ingest-json (text spec)
-  "Parse JSON/JSONL TEXT according to SPEC. Returns (values column-defs column-data row-count)."
+(defun ingest-json (text spec &key (dictionary :auto))
+  "Parse JSON/JSONL TEXT according to SPEC. Returns (values column-defs
+column-stores row-count); DICTIONARY applies to STRING columns."
   (let* ((objects (json-ingest-objects text (ingest-spec-format spec)))
          (schema (ingest-spec-schema spec))
          (nrows (length objects))
@@ -139,7 +142,9 @@
                         'simple-vector)))
       (loop for obj in objects
             for r from 0
-            do (dolist (pair (json-object-pairs obj))
+            do (when (zerop (mod r 4096))
+                 (check-heap))
+               (dolist (pair (json-object-pairs obj))
                  (let ((col (gethash (if schema (ascii-downcase (car pair)) (car pair)) index)))
                    (unless col
                      (ingest-error "key ~S is not part of the explicit schema" (car pair)))
@@ -152,13 +157,18 @@
                             collect (make-column-def name (infer-json-column-type col))))))
         (values defs
                 (loop for def in defs
-                      for col across raw
+                      for k from 0
                       collect (let ((type (column-def-type def))
-                                    (out (make-array nrows)))
-                                (dotimes (r nrows out)
-                                  (setf (svref out r)
-                                        (if schema
-                                            (convert-json-explicit (svref col r) type (1+ r)
-                                                                   (column-def-name def))
-                                            (convert-json-inferred (svref col r) type))))))
+                                    (col (svref raw k))
+                                    (builder (make-column-builder (column-def-type def)
+                                                                  :dictionary dictionary)))
+                                (dotimes (r nrows)
+                                  (builder-append-value
+                                   builder
+                                   (if schema
+                                       (convert-json-explicit (svref col r) type (1+ r)
+                                                              (column-def-name def))
+                                       (convert-json-inferred (svref col r) type))))
+                                (setf (svref raw k) nil)
+                                (finish-column-builder builder)))
                 nrows)))))
