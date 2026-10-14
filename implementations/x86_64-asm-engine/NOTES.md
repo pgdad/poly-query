@@ -1,6 +1,33 @@
 # Working notes — x86-64 assembly engine
 
-## Current task: CR-6 expression size limits (`change.expression_limits`) — DONE
+## Current task: scaling 1m -> 10m rows (TASK.md "optimize-scaling") — IN PROGRESS
+
+Measure: data via `python3 datasets/generators/pqgen.py generate --scale 10m
+--families <fam> --jobs 1` (one process per family in parallel; `--jobs` > 1
+fails here: no POSIX semaphores; afterwards copy
+`datasets/manifests/<scale>.json` to `datasets/generated/<scale>/manifest.json`,
+every per-family run overwrites it).  Bench: `python3
+benchmarks/harness/bench.py --engines x86_64-asm-engine --scale 10m
+--no-sandbox --cpus '' --mem-limit-gb 0 --label X` (+ `--http`).  Baseline
+engine binary for comparisons: build commit 7b2edaf.  results/ is NOT
+git-ignored: never `git add` outside implementations/.
+Profiling: perf is not permitted (paranoid 4) and ptrace is limited to
+descendants; use `PQ_PROF=/tmp/p.txt bin/polyquery session ...` (src/prof.S,
+SIGPROF samples: rip, thread, tsc) and `sh bench/prof.sh /tmp/p.txt`.
+Done:
+1. util.S chunk pool: size classes, pool bounded by the peak of live chunk
+   bytes (was 1 GiB, so at 10m every query mmap'd/faulted/munmap'd GBs: 2.1M
+   faults + 4.6 s sys per round; the munmaps ran at the start of the next
+   request, outside elapsed_us), THP (madvise) for chunks >= 2 MiB.
+   10m geomean 62.7 -> 32.0 ms, peak RSS 11.3 -> 10.7 GB.
+2. table.S table_col_stats parallel (identical `stats` output at 1m/10m);
+   server.S srv_prepare_table computes all stats at load/open in serve
+   (children used to recompute per query: HTTP q01 420 -> 3.5 ms at 10m).
+Next ideas: keysort bucket MSD phase at 10m (~150 ms of q14's 310 ms: 25 MB
+buckets per thread, memcpy back after each scatter level), q07/q10/q12/q19.
+Then README before/after table (1m + 10m, back to back) and final checks.
+
+## Previous task: CR-6 expression size limits (`change.expression_limits`) — DONE
 
 Spec: `spec/changes/expression-limits.md`; README "Change CR-6" has the
 limits, design and module list. Public check:
