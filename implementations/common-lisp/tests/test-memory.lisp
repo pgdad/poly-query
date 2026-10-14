@@ -113,11 +113,14 @@
 
 (deftest csv-stream.fast-paths-agree-with-text-conversion
     ;; every text accepted by FAST-CONVERT converts to the same value through TEXT-TO-VALUE
-    (let ((types (list :int64 :float64 :boolean (parse-type-string "DECIMAL(12,2)" "INVALID_REQUEST")
+    (let ((types (list :int64 :float64 :boolean :date :timestamp (parse-type-string "DECIMAL(12,2)" "INVALID_REQUEST")
                        (parse-type-string "DECIMAL(4,0)" "INVALID_REQUEST")))
           (texts '("0" "-0" "+7" "123456789012345678" "1.5" "-.25" "3." "0.001" "99.99"
                    "9999" "10000" "-9999.4" "1e5" "TRUE" "False" "tru" "12.345" "" "." "+-1"
-                   "999999999999999" "0.000000000000000001" "-0.0")))
+                   "999999999999999" "0.000000000000000001" "-0.0"
+                   "2024-02-29" "2023-02-29" "0000-01-01" "2024-13-01" "2024-1-01" "2024-01-01 10:00:00"
+                   "2024-01-01T23:59:59.5" "2024-01-01 23:59:59.123456" "2024-01-01 23:59:59.1234567"
+                   "2024-01-01 24:00:00" "2024-01-01 10:00:00." "2024-01-01x10:00:00" "9999-12-31 00:60:00")))
       (loop for type in types
             always (loop for text in texts
                          for octets = (sb-ext:string-to-octets text :external-format :utf-8)

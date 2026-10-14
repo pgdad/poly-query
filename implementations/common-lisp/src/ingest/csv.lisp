@@ -312,6 +312,56 @@ fraction-digits) or NIL."
                     (fv (if (zerop frac-digits) 0 (octets-unsigned bytes (1+ dot) end))))
                 (and iv fv (values neg (+ (* iv (pow10 frac-digits)) fv) frac-digits)))))))))
 
+(defun octets-fixed-digits (bytes start count)
+  "The value of COUNT ASCII digits at START, or NIL."
+  (declare (type octets bytes) (type fixnum start count))
+  (let ((v 0))
+    (declare (type fixnum v))
+    (dotimes (i count v)
+      (let ((d (- (aref bytes (+ start i)) 48)))
+        (if (<= 0 d 9)
+            (setf v (+ (* v 10) d))
+            (return nil))))))
+
+(defun octets-date (bytes start end)
+  "Days of the date YYYY-MM-DD in BYTES[START,END) (exactly 10 octets), or NIL
+(as PARSE-DATE-TEXT)."
+  (declare (type octets bytes) (type fixnum start end))
+  (when (and (= (- end start) 10)
+             (= (aref bytes (+ start 4)) 45)
+             (= (aref bytes (+ start 7)) 45))
+    (let ((y (octets-fixed-digits bytes start 4))
+          (m (octets-fixed-digits bytes (+ start 5) 2))
+          (d (octets-fixed-digits bytes (+ start 8) 2)))
+      (when (and y m d (>= y 1) (<= 1 m 12) (<= 1 d (days-in-month y m)))
+        (days-from-civil y m d)))))
+
+(defun octets-timestamp (bytes start end)
+  "Microseconds of YYYY-MM-DD[( |T)HH:MM:SS[.f{1,6}]] in BYTES[START,END), or
+NIL (as PARSE-TIMESTAMP-TEXT with a bare date allowed)."
+  (declare (type octets bytes) (type fixnum start end))
+  (let ((n (- end start)))
+    (cond ((= n 10)
+           (let ((days (octets-date bytes start end)))
+             (and days (* days +micros-per-day+))))
+          ((and (<= 19 n 26)
+                (member (aref bytes (+ start 10)) '(32 84))
+                (= (aref bytes (+ start 13)) 58)
+                (= (aref bytes (+ start 16)) 58)
+                (or (= n 19) (and (>= n 21) (= (aref bytes (+ start 19)) 46))))
+           (let ((days (octets-date bytes start (+ start 10)))
+                 (hh (octets-fixed-digits bytes (+ start 11) 2))
+                 (mm (octets-fixed-digits bytes (+ start 14) 2))
+                 (ss (octets-fixed-digits bytes (+ start 17) 2))
+                 (frac (if (= n 19)
+                           0
+                           (let ((f (octets-fixed-digits bytes (+ start 20) (- n 20))))
+                             (and f (* f (pow10 (- 26 n))))))))
+             (when (and days hh mm ss frac (<= hh 23) (<= mm 59) (<= ss 59))
+               (+ (* days +micros-per-day+)
+                  (* (+ (* hh 3600) (* mm 60) ss) +micros-per-second+)
+                  frac)))))))
+
 (defun fast-convert (bytes start end type)
   "Convert the trimmed, non-empty ASCII text BYTES[START,END) to a value of
 TYPE when it has the plain form the common cases use; otherwise NIL (the
@@ -336,6 +386,8 @@ Agrees with TEXT-TO-VALUE on every input it accepts."
        (when (and v (< v (expt 10 15)))
          (let ((d (/ (coerce v 'double-float) (aref *exact-double-powers* frac))))
            (if neg (- d) d)))))
+    (:date (octets-date bytes start end))
+    (:timestamp (octets-timestamp bytes start end))
     (:boolean
      (let ((len (- end start)))
        (flet ((matches (word)

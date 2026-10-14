@@ -43,7 +43,11 @@ limits*, which also lists the engine's limits). Before that, a round of
 work optimized query latency on the benchmark workload
 (`benchmarks/workloads/analytics.json`, scale 1m) without changing results;
 see *Latency optimization (analytics workload)* for the measurements and
-the design decisions.
+the design decisions. The latest change is a defect fix: the engine could
+not load the benchmark tables at 10 million rows (it died of heap
+exhaustion); CSV loads are now streamed into typed column builders and a
+heap guard turns memory exhaustion into `RESOURCE_LIMIT` while the engine
+keeps serving (see *Defect fix: large data and memory exhaustion*).
 
 ## Build prerequisites
 
@@ -63,9 +67,10 @@ bin/polyquery version
 `bin/polyquery` is a small shell launcher that execs `build/polyquery` and works
 from any directory. The executable is saved with `:save-runtime-options`, so
 SBCL's runtime does not interpret any command-line arguments; the heap
-(8 GiB dynamic space) and control stack (1 GiB per thread, reserved but only
-touched by deeply nested statements; see *Change request CR-6*) sizes are
-fixed at build time.
+(64 GiB dynamic space, reserved address space that is only backed by memory
+as it is used; see *Defect fix: large data and memory exhaustion*) and
+control stack (1 GiB per thread, reserved but only touched by deeply nested
+statements; see *Change request CR-6*) sizes are fixed at build time.
 
 ## Libraries
 
@@ -104,10 +109,10 @@ SQL text --lexer--> tokens --parser--> AST --binder--> BOUND-QUERY
 
 | Layer | Files | Responsibility |
 |---|---|---|
-| util | `errors`, `numbers`, `json` | `pq-error` condition with stable codes; exact numeric text parsing, correctly rounded float parsing, shortest round-trip float printing; strict RFC 8259 JSON reader/writer |
+| util | `errors`, `memory`, `numbers`, `json`, `system` | `pq-error` condition with stable codes; the heap guard (soft heap limit, `RESOURCE_LIMIT` instead of heap exhaustion); exact numeric text parsing, correctly rounded float parsing, shortest round-trip float printing; strict RFC 8259 JSON reader/writer; CPU count |
 | types | `types`, `temporal`, `values`, `compare` | type representation, aliases, promotion lattice and result-type unification; DATE/TIMESTAMP calendar math; text conversion, `CAST`, canonical serialization; total ordering |
-| storage | `columns`, `table`, `stats`, `index`, `catalog`, `binary`, `files`, `pqcf-write`, `pqcf-read` | typed column vectors with validity bitmaps and dictionary encoding; immutable tables in row or column layout split into segments; lazily computed column statistics; hash and sorted-permutation (B-tree equivalent) indexes; catalog of tables and global index names with atomic publish (mutex-protected); little-endian codec, CRC-32, strict UTF-8; crash-safe file replacement and mmap/buffered file sources; PQCF v1/v2 writer and validating reader |
-| ingest | `common`, `csv`, `json` | CSV parsing on raw UTF-8 octets, JSON/JSONL; type inference and explicit-schema conversion |
+| storage | `columns`, `builders`, `table`, `stats`, `index`, `catalog`, `binary`, `files`, `pqcf-write`, `pqcf-read` | typed column vectors with validity bitmaps and dictionary encoding; chunked column builders for ingestion; immutable tables in row or column layout split into segments; lazily computed column statistics; hash and sorted-permutation (B-tree equivalent) indexes; catalog of tables and global index names with atomic publish (mutex-protected); little-endian codec, CRC-32, strict UTF-8; crash-safe file replacement and mmap/buffered file sources; PQCF v1/v2 writer and validating reader |
+| ingest | `common`, `csv`, `json` | CSV parsing on raw UTF-8 octets read in blocks (files are streamed) straight into column builders, JSON/JSONL; type inference and explicit-schema conversion |
 | sql | `lexer`, `ast`, `parser` | tokenizer with line/column positions; AST structures; recursive-descent parser for the full grammar of `grammar.md` (`PARSE_ERROR` carries `details.line`/`column`) |
 | analyzer | `bound`, `functions`, `binder`, `query` | semantic validation. `bound`: bound expression nodes and the analysed-query representation; `functions`: the scalar function registry (typing + implementation per function); `binder`: expressions — name resolution through nested scopes, typing, implicit promotions, CASE/LIKE/BETWEEN/IN, subqueries; `query`: CTEs, FROM/joins/derived tables, `*` expansion, output naming, GROUP BY alias/ordinal resolution, the structural grouping rewrite, HAVING, DISTINCT, ORDER BY resolution, constant LIMIT/OFFSET |
 | plan | `logical`, `estimates`, `rules/*`, `builder`, `optimizer`, `access`, `physical` | the logical plan representation (`Scan`, `Values`, `Filter`, `Project`, `Join`, `Aggregate`, `Distinct`, `Sort`, `Limit`, `UnionAll`, `SubqueryAlias`; subquery plans on the subquery descriptors) and its printer; predicate analysis, selectivity and cardinality estimates; one file per optimizer rule; plan construction from analysed queries; the optimizer (rule registry and driver); access paths (index choice, segment skipping); physical planning (operators, join algorithms, top-N, execution settings) and EXPLAIN JSON rendering. See *Change request CR-3* |
@@ -871,6 +876,115 @@ checks, hashed grouping rewrite), `plan/rules/constant-folding.lisp`,
 `engine.lisp` (capability), `Makefile` (stack size), and the unit tests
 `tests/test-limits.lisp`.
 
+### Defect fix: large data and memory exhaustion
+
+**Defect.** With the benchmark tables generated at scale 10m (9 tables,
+3.4 GB of CSV; `transactions.csv` is 0.87 GB) the engine died while
+loading the first table (`Heap exhausted, game over` inside `INGEST-CSV`),
+before any query ran. A load materialized everything at once: the file's
+octets, one Lisp string per field (4 bytes per character plus a header —
+110 million strings for `transactions`), a boxed value vector per column
+and finally the typed column; that exceeded the fixed 8 GiB heap.
+Worse, SBCL cannot recover when the garbage collector itself runs out of
+space, so no handler could turn the failure into an error response. The
+probe (`tests/regression/large_data_probe.py`) requires the 10m workload to
+load and answer, `--max-query-memory-mb` / `--max-ingest-bytes` to be
+enforced with `RESOURCE_LIMIT`, and loads beyond the available memory to
+fail with `RESOURCE_LIMIT` while the engine keeps serving.
+
+**Memory model.**
+
+* *Heap.* All engine data lives in SBCL's dynamic space, now 64 GiB of
+  reserved address space (`Makefile`; pages are only backed by memory when
+  used — an idle engine has an RSS of about 80 MB). The nursery is 512 MB
+  (`*nursery-mb*`). Loaded tables are immutable typed vectors: 8 bytes per
+  value for INT64/DECIMAL(≤18)/DATE/TIMESTAMP/FLOAT64 and plain STRING
+  columns (a pointer to a shared string), 4 bytes for dictionary-encoded
+  STRING columns plus the distinct strings, 1 bit for BOOLEAN, plus a 1-bit
+  validity bitmap for columns with NULLs. The 10m `transactions` table
+  (11 columns) takes about 650 MB; the 9 workload tables about 4 GB.
+* *Heap guard* (`util/memory.lisp`). A soft heap limit — the dynamic space
+  minus a reserve of 15 % (at least 2 GiB) for the collector, and at most
+  80 % of the host's physical memory or cgroup limit, i.e. about 54 GiB on
+  the reference host — is checked by `CHECK-HEAP` wherever work can grow:
+  every 4,096 rows of a load and every builder chunk, in every query loop
+  through `CHECK-INTERRUPTS` and `CHARGE-MEMORY`, in the JSON reader, and
+  before large allocations of known size (`ENSURE-HEAP-ROOM`: input
+  buffers, PQCF files, assembled columns). The check is a comparison of
+  `sb-kernel:dynamic-usage` with the limit. Above the limit the guard first
+  collects the whole heap (garbage of dropped or replaced tables and of
+  failed requests lives in old generations), but only if at least 256 MB
+  were allocated since its previous full collection, so a nearly full heap
+  does not thrash; if the live data still exceeds the limit the request
+  fails with `RESOURCE_LIMIT` ("out of memory: the engine's heap limit (N
+  MB) is exhausted"). Unwinding releases everything the request built (a
+  table is only published when complete), so the engine keeps serving; the
+  next request that finds the heap above the limit collects again. A
+  `storage-condition` (heap or stack exhausted in an allocation) is still
+  caught at the request boundary as a last resort. `--max-memory-mb N`
+  (engine-specific option) lowers the soft limit, e.g. for tests.
+* *Query budget.* `--max-query-memory-mb` (default 2048) remains the
+  per-query accounting of materialized state (`CHARGE-MEMORY`); it is
+  independent of the heap guard, which protects the process as a whole.
+* *Ingestion limits.* `--max-ingest-bytes` (default 4 GiB) is checked
+  against the file size before a CSV file is read, `--max-table-rows`
+  (default 200,000,000) while records are counted; both fail with
+  `RESOURCE_LIMIT`.
+
+**Streaming CSV ingestion** (`ingest/csv.lisp`, `storage/builders.lisp`).
+A CSV file is read in 8 MiB blocks; each record is scanned into field spans
+(start/end offsets and flags) within the current block, and a record cut
+by the end of a block is scanned again after the block is refilled (the
+buffer grows when a single record does not fit). Fields go straight from
+their octets into chunked, typed `COLUMN-BUILDER`s (65,536 values per
+chunk, NULL bitmaps per chunk only where NULLs occur); the final column is
+assembled once from the chunks, so a load needs about the size of the table
+plus one column. Plain ASCII integers (≤ 18 digits), narrow decimals,
+floats (≤ 15 significant digits, the exact fast path the float parser
+already used) and booleans are converted without creating a string; every
+other text uses the existing `TEXT-TO-VALUE`, so results and error
+messages are unchanged. STRING columns that may be dictionary encoded
+intern their values in an open-addressing table that is probed with the
+field's octets, so repeated strings allocate nothing; whether a column ends
+up dictionary encoded follows the previous rule (fewer than n/2 distinct
+values and at least 16 rows, or the `dictionary` option). Without an
+explicit schema the file is scanned twice: once to infer the column types
+(candidate masks per column, as before), once to convert. Error precedence
+is kept: structural errors (field counts, quoting, invalid UTF-8, field
+length, row limit) are reported in input order, header problems after the
+whole input was scanned, and conversion errors last, for the leftmost
+failing column (as when each column was converted after parsing). The
+loads of data given inline (`data`) or uploaded over HTTP scan the request
+octets in place. JSON/JSONL keep their in-memory parser, with heap checks
+and column builders for the final columns.
+
+**Results** (reference host: 32 CPUs, 250 GB; probe defaults):
+
+| check | result | peak RSS |
+|---|---|---|
+| `workload` — 9 tables at 10m (loads 0.3–12 s each, 44 s in total), 20 queries | all ok (0.007–5.2 s; the full sorts q14/q15 return 10M rows) | 6.2 GiB |
+| `query_budget` — `--max-query-memory-mb 64` | 9 queries `RESOURCE_LIMIT`, 11 ok, engine answers afterwards | 4.8 GiB |
+| `ingest_limit` — `--max-ingest-bytes 100000000` | `RESOURCE_LIMIT` before reading, engine answers | 0.0 GiB |
+| `exhaustion` — 6 copies of `transactions` | all ok (7 s each), engine answers | 4.1 GiB |
+| EXHAUSTION_ROW
+
+Before the fix the first load died at 8 GiB. At scale 1m the loads take
+3.2–3.6 s instead of 6.8 s and the 20 queries return identical rows with
+unchanged latency (`bench/workload.py --compare`).
+
+**Modules touched:** `util/memory.lisp` (new: heap guard),
+`storage/builders.lisp` (new: column builders and the string interner),
+`ingest/csv.lisp` (rewritten: block reader, record scanner, byte-level
+conversion, two-pass inference), `ingest/common.lisp` (checked file
+opening), `ingest/json.lisp` (heap checks, builders), `util/json.lisp`
+(heap checks), `storage/table.lisp` (tables from column stores),
+`storage/files.lisp` and `storage/pqcf-read.lisp` (heap checks),
+`exec/context.lisp` (heap check in `CHECK-INTERRUPTS`/`CHARGE-MEMORY`),
+`engine.lisp` (`LOAD-TABLE` from stores), `protocol/requests.lisp` (CSV
+files are streamed, not read; memory failures), `protocol/cli.lisp`
+(`--max-memory-mb`), `Makefile` (64 GiB dynamic space), `polyquery.asd`,
+and the unit tests `tests/test-memory.lisp`.
+
 ### Extensibility notes
 
 * A logical rewrite is a function from logical plan to logical plan in
@@ -1001,7 +1115,9 @@ checks, hashed grouping rewrite), `plan/rules/constant-folding.lisp`,
 * Default limits: query memory budget 2048 MB (approximate accounting of
   materialized rows, hash tables, sort buffers), ingestion 4 GiB,
   200,000,000 table rows, 100,000,000 rows produced by any single join
-  operator (`--max-join-rows`). Statement size limits: 16 MiB of SQL
+  operator (`--max-join-rows`), and a process-wide heap limit (about
+  54 GiB, lower on hosts with less memory; `--max-memory-mb` lowers it; see
+  *Defect fix: large data and memory exhaustion*). Statement size limits: 16 MiB of SQL
   text, nesting depth 4,096, 250,000 operands (see *Change request CR-6*);
   beyond them, and on heap or stack exhaustion, the answer is
   `RESOURCE_LIMIT`.
@@ -1658,5 +1774,13 @@ copy-free scans for grouped aggregation.
 * Correlated subqueries are executed per distinct outer value (memoized);
   only equality correlations directly on a base-table scan use a hash lookup,
   other correlated shapes rescan their inputs per evaluation.
-* Loads materialize the whole input in memory (file octets plus parsed fields)
-  before building columns.
+* JSON and JSONL loads still materialize the whole input in memory (the
+  decoded text, 4 bytes per character, and the parsed objects) before
+  building columns; only CSV is streamed. A JSON input of about 1 GB needs
+  roughly 10 GB of heap; beyond the heap limit the load fails with
+  `RESOURCE_LIMIT`.
+* CSV loads without an explicit schema read the input twice (inference,
+  then conversion); with a schema once.
+* The heap limit is process-wide: when tables fill it, every request that
+  needs more memory fails with `RESOURCE_LIMIT` until tables are dropped,
+  not only the request that crossed it.
