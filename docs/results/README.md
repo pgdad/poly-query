@@ -562,9 +562,58 @@ no session-mode line-length cap and stack-depth risks in parallel workers; none 
 these is verified yet. No ABI violation was found
 ([details](../../results/development/code-review/README.md#assembly-engine-cohort-complete-engines-in-assembly)).
 
+## Application family: pqledger (ADR-0018)
+
+Each engine was turned into an in-process library and used by a personal-finance CLI,
+`pqledger` (`spec/apps/pqledger.md`: bank-CSV import in three formats with duplicate detection,
+category rules and overrides, monthly/category/merchant reports, budgets, ad-hoc SQL, three
+output formats), plus a minimal example program and two guides, `APP.md` (using and configuring
+the application) and `EMBEDDING.md` (using the engine as a library in a new program in that
+language; for the assembly engines from assembly and from C through a C-ABI library). Every
+engine passes all 30 application cases (24 public, 6 hidden incl. a 99,629-transaction ledger)
+and all 7 example-program cases, each command traced with `strace` (no engine process, no
+socket), and still passes its full conformance suite.
+
+| engine | sessions | cost (USD) | agent time | outcome |
+|---|---|---|---|---|
+| Python | 1 | 8.87 | 32 min | success |
+| Go | 1 | 11.85 | 46 min | success |
+| Rust | 1 | 8.55 | 24 min | success |
+| Common Lisp | 1 | null¹ | 24 min | success |
+| Java | 2 | null¹ + 6.68 | 23 + 14 min | success (docs in session 2) |
+| Clojure | 2 | null¹ + 2.74 | 23 + 11 min | success (docs in session 2) |
+| x86-64 assembly | 2² | null¹ + 6.27 | 24 + 16 min | success (docs in session 2) |
+| AArch64 assembly | 2² | null¹ + 2.91 | 24 + 8 min | success (docs in session 2) |
+
+¹ The usage guard stopped all six agents of the second wave after ~23 minutes when the
+seven-day window reached 75 % (HI-013); a stopped agent reports no cost (token counts are
+kept in each run's telemetry as lower bounds). At that point every application already passed
+all cases; Java, Clojure and both assembly engines had not yet written their guides and finished
+them in a continuation session. ² Plus one aborted session each, stopped within seconds by the
+same guard. Assembly engines are a separate cohort and are not ranked with the six.
+
+**Ledger interoperability.** The ledger format is normative, so a ledger written by any
+implementation must be readable and writable by every other. All eight produce ledgers
+row-identical to the engine-free reference; each implementation reads (accounts, list, export,
+all reports, budget) and then writes (an overlapping import, set and clear overrides) every
+other implementation's ledger and the reference's, and each producer then reads its own ledger
+back after every other implementation wrote to it, next to its own cache files: 8 + 72 + 64
+checks, all pass, expected values always from the reference
+([`results/apps/interop-20261014/`](../../results/apps/interop-20261014/README.md)).
+
+**Review.** Four read-only reviewers scored every guide 5/5 and found every application
+compliant: categories are resolved in SQL (globs translated to LIKE, first match by
+`MIN(rule_no)`, then `COALESCE(override, rule, 'uncategorized')`) and every report is one SQL
+statement; the hosts only compute the `share` column and duplicate decisions. Code quality 4/5
+throughout (AArch64 4.5). Unverified finding: five implementations replace the ledger files one
+after the other, so a failure between two writes could leave the ledger half-updated; Common Lisp
+stages all files first. Spec gap: `list --category uncategorized` is a usage error in Go and
+lists uncategorized rows in Python
+([review](../../results/development/code-review/pqledger.md)).
+
 ## Harness incidents
 
-Twelve harness defects were found during the runs and fixed; each is logged with
+Fourteen harness defects were found during the runs and fixed; each is logged with
 its impact in [`experiments/telemetry/harness-incidents.jsonl`](../../experiments/telemetry/harness-incidents.jsonl).
 HI-002 (the runner overwrote explicit request ids) was visible to the Phase 1
 agents as two spurious failures. HI-005 (a CR-1 case expected DECIMAL from an
@@ -585,7 +634,12 @@ FLOAT64 printed as `79` and as `79.0` as different results; at 10m it flagged a 
 probe could not generate its data inside the sandbox (fixed; one run re-validated). HI-012: the storage
 benchmark reopened a saved table while its indexes still existed, so every engine correctly refused with
 `ALREADY_EXISTS` and every open time recorded before commit `9edc603` is invalid (save times and file sizes
-are valid; no document quoted open times).
+are valid; no document quoted open times). HI-013: the usage guard stopped agents on the
+seven-day "allowed_warning" notice (75 %) rather than at a utilization limit; it now stops at
+98 % weekly or 95 % five-hourly use, any other non-allowed status, or overage. HI-014: the
+assembly compliance check matched compiler commands in written file content (a C linking example
+in the AArch64 `EMBEDDING.md`); it now checks executed shell commands and flags any high-level
+source file written anywhere.
 
 ## Reproducibility
 

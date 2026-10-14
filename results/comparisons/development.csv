@@ -1,4 +1,6 @@
 language,task,attempt,outcome,cost_usd,tokens_output,tokens_input_total,turns,wall_seconds,tool_calls,tool_failures,build_failures,repair_iterations,commits,lines_added,manifest
+java,app-pqledger,1,tests_failed,,728,15088404,,1403.5,83,3,2,0,1,4394,experiments/runs/a-app-pqledger-java-a1-20261014T170051Z/manifest.json
+java,app-pqledger,1,success,6.680131400000002,38855,5423123,57,861.0,120,3,16,0,2,2417,experiments/runs/a-app-pqledger-java-a1-s2-20261014T181408Z/manifest.json
 java,change-decimal38,1,success,13.923582400000006,137382,40721989,175,1385.4,174,0,4,7,3,1552,experiments/runs/a-change-decimal38-java-a1-20261011T063016Z/manifest.json
 java,change-expression-limits,1,success,12.958079399999997,160544,34015359,149,4114.2,147,0,2,0,4,1529,experiments/runs/a-change-expression-limits-java-a1-20261012T235415Z/manifest.json
 java,change-union-all,1,success,4.9248474,49714,11898044,88,1876.3,86,1,1,5,3,475,experiments/runs/a-change-union-all-java-a1-20261011T053525Z/manifest.json
@@ -15,6 +17,8 @@ java,phase3,1,success,15.812226800000005,190353,30184182,130,4004.8,182,5,3,8,7,
 java,phase4,1,success,5.124270999999999,98433,7701757,59,932.1,58,1,1,4,3,2348,experiments/runs/a-phase4-java-a1-20261010T203751Z/manifest.json
 java,phase5,1,success,38.611366799999985,471867,118096428,270,5706.4,269,6,3,29,22,9365,experiments/runs/a-phase5-java-a1-20261010T223255Z/manifest.json
 java,refactor-plan-separation,1,success,6.298771200000003,103810,11569088,80,1345.7,79,3,1,0,2,1397,experiments/runs/a-refactor-plan-separation-java-a1-20261011T060719Z/manifest.json
+clojure,app-pqledger,1,tests_failed,,664,12159963,,1395.2,77,2,3,0,2,2749,experiments/runs/a-app-pqledger-clojure-a1-20261014T170053Z/manifest.json
+clojure,app-pqledger,1,success,2.7425198000000006,41108,4556652,54,640.6,53,1,8,0,2,1083,experiments/runs/a-app-pqledger-clojure-a1-s2-20261014T181408Z/manifest.json
 clojure,change-decimal38,1,success,8.530311999999997,90967,21966393,112,1353.6,110,2,10,7,3,825,experiments/runs/a-change-decimal38-clojure-a1-20261011T060221Z/manifest.json
 clojure,change-expression-limits,1,success,9.0152788,106978,23419293,132,3473.8,130,3,3,0,3,833,experiments/runs/a-change-expression-limits-clojure-a1-20261012T235413Z/manifest.json
 clojure,change-union-all,1,success,3.755507999999999,42345,8237394,73,545.6,72,1,1,7,1,312,experiments/runs/a-change-union-all-clojure-a1-20261011T053530Z/manifest.json
@@ -29,6 +33,7 @@ clojure,phase3,1,success,11.723875399999997,174291,27708131,122,1749.9,121,2,5,6
 clojure,phase4,1,success,3.9724168000000004,83163,4906893,42,857.1,41,0,1,2,2,1415,experiments/runs/a-phase4-clojure-a1-20261010T195932Z/manifest.json
 clojure,phase5,1,success,22.11197959999999,317457,59117667,195,4109.4,194,6,17,13,9,4845,experiments/runs/a-phase5-clojure-a1-20261010T201442Z/manifest.json
 clojure,refactor-plan-separation,1,success,4.0508755999999995,73732,6533560,64,859.2,63,2,7,0,3,849,experiments/runs/a-refactor-plan-separation-clojure-a1-20261011T054654Z/manifest.json
+rust,app-pqledger,1,success,8.549238799999998,148612,16676989,98,1427.0,98,2,7,0,4,5759,experiments/runs/a-app-pqledger-rust-a1-20261014T170050Z/manifest.json
 rust,change-decimal38,1,success,8.570301200000001,91101,22350985,118,1049.8,117,3,11,4,2,1411,experiments/runs/a-change-decimal38-rust-a1-20261011T060356Z/manifest.json
 rust,change-expression-limits,1,success,21.517409000000008,258437,62932344,224,5713.2,223,3,6,0,8,2527,experiments/runs/a-change-expression-limits-rust-a1-20261012T235411Z/manifest.json
 rust,change-union-all,1,success,3.743945800000001,42358,8377812,78,476.4,77,0,1,6,2,566,experiments/runs/a-change-union-all-rust-a1-20261011T053528Z/manifest.json
@@ -42,6 +47,7 @@ rust,phase3,1,success,8.645523000000003,141755,17247800,91,1409.8,90,0,6,3,3,388
 rust,phase4,1,success,6.4989698,110122,12767205,88,1283.3,87,1,4,2,5,2647,experiments/runs/a-phase4-rust-a1-20261010T224055Z/manifest.json
 rust,phase5,1,success,35.131324400000004,405290,109783226,270,4988.0,269,1,10,26,32,9413,experiments/runs/a-phase5-rust-a1-20261011T004454Z/manifest.json
 rust,refactor-plan-separation,1,success,5.855050400000002,94161,11372944,79,970.2,78,0,3,0,3,1969,experiments/runs/a-refactor-plan-separation-rust-a1-20261011T054657Z/manifest.json
+python,app-pqledger,1,success,8.867244799999996,143262,18698248,98,1932.4,96,4,5,0,7,4280,experiments/runs/a-app-pqledger-python-a1-20261014T155131Z/manifest.json
 python,change-decimal38,1,success,6.252252400000002,66526,15520513,104,2530.8,103,4,4,4,2,505,experiments/runs/a-change-decimal38-python-a1-20261011T060828Z/manifest.json
 python,change-expression-limits,1,success,20.985685800000006,225341,64421294,235,6376.4,234,4,3,0,10,1642,experiments/runs/a-change-expression-limits-python-a1-20261012T235414Z/manifest.json
 python,change-union-all,1,success,3.480239,39272,7588572,71,472.8,70,1,0,4,1,417,experiments/runs/a-change-union-all-python-a1-20261011T053526Z/manifest.json
@@ -56,6 +62,7 @@ python,phase3,1,success,8.587422,139816,17854522,94,1310.1,93,1,4,6,6,2682,exper
 python,phase4,1,success,3.948833800000001,80793,5075823,48,825.2,47,1,0,2,2,1578,experiments/runs/a-phase4-python-a1-20261010T203820Z/manifest.json
 python,phase5,1,success,16.423817000000003,243522,42006088,158,3943.1,157,1,1,12,8,4158,experiments/runs/a-phase5-python-a1-20261010T223119Z/manifest.json
 python,refactor-plan-separation,1,success,4.8918387999999995,81928,8780368,67,1237.6,66,1,2,0,2,1105,experiments/runs/a-refactor-plan-separation-python-a1-20261011T054658Z/manifest.json
+go,app-pqledger,1,success,11.854342600000003,171494,21844669,112,2775.6,141,3,4,0,5,6035,experiments/runs/a-app-pqledger-go-a1-20261014T155133Z/manifest.json
 go,change-decimal38,1,success,16.4993488,163665,49100994,179,2225.1,178,1,3,6,11,2595,experiments/runs/a-change-decimal38-go-a1-20261011T060035Z/manifest.json
 go,change-expression-limits,1,success,18.359255999999988,203528,55795168,246,4274.5,245,2,4,0,12,2135,experiments/runs/a-change-expression-limits-go-a1-20261012T235417Z/manifest.json
 go,change-union-all,1,success,3.616785200000001,43303,7501218,74,495.0,73,0,0,7,2,595,experiments/runs/a-change-union-all-go-a1-20261011T053524Z/manifest.json
@@ -70,6 +77,7 @@ go,phase3,1,success,10.384653400000001,173724,21548989,107,1623.5,106,0,1,8,4,45
 go,phase4,1,success,4.2406109999999995,78045,6752973,61,818.6,60,1,1,2,2,1909,experiments/runs/a-phase4-go-a1-20261010T200428Z/manifest.json
 go,phase5,1,success,24.051731400000012,306580,69410368,210,5583.3,207,5,3,17,12,7790,experiments/runs/a-phase5-go-a1-20261010T201830Z/manifest.json
 go,refactor-plan-separation,1,success,3.6674945999999995,56272,6639319,67,731.4,66,1,0,0,3,1071,experiments/runs/a-refactor-plan-separation-go-a1-20261011T054655Z/manifest.json
+common-lisp,app-pqledger,1,success,,910,17810476,,1412.8,95,2,2,0,4,4077,experiments/runs/a-app-pqledger-common-lisp-a1-20261014T170049Z/manifest.json
 common-lisp,change-decimal38,1,success,7.4481686,76437,18483412,103,1346.3,102,1,3,7,3,526,experiments/runs/a-change-decimal38-common-lisp-a1-20261011T065327Z/manifest.json
 common-lisp,change-expression-limits,1,success,14.967314799999997,167347,41772659,166,5338.3,165,4,4,0,5,1080,experiments/runs/a-change-expression-limits-common-lisp-a1-20261012T235412Z/manifest.json
 common-lisp,change-union-all,1,success,4.5721582,50836,10626468,85,2935.8,83,1,4,6,1,483,experiments/runs/a-change-union-all-common-lisp-a1-20261011T053529Z/manifest.json
@@ -94,6 +102,9 @@ arm64-asm,kernel-debug-mutant,1,success,0.4827568000000001,6526,598106,19,78.0,1
 arm64-asm,kernel-optimize,1,success,10.765369399999992,221127,17286827,72,2120.2,71,0,0,0,6,1406,experiments/runs/a-kernel-optimize-arm64-asm-a1-20261011T125000Z/manifest.json
 arm64-asm,kernel-refactor,1,success,8.857044599999998,195075,12052855,55,1512.2,54,3,0,0,6,3637,experiments/runs/a-kernel-refactor-arm64-asm-a1-20261011T120845Z/manifest.json
 arm64-asm,kernels,1,success,4.7987362,137298,3339378,26,1698.6,25,0,0,0,4,2803,experiments/runs/a-kernels-arm64-asm-a1-20261010T184024Z/manifest.json
+x86_64-asm-engine,app-pqledger,1,tests_failed,,1994,27372522,,1414.9,188,8,9,0,6,10121,experiments/runs/a-app-pqledger-x86_64-asm-engine-a1-20261014T170049Z/manifest.json
+x86_64-asm-engine,app-pqledger,1,tests_failed,,16,16323,,2.1,1,0,0,0,0,0,experiments/runs/a-app-pqledger-x86_64-asm-engine-a1-s2-20261014T172444Z/manifest.json
+x86_64-asm-engine,app-pqledger,1,success,6.2736506,41975,4975813,59,955.1,128,3,7,0,4,839,experiments/runs/a-app-pqledger-x86_64-asm-engine-a1-s2-20261014T181408Z/manifest.json
 x86_64-asm-engine,change-decimal38,1,success,16.391668599999996,191379,46212117,179,1799.4,178,6,3,10,11,3117,experiments/runs/a-change-decimal38-x86_64-asm-engine-a1-20261012T093746Z/manifest.json
 x86_64-asm-engine,change-expression-limits,1,success,10.737601600000007,135808,28038653,155,3492.3,151,4,1,0,5,769,experiments/runs/a-change-expression-limits-x86_64-asm-engine-a1-20261012T235412Z/manifest.json
 x86_64-asm-engine,change-union-all,1,success,3.2606727999999996,46029,5747910,56,474.5,55,2,1,4,2,491,experiments/runs/a-change-union-all-x86_64-asm-engine-a1-20261012T090413Z/manifest.json
@@ -106,6 +117,9 @@ x86_64-asm-engine,phase3,1,success,14.795773600000002,237295,33239016,125,2143.7
 x86_64-asm-engine,phase4,1,success,12.701766400000006,225676,27012255,109,2221.0,108,3,1,6,12,5266,experiments/runs/a-phase4-x86_64-asm-engine-a1-20261011T191535Z/manifest.json
 x86_64-asm-engine,phase5,1,success,20.200703200000003,297634,52644128,194,3043.3,193,0,7,11,24,6315,experiments/runs/a-phase5-x86_64-asm-engine-a1-20261011T195444Z/manifest.json
 x86_64-asm-engine,refactor-plan-separation,1,success,8.955756599999997,161849,16732512,95,1510.1,94,2,1,0,4,2942,experiments/runs/a-refactor-plan-separation-x86_64-asm-engine-a1-20261012T091221Z/manifest.json
+arm64-asm-engine,app-pqledger,1,tests_failed,,1767,12789096,,1418.7,109,4,6,0,2,10143,experiments/runs/a-app-pqledger-arm64-asm-engine-a1-20261014T170049Z/manifest.json
+arm64-asm-engine,app-pqledger,1,tests_failed,,8,16458,,4.3,1,0,0,0,0,0,experiments/runs/a-app-pqledger-arm64-asm-engine-a1-s2-20261014T172454Z/manifest.json
+arm64-asm-engine,app-pqledger,1,success,2.9146264,46649,4770662,59,454.4,58,1,2,0,3,1147,experiments/runs/a-app-pqledger-arm64-asm-engine-a1-s2-20261014T181408Z/manifest.json
 arm64-asm-engine,change-decimal38,1,success,20.74825879999999,165615,47470181,159,4355.8,199,3,5,8,8,2144,experiments/runs/a-change-decimal38-arm64-asm-engine-a1-20261012T093930Z/manifest.json
 arm64-asm-engine,change-expression-limits,1,success,10.889416799999998,139316,28350053,153,2100.5,152,1,1,0,9,1034,experiments/runs/a-change-expression-limits-arm64-asm-engine-a1-20261012T235433Z/manifest.json
 arm64-asm-engine,change-union-all,1,success,4.522180599999998,52307,9809714,76,521.3,75,1,2,0,2,565,experiments/runs/a-change-union-all-arm64-asm-engine-a1-20261012T090423Z/manifest.json

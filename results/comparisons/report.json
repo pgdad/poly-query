@@ -1,5 +1,5 @@
 {
- "generated": "2026-10-14T13:08:32.708486+00:00",
+ "generated": "2026-10-14T18:42:25.244159+00:00",
  "weights": {
   "correctness": 0.35,
   "development_effort": 0.2,
@@ -7,8 +7,134 @@
   "resources": 0.1,
   "maintainability": 0.15
  },
- "git_commit": "08411742317dfa4c7199d5217a6377c80762703e",
+ "git_commit": "a794cd28f07efe8dc75ba6d232d980f2ec89a2e6",
  "runs": [
+  {
+   "run_id": "a-app-pqledger-arm64-asm-engine-a1-20261014T170049Z",
+   "language": "arm64-asm-engine",
+   "task": "app-pqledger",
+   "track": "A",
+   "attempt": 1,
+   "outcome": "tests_failed",
+   "manifest": "experiments/runs/a-app-pqledger-arm64-asm-engine-a1-20261014T170049Z/manifest.json"
+  },
+  {
+   "run_id": "a-app-pqledger-arm64-asm-engine-a1-s2-20261014T172454Z",
+   "language": "arm64-asm-engine",
+   "task": "app-pqledger",
+   "track": "A",
+   "attempt": 1,
+   "outcome": "tests_failed",
+   "manifest": "experiments/runs/a-app-pqledger-arm64-asm-engine-a1-s2-20261014T172454Z/manifest.json"
+  },
+  {
+   "run_id": "a-app-pqledger-arm64-asm-engine-a1-s2-20261014T181408Z",
+   "language": "arm64-asm-engine",
+   "task": "app-pqledger",
+   "track": "A",
+   "attempt": 1,
+   "outcome": "success",
+   "manifest": "experiments/runs/a-app-pqledger-arm64-asm-engine-a1-s2-20261014T181408Z/manifest.json"
+  },
+  {
+   "run_id": "a-app-pqledger-clojure-a1-20261014T170053Z",
+   "language": "clojure",
+   "task": "app-pqledger",
+   "track": "A",
+   "attempt": 1,
+   "outcome": "tests_failed",
+   "manifest": "experiments/runs/a-app-pqledger-clojure-a1-20261014T170053Z/manifest.json"
+  },
+  {
+   "run_id": "a-app-pqledger-clojure-a1-s2-20261014T181408Z",
+   "language": "clojure",
+   "task": "app-pqledger",
+   "track": "A",
+   "attempt": 1,
+   "outcome": "success",
+   "manifest": "experiments/runs/a-app-pqledger-clojure-a1-s2-20261014T181408Z/manifest.json"
+  },
+  {
+   "run_id": "a-app-pqledger-common-lisp-a1-20261014T170049Z",
+   "language": "common-lisp",
+   "task": "app-pqledger",
+   "track": "A",
+   "attempt": 1,
+   "outcome": "success",
+   "manifest": "experiments/runs/a-app-pqledger-common-lisp-a1-20261014T170049Z/manifest.json"
+  },
+  {
+   "run_id": "a-app-pqledger-go-a1-20261014T155133Z",
+   "language": "go",
+   "task": "app-pqledger",
+   "track": "A",
+   "attempt": 1,
+   "outcome": "success",
+   "manifest": "experiments/runs/a-app-pqledger-go-a1-20261014T155133Z/manifest.json"
+  },
+  {
+   "run_id": "a-app-pqledger-java-a1-20261014T170051Z",
+   "language": "java",
+   "task": "app-pqledger",
+   "track": "A",
+   "attempt": 1,
+   "outcome": "tests_failed",
+   "manifest": "experiments/runs/a-app-pqledger-java-a1-20261014T170051Z/manifest.json"
+  },
+  {
+   "run_id": "a-app-pqledger-java-a1-s2-20261014T181408Z",
+   "language": "java",
+   "task": "app-pqledger",
+   "track": "A",
+   "attempt": 1,
+   "outcome": "success",
+   "manifest": "experiments/runs/a-app-pqledger-java-a1-s2-20261014T181408Z/manifest.json"
+  },
+  {
+   "run_id": "a-app-pqledger-python-a1-20261014T155131Z",
+   "language": "python",
+   "task": "app-pqledger",
+   "track": "A",
+   "attempt": 1,
+   "outcome": "success",
+   "manifest": "experiments/runs/a-app-pqledger-python-a1-20261014T155131Z/manifest.json"
+  },
+  {
+   "run_id": "a-app-pqledger-rust-a1-20261014T170050Z",
+   "language": "rust",
+   "task": "app-pqledger",
+   "track": "A",
+   "attempt": 1,
+   "outcome": "success",
+   "manifest": "experiments/runs/a-app-pqledger-rust-a1-20261014T170050Z/manifest.json"
+  },
+  {
+   "run_id": "a-app-pqledger-x86_64-asm-engine-a1-20261014T170049Z",
+   "language": "x86_64-asm-engine",
+   "task": "app-pqledger",
+   "track": "A",
+   "attempt": 1,
+   "outcome": "tests_failed",
+   "manifest": "experiments/runs/a-app-pqledger-x86_64-asm-engine-a1-20261014T170049Z/manifest.json"
+  },
+  {
+   "run_id": "a-app-pqledger-x86_64-asm-engine-a1-s2-20261014T172444Z",
+   "language": "x86_64-asm-engine",
+   "task": "app-pqledger",
+   "track": "A",
+   "attempt": 1,
+   "outcome": "tests_failed",
+   "manifest": "experiments/runs/a-app-pqledger-x86_64-asm-engine-a1-s2-20261014T172444Z/manifest.json"
+  },
+  {
+   "run_id": "a-app-pqledger-x86_64-asm-engine-a1-s2-20261014T181408Z",
+   "language": "x86_64-asm-engine",
+   "task": "app-pqledger",
+   "track": "A",
+   "attempt": 1,
+   "outcome": "success",
+   "manifest": "experiments/runs/a-app-pqledger-x86_64-asm-engine-a1-s2-20261014T181408Z/manifest.json"
+  },
   {
    "run_id": "a-change-decimal38-arm64-asm-engine-a1-20261012T093930Z",
    "language": "arm64-asm-engine",
@@ -1417,7 +1543,7 @@
      "storage.pqcf",
      "test.functions"
     ],
-    "started": "2026-10-13T03:10:21.622946+00:00",
+    "started": "2026-10-14T18:31:57.945752+00:00",
     "source": "results/correctness/java.json"
    },
    "clojure": {
@@ -1499,7 +1625,7 @@
      "storage.pqcf",
      "test.functions"
     ],
-    "started": "2026-10-13T03:09:56.016937+00:00",
+    "started": "2026-10-14T18:32:17.251067+00:00",
     "source": "results/correctness/clojure.json"
    },
    "rust": {
@@ -1581,7 +1707,7 @@
      "storage.pqcf",
      "test.functions"
     ],
-    "started": "2026-10-13T03:10:11.362320+00:00",
+    "started": "2026-10-14T18:12:05.775528+00:00",
     "source": "results/correctness/rust.json"
    },
    "python": {
@@ -1663,7 +1789,7 @@
      "storage.pqcf",
      "test.functions"
     ],
-    "started": "2026-10-13T03:10:23.786955+00:00",
+    "started": "2026-10-14T17:00:39.663848+00:00",
     "source": "results/correctness/python.json"
    },
    "go": {
@@ -1745,7 +1871,7 @@
      "storage.pqcf",
      "test.functions"
     ],
-    "started": "2026-10-13T03:10:26.689360+00:00",
+    "started": "2026-10-14T17:00:43.685533+00:00",
     "source": "results/correctness/go.json"
    },
    "common-lisp": {
@@ -1827,7 +1953,7 @@
      "storage.pqcf",
      "test.functions"
     ],
-    "started": "2026-10-14T01:17:05.926520+00:00",
+    "started": "2026-10-14T18:12:11.262354+00:00",
     "source": "results/correctness/common-lisp.json"
    },
    "kernel_cohort": {
@@ -2034,7 +2160,7 @@
       "storage.pqcf",
       "test.functions"
      ],
-     "started": "2026-10-14T01:50:12.190611+00:00",
+     "started": "2026-10-14T18:32:19.915044+00:00",
      "source": "results/correctness/x86_64-asm-engine.json"
     },
     "arm64-asm-engine": {
@@ -2115,13 +2241,67 @@
       "storage.pqcf",
       "test.functions"
      ],
-     "started": "2026-10-13T00:57:58.278921+00:00",
+     "started": "2026-10-14T18:32:23.894410+00:00",
      "source": "results/correctness/arm64-asm-engine.json"
     }
    }
   },
   "2_development_effort": {
    "java": {
+    "app-pqledger": [
+     {
+      "run_id": "a-app-pqledger-java-a1-20261014T170051Z",
+      "attempt": 1,
+      "outcome": "tests_failed",
+      "manifest": "experiments/runs/a-app-pqledger-java-a1-20261014T170051Z/manifest.json",
+      "cost_usd": null,
+      "tokens_output": 728,
+      "tokens_input_total": 15088404,
+      "turns": null,
+      "wall_seconds": 1403.5,
+      "tool_calls": 83,
+      "tool_failures": 3,
+      "build_failures": 2,
+      "repair_iterations": 0,
+      "commits": 1,
+      "lines_added": 4394,
+      "lines_removed": 1,
+      "files_changed": 63,
+      "conformance": {
+       "total": 731,
+       "pass": 731,
+       "fail": 0,
+       "error": 0,
+       "not_implemented": 0
+      }
+     },
+     {
+      "run_id": "a-app-pqledger-java-a1-s2-20261014T181408Z",
+      "attempt": 1,
+      "outcome": "success",
+      "manifest": "experiments/runs/a-app-pqledger-java-a1-s2-20261014T181408Z/manifest.json",
+      "cost_usd": 6.680131400000002,
+      "tokens_output": 38855,
+      "tokens_input_total": 5423123,
+      "turns": 57,
+      "wall_seconds": 861.0,
+      "tool_calls": 120,
+      "tool_failures": 3,
+      "build_failures": 16,
+      "repair_iterations": 0,
+      "commits": 2,
+      "lines_added": 2417,
+      "lines_removed": 5,
+      "files_changed": 14,
+      "conformance": {
+       "total": 731,
+       "pass": 731,
+       "fail": 0,
+       "error": 0,
+       "not_implemented": 0
+      }
+     }
+    ],
     "change-decimal38": [
      {
       "run_id": "a-change-decimal38-java-a1-20261011T063016Z",
@@ -2566,6 +2746,60 @@
     ]
    },
    "clojure": {
+    "app-pqledger": [
+     {
+      "run_id": "a-app-pqledger-clojure-a1-20261014T170053Z",
+      "attempt": 1,
+      "outcome": "tests_failed",
+      "manifest": "experiments/runs/a-app-pqledger-clojure-a1-20261014T170053Z/manifest.json",
+      "cost_usd": null,
+      "tokens_output": 664,
+      "tokens_input_total": 12159963,
+      "turns": null,
+      "wall_seconds": 1395.2,
+      "tool_calls": 77,
+      "tool_failures": 2,
+      "build_failures": 3,
+      "repair_iterations": 0,
+      "commits": 2,
+      "lines_added": 2749,
+      "lines_removed": 30,
+      "files_changed": 38,
+      "conformance": {
+       "total": 731,
+       "pass": 731,
+       "fail": 0,
+       "error": 0,
+       "not_implemented": 0
+      }
+     },
+     {
+      "run_id": "a-app-pqledger-clojure-a1-s2-20261014T181408Z",
+      "attempt": 1,
+      "outcome": "success",
+      "manifest": "experiments/runs/a-app-pqledger-clojure-a1-s2-20261014T181408Z/manifest.json",
+      "cost_usd": 2.7425198000000006,
+      "tokens_output": 41108,
+      "tokens_input_total": 4556652,
+      "turns": 54,
+      "wall_seconds": 640.6,
+      "tool_calls": 53,
+      "tool_failures": 1,
+      "build_failures": 8,
+      "repair_iterations": 0,
+      "commits": 2,
+      "lines_added": 1083,
+      "lines_removed": 4,
+      "files_changed": 6,
+      "conformance": {
+       "total": 731,
+       "pass": 731,
+       "fail": 0,
+       "error": 0,
+       "not_implemented": 0
+      }
+     }
+    ],
     "change-decimal38": [
      {
       "run_id": "a-change-decimal38-clojure-a1-20261011T060221Z",
@@ -2958,6 +3192,34 @@
     ]
    },
    "rust": {
+    "app-pqledger": [
+     {
+      "run_id": "a-app-pqledger-rust-a1-20261014T170050Z",
+      "attempt": 1,
+      "outcome": "success",
+      "manifest": "experiments/runs/a-app-pqledger-rust-a1-20261014T170050Z/manifest.json",
+      "cost_usd": 8.549238799999998,
+      "tokens_output": 148612,
+      "tokens_input_total": 16676989,
+      "turns": 98,
+      "wall_seconds": 1427.0,
+      "tool_calls": 98,
+      "tool_failures": 2,
+      "build_failures": 7,
+      "repair_iterations": 0,
+      "commits": 4,
+      "lines_added": 5759,
+      "lines_removed": 6,
+      "files_changed": 29,
+      "conformance": {
+       "total": 731,
+       "pass": 731,
+       "fail": 0,
+       "error": 0,
+       "not_implemented": 0
+      }
+     }
+    ],
     "change-decimal38": [
      {
       "run_id": "a-change-decimal38-rust-a1-20261011T060356Z",
@@ -3322,6 +3584,34 @@
     ]
    },
    "python": {
+    "app-pqledger": [
+     {
+      "run_id": "a-app-pqledger-python-a1-20261014T155131Z",
+      "attempt": 1,
+      "outcome": "success",
+      "manifest": "experiments/runs/a-app-pqledger-python-a1-20261014T155131Z/manifest.json",
+      "cost_usd": 8.867244799999996,
+      "tokens_output": 143262,
+      "tokens_input_total": 18698248,
+      "turns": 98,
+      "wall_seconds": 1932.4,
+      "tool_calls": 96,
+      "tool_failures": 4,
+      "build_failures": 5,
+      "repair_iterations": 0,
+      "commits": 7,
+      "lines_added": 4280,
+      "lines_removed": 50,
+      "files_changed": 37,
+      "conformance": {
+       "total": 731,
+       "pass": 731,
+       "fail": 0,
+       "error": 0,
+       "not_implemented": 0
+      }
+     }
+    ],
     "change-decimal38": [
      {
       "run_id": "a-change-decimal38-python-a1-20261011T060828Z",
@@ -3712,6 +4002,34 @@
     ]
    },
    "go": {
+    "app-pqledger": [
+     {
+      "run_id": "a-app-pqledger-go-a1-20261014T155133Z",
+      "attempt": 1,
+      "outcome": "success",
+      "manifest": "experiments/runs/a-app-pqledger-go-a1-20261014T155133Z/manifest.json",
+      "cost_usd": 11.854342600000003,
+      "tokens_output": 171494,
+      "tokens_input_total": 21844669,
+      "turns": 112,
+      "wall_seconds": 2775.6,
+      "tool_calls": 141,
+      "tool_failures": 3,
+      "build_failures": 4,
+      "repair_iterations": 0,
+      "commits": 5,
+      "lines_added": 6035,
+      "lines_removed": 6,
+      "files_changed": 35,
+      "conformance": {
+       "total": 731,
+       "pass": 731,
+       "fail": 0,
+       "error": 0,
+       "not_implemented": 0
+      }
+     }
+    ],
     "change-decimal38": [
      {
       "run_id": "a-change-decimal38-go-a1-20261011T060035Z",
@@ -4102,6 +4420,34 @@
     ]
    },
    "common-lisp": {
+    "app-pqledger": [
+     {
+      "run_id": "a-app-pqledger-common-lisp-a1-20261014T170049Z",
+      "attempt": 1,
+      "outcome": "success",
+      "manifest": "experiments/runs/a-app-pqledger-common-lisp-a1-20261014T170049Z/manifest.json",
+      "cost_usd": null,
+      "tokens_output": 910,
+      "tokens_input_total": 17810476,
+      "turns": null,
+      "wall_seconds": 1412.8,
+      "tool_calls": 95,
+      "tool_failures": 2,
+      "build_failures": 2,
+      "repair_iterations": 0,
+      "commits": 4,
+      "lines_added": 4077,
+      "lines_removed": 95,
+      "files_changed": 34,
+      "conformance": {
+       "total": 731,
+       "pass": 731,
+       "fail": 0,
+       "error": 0,
+       "not_implemented": 0
+      }
+     }
+    ],
     "change-decimal38": [
      {
       "run_id": "a-change-decimal38-common-lisp-a1-20261011T065327Z",
@@ -4718,6 +5064,86 @@
     ]
    },
    "x86_64-asm-engine": {
+    "app-pqledger": [
+     {
+      "run_id": "a-app-pqledger-x86_64-asm-engine-a1-20261014T170049Z",
+      "attempt": 1,
+      "outcome": "tests_failed",
+      "manifest": "experiments/runs/a-app-pqledger-x86_64-asm-engine-a1-20261014T170049Z/manifest.json",
+      "cost_usd": null,
+      "tokens_output": 1994,
+      "tokens_input_total": 27372522,
+      "turns": null,
+      "wall_seconds": 1414.9,
+      "tool_calls": 188,
+      "tool_failures": 8,
+      "build_failures": 9,
+      "repair_iterations": 0,
+      "commits": 6,
+      "lines_added": 10121,
+      "lines_removed": 10,
+      "files_changed": 26,
+      "conformance": {
+       "total": 731,
+       "pass": 731,
+       "fail": 0,
+       "error": 0,
+       "not_implemented": 0
+      }
+     },
+     {
+      "run_id": "a-app-pqledger-x86_64-asm-engine-a1-s2-20261014T172444Z",
+      "attempt": 1,
+      "outcome": "tests_failed",
+      "manifest": "experiments/runs/a-app-pqledger-x86_64-asm-engine-a1-s2-20261014T172444Z/manifest.json",
+      "cost_usd": null,
+      "tokens_output": 16,
+      "tokens_input_total": 16323,
+      "turns": null,
+      "wall_seconds": 2.1,
+      "tool_calls": 1,
+      "tool_failures": 0,
+      "build_failures": 0,
+      "repair_iterations": 0,
+      "commits": 0,
+      "lines_added": 0,
+      "lines_removed": 0,
+      "files_changed": 0,
+      "conformance": {
+       "total": 731,
+       "pass": 731,
+       "fail": 0,
+       "error": 0,
+       "not_implemented": 0
+      }
+     },
+     {
+      "run_id": "a-app-pqledger-x86_64-asm-engine-a1-s2-20261014T181408Z",
+      "attempt": 1,
+      "outcome": "success",
+      "manifest": "experiments/runs/a-app-pqledger-x86_64-asm-engine-a1-s2-20261014T181408Z/manifest.json",
+      "cost_usd": 6.2736506,
+      "tokens_output": 41975,
+      "tokens_input_total": 4975813,
+      "turns": 59,
+      "wall_seconds": 955.1,
+      "tool_calls": 128,
+      "tool_failures": 3,
+      "build_failures": 7,
+      "repair_iterations": 0,
+      "commits": 4,
+      "lines_added": 839,
+      "lines_removed": 8,
+      "files_changed": 9,
+      "conformance": {
+       "total": 731,
+       "pass": 731,
+       "fail": 0,
+       "error": 0,
+       "not_implemented": 0
+      }
+     }
+    ],
     "change-decimal38": [
      {
       "run_id": "a-change-decimal38-x86_64-asm-engine-a1-20261012T093746Z",
@@ -5056,6 +5482,86 @@
     ]
    },
    "arm64-asm-engine": {
+    "app-pqledger": [
+     {
+      "run_id": "a-app-pqledger-arm64-asm-engine-a1-20261014T170049Z",
+      "attempt": 1,
+      "outcome": "tests_failed",
+      "manifest": "experiments/runs/a-app-pqledger-arm64-asm-engine-a1-20261014T170049Z/manifest.json",
+      "cost_usd": null,
+      "tokens_output": 1767,
+      "tokens_input_total": 12789096,
+      "turns": null,
+      "wall_seconds": 1418.7,
+      "tool_calls": 109,
+      "tool_failures": 4,
+      "build_failures": 6,
+      "repair_iterations": 0,
+      "commits": 2,
+      "lines_added": 10143,
+      "lines_removed": 6,
+      "files_changed": 21,
+      "conformance": {
+       "total": 731,
+       "pass": 731,
+       "fail": 0,
+       "error": 0,
+       "not_implemented": 0
+      }
+     },
+     {
+      "run_id": "a-app-pqledger-arm64-asm-engine-a1-s2-20261014T172454Z",
+      "attempt": 1,
+      "outcome": "tests_failed",
+      "manifest": "experiments/runs/a-app-pqledger-arm64-asm-engine-a1-s2-20261014T172454Z/manifest.json",
+      "cost_usd": null,
+      "tokens_output": 8,
+      "tokens_input_total": 16458,
+      "turns": null,
+      "wall_seconds": 4.3,
+      "tool_calls": 1,
+      "tool_failures": 0,
+      "build_failures": 0,
+      "repair_iterations": 0,
+      "commits": 0,
+      "lines_added": 0,
+      "lines_removed": 0,
+      "files_changed": 0,
+      "conformance": {
+       "total": 731,
+       "pass": 731,
+       "fail": 0,
+       "error": 0,
+       "not_implemented": 0
+      }
+     },
+     {
+      "run_id": "a-app-pqledger-arm64-asm-engine-a1-s2-20261014T181408Z",
+      "attempt": 1,
+      "outcome": "success",
+      "manifest": "experiments/runs/a-app-pqledger-arm64-asm-engine-a1-s2-20261014T181408Z/manifest.json",
+      "cost_usd": 2.9146264,
+      "tokens_output": 46649,
+      "tokens_input_total": 4770662,
+      "turns": 59,
+      "wall_seconds": 454.4,
+      "tool_calls": 58,
+      "tool_failures": 1,
+      "build_failures": 2,
+      "repair_iterations": 0,
+      "commits": 3,
+      "lines_added": 1147,
+      "lines_removed": 67,
+      "files_changed": 7,
+      "conformance": {
+       "total": 731,
+       "pass": 731,
+       "fail": 0,
+       "error": 0,
+       "not_implemented": 0
+      }
+     }
+    ],
     "change-decimal38": [
      {
       "run_id": "a-change-decimal38-arm64-asm-engine-a1-20261012T093930Z",
@@ -52287,11 +52793,11 @@
   },
   "5_code_quality": {
    "java": {
-    "source_loc": 24306,
-    "test_loc": 3080,
-    "files": 169,
-    "comment_lines": 2554,
-    "comment_density": 0.105,
+    "source_loc": 27544,
+    "test_loc": 3753,
+    "files": 228,
+    "comment_lines": 3204,
+    "comment_density": 0.116,
     "largest_file_loc": 1213,
     "rubric_review": {
      "reviewers": {
@@ -52317,10 +52823,10 @@
     }
    },
    "clojure": {
-    "source_loc": 12696,
-    "test_loc": 2073,
-    "files": 66,
-    "comment_lines": 414,
+    "source_loc": 14502,
+    "test_loc": 2538,
+    "files": 84,
+    "comment_lines": 481,
     "comment_density": 0.033,
     "largest_file_loc": 860,
     "rubric_review": {
@@ -52347,11 +52853,11 @@
     }
    },
    "rust": {
-    "source_loc": 25744,
-    "test_loc": 4612,
-    "files": 89,
-    "comment_lines": 2561,
-    "comment_density": 0.099,
+    "source_loc": 28879,
+    "test_loc": 5339,
+    "files": 105,
+    "comment_lines": 2949,
+    "comment_density": 0.102,
     "largest_file_loc": 1185,
     "rubric_review": {
      "reviewers": {
@@ -52377,11 +52883,11 @@
     }
    },
    "python": {
-    "source_loc": 14550,
-    "test_loc": 2423,
-    "files": 80,
-    "comment_lines": 1008,
-    "comment_density": 0.069,
+    "source_loc": 16408,
+    "test_loc": 3083,
+    "files": 99,
+    "comment_lines": 1160,
+    "comment_density": 0.071,
     "largest_file_loc": 988,
     "rubric_review": {
      "reviewers": {
@@ -52407,11 +52913,11 @@
     }
    },
    "go": {
-    "source_loc": 25827,
-    "test_loc": 4589,
-    "files": 97,
-    "comment_lines": 2756,
-    "comment_density": 0.107,
+    "source_loc": 29068,
+    "test_loc": 5494,
+    "files": 117,
+    "comment_lines": 3201,
+    "comment_density": 0.11,
     "largest_file_loc": 1253,
     "rubric_review": {
      "reviewers": {
@@ -52437,11 +52943,11 @@
     }
    },
    "common-lisp": {
-    "source_loc": 15338,
-    "test_loc": 1992,
-    "files": 67,
-    "comment_lines": 1419,
-    "comment_density": 0.093,
+    "source_loc": 17243,
+    "test_loc": 2341,
+    "files": 83,
+    "comment_lines": 1560,
+    "comment_density": 0.09,
     "largest_file_loc": 869,
     "rubric_review": {
      "reviewers": {
@@ -52527,11 +53033,11 @@
     }
    },
    "x86_64-asm-engine": {
-    "source_loc": 35855,
-    "test_loc": 5215,
-    "files": 39,
-    "comment_lines": 2778,
-    "comment_density": 0.077,
+    "source_loc": 43113,
+    "test_loc": 6179,
+    "files": 50,
+    "comment_lines": 3628,
+    "comment_density": 0.084,
     "largest_file_loc": 3635,
     "rubric_review": {
      "reviewers": {
@@ -52557,11 +53063,11 @@
     }
    },
    "arm64-asm-engine": {
-    "source_loc": 36233,
-    "test_loc": 7604,
-    "files": 44,
-    "comment_lines": 5248,
-    "comment_density": 0.145,
+    "source_loc": 42811,
+    "test_loc": 9569,
+    "files": 55,
+    "comment_lines": 6135,
+    "comment_density": 0.143,
     "largest_file_loc": 2610,
     "rubric_review": {
      "reviewers": {
@@ -89403,31 +89909,31 @@
    "per_language": {
     "java": {
      "pass_rate": 1.0,
-     "dev_cost_usd": 183.5536192,
+     "dev_cost_usd": 190.2337506,
      "correctness_gate": true,
      "geomean_latency_s": 0.01952113381401071
     },
     "clojure": {
      "pass_rate": 1.0,
-     "dev_cost_usd": 131.094696,
+     "dev_cost_usd": 133.8372158,
      "correctness_gate": true,
      "geomean_latency_s": 0.04102248373571039
     },
     "rust": {
      "pass_rate": 1.0,
-     "dev_cost_usd": 168.5224938,
+     "dev_cost_usd": 177.07173260000002,
      "correctness_gate": true,
      "geomean_latency_s": 0.014198913536505592
     },
     "python": {
      "pass_rate": 1.0,
-     "dev_cost_usd": 144.53642660000003,
+     "dev_cost_usd": 153.4036714,
      "correctness_gate": true,
      "geomean_latency_s": 0.23965634933172267
     },
     "go": {
      "pass_rate": 1.0,
-     "dev_cost_usd": 142.3368686,
+     "dev_cost_usd": 154.19121120000003,
      "correctness_gate": true,
      "geomean_latency_s": 0.012350549859500518
     },
@@ -89464,7 +89970,7 @@
    "asm_engine_cohort": {
     "x86_64-asm-engine": {
      "correctness_gate": true,
-     "dev_cost_usd": 160.9486512,
+     "dev_cost_usd": 167.2223018,
      "geomean_latency_s": 0.0024753766204237047,
      "bench_id": "20261014T115525Z-1m-rebench-main-and-asm-x86",
      "host_cpu": "AMD Ryzen 9 9950X3D 16-Core Processor",
@@ -89472,7 +89978,7 @@
     },
     "arm64-asm-engine": {
      "correctness_gate": true,
-     "dev_cost_usd": 188.6735352,
+     "dev_cost_usd": 191.5881616,
      "geomean_latency_s": 0.0027609196436371984,
      "bench_id": "20261014T115549Z-1m-rebench-asm-arm",
      "host_cpu": "spark (Cortex-A725/Cortex-X925)",
