@@ -8,8 +8,10 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"path/filepath"
 	"strconv"
+	"strings"
 
 	"polyquery"
 	"polyquery/app/internal/bank"
@@ -239,7 +241,13 @@ func prepareMerchants(inv *invocation) (commandFunc, error) {
 	}
 	top := int64(10)
 	if v, ok := inv.opts["--top"]; ok {
-		if top, err = strconv.ParseInt(v, 10, 64); err != nil || top < 1 || v[0] == '+' {
+		if v == "" || strings.Trim(v, "0123456789") != "" {
+			return nil, usagef("--top needs an integer ≥ 1, got %q", v)
+		}
+		if top, err = strconv.ParseInt(v, 10, 64); err != nil {
+			top = math.MaxInt64 // more rows than any ledger has
+		}
+		if top < 1 {
 			return nil, usagef("--top needs an integer ≥ 1, got %q", v)
 		}
 	}
@@ -261,7 +269,7 @@ func prepareList(inv *invocation) (commandFunc, error) {
 	case uncategorized:
 		f.Category = config.Uncategorized
 	case hasCategory:
-		if !config.ValidCategory(c) && c != config.Uncategorized {
+		if !config.ValidCategory(c) {
 			return nil, usagef("invalid category name %q (expected [a-z0-9_-]{1,32})", c)
 		}
 		f.Category = c

@@ -143,3 +143,15 @@ func TestHeaderlessAndInvert(t *testing.T) {
 		t.Errorf("txs = %+v", txs)
 	}
 }
+
+func TestQuoteErrorsNameTheRecordStart(t *testing.T) {
+	im := settings(t, "")
+	for _, text := range []string{
+		"Date,Description,Amount\n2026-01-05,\"Multi\nline\",-1.00\n2026-01-06,\"a\nb\"x,1\n",
+		"Date,Description,Amount\n2026-01-05,\"Multi\nline\",-1.00\n2026-01-06,\"a\nb\",1,\"x\ny\n",
+	} {
+		if _, err := Parse("a.csv", []byte(text), im); err == nil || !strings.HasPrefix(err.Error(), "a.csv:4:") {
+			t.Errorf("%q: err = %v, want a.csv:4:", text, err)
+		}
+	}
+}

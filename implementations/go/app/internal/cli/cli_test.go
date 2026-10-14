@@ -162,7 +162,7 @@ func TestUsageAndConfigErrors(t *testing.T) {
 		{"set-category", "1", "x", "--clear"}, {"set-category", "1"}, {"report", "merchants", "--top", "0"},
 		{"--format", "xml", "accounts"}, {"accounts", "extra"}, {"budget"}, {"budget", "--month", "2026-01", "--from", "2026-01"},
 		{"report", "monthly", "--month", "2026-01", "--month", "2026-02"}, {"list", "--category", "a", "--uncategorized"},
-		{"report", "monthly", "--month"}, {"query"}, {"query", "a", "b"},
+		{"report", "monthly", "--month"}, {"query"}, {"query", "a", "b"}, {"list", "--category", "uncategorized"},
 	} {
 		f.expect(exitUsage, "", args...)
 	}

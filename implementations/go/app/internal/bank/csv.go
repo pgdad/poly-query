@@ -2,7 +2,10 @@
 // into transactions (spec/apps/pqledger.md §6.2, §6.3).
 package bank
 
-import "fmt"
+import (
+	"errors"
+	"fmt"
+)
 
 // record is one CSV record and the 1-based physical line it starts on.
 type record struct {
@@ -49,7 +52,8 @@ func (r *csvReader) next() (*record, error) {
 	for {
 		field, err := r.field()
 		if err != nil {
-			return nil, err
+			// Errors name the line the record starts on.
+			return nil, &lineError{rec.line, err.Error()}
 		}
 		rec.fields = append(rec.fields, field)
 		if r.pos >= len(s) {
@@ -75,12 +79,11 @@ func (r *csvReader) next() (*record, error) {
 func (r *csvReader) field() (string, error) {
 	s := r.s
 	if r.pos < len(s) && s[r.pos] == '"' {
-		start := r.line
 		r.pos++
 		var b []byte
 		for {
 			if r.pos >= len(s) {
-				return "", &lineError{start, "unterminated quoted field"}
+				return "", errors.New("unterminated quoted field")
 			}
 			c := s[r.pos]
 			if c == '"' {
@@ -99,7 +102,7 @@ func (r *csvReader) field() (string, error) {
 			r.pos++
 		}
 		if r.pos < len(s) && !r.atEnd() {
-			return "", &lineError{r.line, "unexpected character after a closing quote"}
+			return "", errors.New("unexpected character after a closing quote")
 		}
 		return string(b), nil
 	}

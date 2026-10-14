@@ -1383,9 +1383,10 @@ Observations:
   1.2-million-transaction ledger `accounts`, `report monthly` and `report
   merchants` take ≤ 0.12 s, the category-based commands (`report
   categories`, `budget`, `list`) ≈ 1.1 s and a full `export` 1.8 s.
-* **pqledger decisions** where the application spec is silent: `--category
-  uncategorized` is accepted as a synonym of `--uncategorized`; an
-  `[engine] threads`/`memory_mb` beyond what the engine can use is capped
+* **pqledger decisions** where the application spec is silent:
+  `--category` takes a category name, so `--category uncategorized` is a
+  usage error (use `--uncategorized`); `--top` beyond INT64 means "all";
+  an `[engine] threads`/`memory_mb` beyond what the engine can use is capped
   (256 threads, 8 TiB); a header-less import of an empty file imports
   nothing, while a missing header record (with `header = true`) is an
   import error; a quote inside an unquoted CSV field is literal (as in

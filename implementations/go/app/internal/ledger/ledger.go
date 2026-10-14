@@ -5,9 +5,7 @@ package ledger
 
 import (
 	"context"
-	"errors"
 	"fmt"
-	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
@@ -108,7 +106,7 @@ func Init(dir string, s Settings) error {
 
 func exists(path string) bool {
 	_, err := os.Stat(path)
-	return err == nil || !errors.Is(err, fs.ErrNotExist)
+	return err == nil
 }
 
 // Open loads an existing ledger.
