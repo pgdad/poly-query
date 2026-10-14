@@ -1,0 +1,6 @@
+#!/bin/sh
+# pqledger launcher: runs the application in isolated mode (no user site, no
+# PYTHON* environment, no current directory on sys.path). The engine is used
+# in-process through the embedding API; no other process is started.
+HERE=$(dirname "$(readlink -f "$0")")
+exec python3 -I "$HERE/../app/entry.py" "$@"
