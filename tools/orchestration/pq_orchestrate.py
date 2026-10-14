@@ -441,7 +441,8 @@ def run(run_id: str, timeout_min: int, budget_usd: float, max_turns: int | None)
 # a run continue into paid overage (thresholds overridable via environment).
 MAX_5H_START = float(os.environ.get("PQ_MAX_5H_UTIL_START", "0.8"))
 MAX_5H_RUN = float(os.environ.get("PQ_MAX_5H_UTIL_RUN", "0.95"))
-MAX_7D_START = float(os.environ.get("PQ_MAX_7D_UTIL_START", "0.8"))
+MAX_7D_START = float(os.environ.get("PQ_MAX_7D_UTIL_START", "0.98"))
+MAX_7D_RUN = float(os.environ.get("PQ_MAX_7D_UTIL_RUN", "0.98"))
 
 
 def usage_violation(ev: dict) -> str | None:
@@ -450,11 +451,16 @@ def usage_violation(ev: dict) -> str | None:
     info = ev.get("rate_limit_info") or {}
     if info.get("isUsingOverage"):
         return "agent is using paid overage"
-    if info.get("status") not in (None, "allowed"):
+    windows = info.get("unifiedWindows") or {}
+    five = (windows.get("five_hour") or {}).get("utilization")
+    week = (windows.get("seven_day") or {}).get("utilization")
+    # allowed_warning is only a threshold notice; the utilization limits below still apply
+    if info.get("status") not in (None, "allowed", "allowed_warning"):
         return f"rate-limit status {info.get('status')}"
-    five = ((info.get("unifiedWindows") or {}).get("five_hour") or {}).get("utilization")
     if five is not None and five >= MAX_5H_RUN:
         return f"five_hour utilization {five:.2f} >= {MAX_5H_RUN}"
+    if week is not None and week >= MAX_7D_RUN:
+        return f"seven_day utilization {week:.2f} >= {MAX_7D_RUN}"
     return None
 
 
