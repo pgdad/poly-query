@@ -1,0 +1,9 @@
+consume arm64-asm-engine -> arm64-asm-engine: ok
+consume clojure -> arm64-asm-engine: ok
+consume common-lisp -> arm64-asm-engine: ok
+consume go -> arm64-asm-engine: ok
+consume java -> arm64-asm-engine: ok
+consume python -> arm64-asm-engine: ok
+consume reference -> arm64-asm-engine: ok
+consume rust -> arm64-asm-engine: ok
+consume x86_64-asm-engine -> arm64-asm-engine: ok

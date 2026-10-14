@@ -1,0 +1,50 @@
+{
+ "arm64-asm-engine__arm64-asm-engine": {
+  "producer": "arm64-asm-engine",
+  "writer": "arm64-asm-engine",
+  "ok": true,
+  "failures": []
+ },
+ "arm64-asm-engine__clojure": {
+  "producer": "arm64-asm-engine",
+  "writer": "clojure",
+  "ok": true,
+  "failures": []
+ },
+ "arm64-asm-engine__common-lisp": {
+  "producer": "arm64-asm-engine",
+  "writer": "common-lisp",
+  "ok": true,
+  "failures": []
+ },
+ "arm64-asm-engine__go": {
+  "producer": "arm64-asm-engine",
+  "writer": "go",
+  "ok": true,
+  "failures": []
+ },
+ "arm64-asm-engine__java": {
+  "producer": "arm64-asm-engine",
+  "writer": "java",
+  "ok": true,
+  "failures": []
+ },
+ "arm64-asm-engine__python": {
+  "producer": "arm64-asm-engine",
+  "writer": "python",
+  "ok": true,
+  "failures": []
+ },
+ "arm64-asm-engine__rust": {
+  "producer": "arm64-asm-engine",
+  "writer": "rust",
+  "ok": true,
+  "failures": []
+ },
+ "arm64-asm-engine__x86_64-asm-engine": {
+  "producer": "arm64-asm-engine",
+  "writer": "x86_64-asm-engine",
+  "ok": true,
+  "failures": []
+ }
+}

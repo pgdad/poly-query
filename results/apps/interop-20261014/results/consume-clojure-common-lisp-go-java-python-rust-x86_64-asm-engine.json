@@ -1,0 +1,380 @@
+{
+ "arm64-asm-engine__python": {
+  "producer": "arm64-asm-engine",
+  "consumer": "python",
+  "ok": true,
+  "failures": []
+ },
+ "clojure__python": {
+  "producer": "clojure",
+  "consumer": "python",
+  "ok": true,
+  "failures": []
+ },
+ "common-lisp__python": {
+  "producer": "common-lisp",
+  "consumer": "python",
+  "ok": true,
+  "failures": []
+ },
+ "go__python": {
+  "producer": "go",
+  "consumer": "python",
+  "ok": true,
+  "failures": []
+ },
+ "java__python": {
+  "producer": "java",
+  "consumer": "python",
+  "ok": true,
+  "failures": []
+ },
+ "python__python": {
+  "producer": "python",
+  "consumer": "python",
+  "ok": true,
+  "failures": []
+ },
+ "reference__python": {
+  "producer": "reference",
+  "consumer": "python",
+  "ok": true,
+  "failures": []
+ },
+ "rust__python": {
+  "producer": "rust",
+  "consumer": "python",
+  "ok": true,
+  "failures": []
+ },
+ "x86_64-asm-engine__python": {
+  "producer": "x86_64-asm-engine",
+  "consumer": "python",
+  "ok": true,
+  "failures": []
+ },
+ "arm64-asm-engine__go": {
+  "producer": "arm64-asm-engine",
+  "consumer": "go",
+  "ok": true,
+  "failures": []
+ },
+ "clojure__go": {
+  "producer": "clojure",
+  "consumer": "go",
+  "ok": true,
+  "failures": []
+ },
+ "common-lisp__go": {
+  "producer": "common-lisp",
+  "consumer": "go",
+  "ok": true,
+  "failures": []
+ },
+ "go__go": {
+  "producer": "go",
+  "consumer": "go",
+  "ok": true,
+  "failures": []
+ },
+ "java__go": {
+  "producer": "java",
+  "consumer": "go",
+  "ok": true,
+  "failures": []
+ },
+ "python__go": {
+  "producer": "python",
+  "consumer": "go",
+  "ok": true,
+  "failures": []
+ },
+ "reference__go": {
+  "producer": "reference",
+  "consumer": "go",
+  "ok": true,
+  "failures": []
+ },
+ "rust__go": {
+  "producer": "rust",
+  "consumer": "go",
+  "ok": true,
+  "failures": []
+ },
+ "x86_64-asm-engine__go": {
+  "producer": "x86_64-asm-engine",
+  "consumer": "go",
+  "ok": true,
+  "failures": []
+ },
+ "arm64-asm-engine__rust": {
+  "producer": "arm64-asm-engine",
+  "consumer": "rust",
+  "ok": true,
+  "failures": []
+ },
+ "clojure__rust": {
+  "producer": "clojure",
+  "consumer": "rust",
+  "ok": true,
+  "failures": []
+ },
+ "common-lisp__rust": {
+  "producer": "common-lisp",
+  "consumer": "rust",
+  "ok": true,
+  "failures": []
+ },
+ "go__rust": {
+  "producer": "go",
+  "consumer": "rust",
+  "ok": true,
+  "failures": []
+ },
+ "java__rust": {
+  "producer": "java",
+  "consumer": "rust",
+  "ok": true,
+  "failures": []
+ },
+ "python__rust": {
+  "producer": "python",
+  "consumer": "rust",
+  "ok": true,
+  "failures": []
+ },
+ "reference__rust": {
+  "producer": "reference",
+  "consumer": "rust",
+  "ok": true,
+  "failures": []
+ },
+ "rust__rust": {
+  "producer": "rust",
+  "consumer": "rust",
+  "ok": true,
+  "failures": []
+ },
+ "x86_64-asm-engine__rust": {
+  "producer": "x86_64-asm-engine",
+  "consumer": "rust",
+  "ok": true,
+  "failures": []
+ },
+ "arm64-asm-engine__java": {
+  "producer": "arm64-asm-engine",
+  "consumer": "java",
+  "ok": true,
+  "failures": []
+ },
+ "clojure__java": {
+  "producer": "clojure",
+  "consumer": "java",
+  "ok": true,
+  "failures": []
+ },
+ "common-lisp__java": {
+  "producer": "common-lisp",
+  "consumer": "java",
+  "ok": true,
+  "failures": []
+ },
+ "go__java": {
+  "producer": "go",
+  "consumer": "java",
+  "ok": true,
+  "failures": []
+ },
+ "java__java": {
+  "producer": "java",
+  "consumer": "java",
+  "ok": true,
+  "failures": []
+ },
+ "python__java": {
+  "producer": "python",
+  "consumer": "java",
+  "ok": true,
+  "failures": []
+ },
+ "reference__java": {
+  "producer": "reference",
+  "consumer": "java",
+  "ok": true,
+  "failures": []
+ },
+ "rust__java": {
+  "producer": "rust",
+  "consumer": "java",
+  "ok": true,
+  "failures": []
+ },
+ "x86_64-asm-engine__java": {
+  "producer": "x86_64-asm-engine",
+  "consumer": "java",
+  "ok": true,
+  "failures": []
+ },
+ "arm64-asm-engine__clojure": {
+  "producer": "arm64-asm-engine",
+  "consumer": "clojure",
+  "ok": true,
+  "failures": []
+ },
+ "clojure__clojure": {
+  "producer": "clojure",
+  "consumer": "clojure",
+  "ok": true,
+  "failures": []
+ },
+ "common-lisp__clojure": {
+  "producer": "common-lisp",
+  "consumer": "clojure",
+  "ok": true,
+  "failures": []
+ },
+ "go__clojure": {
+  "producer": "go",
+  "consumer": "clojure",
+  "ok": true,
+  "failures": []
+ },
+ "java__clojure": {
+  "producer": "java",
+  "consumer": "clojure",
+  "ok": true,
+  "failures": []
+ },
+ "python__clojure": {
+  "producer": "python",
+  "consumer": "clojure",
+  "ok": true,
+  "failures": []
+ },
+ "reference__clojure": {
+  "producer": "reference",
+  "consumer": "clojure",
+  "ok": true,
+  "failures": []
+ },
+ "rust__clojure": {
+  "producer": "rust",
+  "consumer": "clojure",
+  "ok": true,
+  "failures": []
+ },
+ "x86_64-asm-engine__clojure": {
+  "producer": "x86_64-asm-engine",
+  "consumer": "clojure",
+  "ok": true,
+  "failures": []
+ },
+ "arm64-asm-engine__common-lisp": {
+  "producer": "arm64-asm-engine",
+  "consumer": "common-lisp",
+  "ok": true,
+  "failures": []
+ },
+ "clojure__common-lisp": {
+  "producer": "clojure",
+  "consumer": "common-lisp",
+  "ok": true,
+  "failures": []
+ },
+ "common-lisp__common-lisp": {
+  "producer": "common-lisp",
+  "consumer": "common-lisp",
+  "ok": true,
+  "failures": []
+ },
+ "go__common-lisp": {
+  "producer": "go",
+  "consumer": "common-lisp",
+  "ok": true,
+  "failures": []
+ },
+ "java__common-lisp": {
+  "producer": "java",
+  "consumer": "common-lisp",
+  "ok": true,
+  "failures": []
+ },
+ "python__common-lisp": {
+  "producer": "python",
+  "consumer": "common-lisp",
+  "ok": true,
+  "failures": []
+ },
+ "reference__common-lisp": {
+  "producer": "reference",
+  "consumer": "common-lisp",
+  "ok": true,
+  "failures": []
+ },
+ "rust__common-lisp": {
+  "producer": "rust",
+  "consumer": "common-lisp",
+  "ok": true,
+  "failures": []
+ },
+ "x86_64-asm-engine__common-lisp": {
+  "producer": "x86_64-asm-engine",
+  "consumer": "common-lisp",
+  "ok": true,
+  "failures": []
+ },
+ "arm64-asm-engine__x86_64-asm-engine": {
+  "producer": "arm64-asm-engine",
+  "consumer": "x86_64-asm-engine",
+  "ok": true,
+  "failures": []
+ },
+ "clojure__x86_64-asm-engine": {
+  "producer": "clojure",
+  "consumer": "x86_64-asm-engine",
+  "ok": true,
+  "failures": []
+ },
+ "common-lisp__x86_64-asm-engine": {
+  "producer": "common-lisp",
+  "consumer": "x86_64-asm-engine",
+  "ok": true,
+  "failures": []
+ },
+ "go__x86_64-asm-engine": {
+  "producer": "go",
+  "consumer": "x86_64-asm-engine",
+  "ok": true,
+  "failures": []
+ },
+ "java__x86_64-asm-engine": {
+  "producer": "java",
+  "consumer": "x86_64-asm-engine",
+  "ok": true,
+  "failures": []
+ },
+ "python__x86_64-asm-engine": {
+  "producer": "python",
+  "consumer": "x86_64-asm-engine",
+  "ok": true,
+  "failures": []
+ },
+ "reference__x86_64-asm-engine": {
+  "producer": "reference",
+  "consumer": "x86_64-asm-engine",
+  "ok": true,
+  "failures": []
+ },
+ "rust__x86_64-asm-engine": {
+  "producer": "rust",
+  "consumer": "x86_64-asm-engine",
+  "ok": true,
+  "failures": []
+ },
+ "x86_64-asm-engine__x86_64-asm-engine": {
+  "producer": "x86_64-asm-engine",
+  "consumer": "x86_64-asm-engine",
+  "ok": true,
+  "failures": []
+ }
+}

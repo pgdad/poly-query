@@ -1,0 +1,61 @@
+make: Entering directory '/srv/pqrunner/jobs/interop-20261014T183932Z-1262509/repo/implementations/arm64-asm-engine'
+cc -Iinclude -g -Wa,--fatal-warnings -c -o build/access.o src/access.S
+cc -Iinclude -g -Wa,--fatal-warnings -c -o build/api.o src/api.S
+cc -Iinclude -g -Wa,--fatal-warnings -c -o build/binder.o src/binder.S
+cc -Iinclude -g -Wa,--fatal-warnings -c -o build/catalog.o src/catalog.S
+cc -Iinclude -g -Wa,--fatal-warnings -c -o build/datetime.o src/datetime.S
+cc -Iinclude -g -Wa,--fatal-warnings -c -o build/decimal.o src/decimal.S
+cc -Iinclude -g -Wa,--fatal-warnings -c -o build/eval.o src/eval.S
+cc -Iinclude -g -Wa,--fatal-warnings -c -o build/exec.o src/exec.S
+cc -Iinclude -g -Wa,--fatal-warnings -c -o build/functions.o src/functions.S
+cc -Iinclude -g -Wa,--fatal-warnings -c -o build/http.o src/http.S
+cc -Iinclude -g -Wa,--fatal-warnings -c -o build/index.o src/index.S
+cc -Iinclude -g -Wa,--fatal-warnings -c -o build/ingest.o src/ingest.S
+cc -Iinclude -g -Wa,--fatal-warnings -c -o build/join.o src/join.S
+cc -Iinclude -g -Wa,--fatal-warnings -c -o build/json.o src/json.S
+cc -Iinclude -g -Wa,--fatal-warnings -c -o build/lexer.o src/lexer.S
+cc -Iinclude -g -Wa,--fatal-warnings -c -o build/log.o src/log.S
+cc -Iinclude -g -Wa,--fatal-warnings -c -o build/logical.o src/logical.S
+cc -Iinclude -g -Wa,--fatal-warnings -c -o build/main.o src/main.S
+cc -Iinclude -g -Wa,--fatal-warnings -c -o build/ops.o src/ops.S
+cc -Iinclude -g -Wa,--fatal-warnings -c -o build/optimize.o src/optimize.S
+cc -Iinclude -g -Wa,--fatal-warnings -c -o build/parallel.o src/parallel.S
+cc -Iinclude -g -Wa,--fatal-warnings -c -o build/parser.o src/parser.S
+cc -Iinclude -g -Wa,--fatal-warnings -c -o build/physical.o src/physical.S
+cc -Iinclude -g -Wa,--fatal-warnings -c -o build/plan.o src/plan.S
+cc -Iinclude -g -Wa,--fatal-warnings -c -o build/pqcf.o src/pqcf.S
+cc -Iinclude -g -Wa,--fatal-warnings -c -o build/protocol.o src/protocol.S
+cc -Iinclude -g -Wa,--fatal-warnings -c -o build/rt.o src/rt.S
+cc -Iinclude -g -Wa,--fatal-warnings -c -o build/rule_fold.o src/rule_fold.S
+cc -Iinclude -g -Wa,--fatal-warnings -c -o build/rule_joinorder.o src/rule_joinorder.S
+cc -Iinclude -g -Wa,--fatal-warnings -c -o build/rule_prune.o src/rule_prune.S
+cc -Iinclude -g -Wa,--fatal-warnings -c -o build/rule_pushdown.o src/rule_pushdown.S
+cc -Iinclude -g -Wa,--fatal-warnings -c -o build/rule_simplify.o src/rule_simplify.S
+cc -Iinclude -g -Wa,--fatal-warnings -c -o build/server.o src/server.S
+cc -Iinclude -g -Wa,--fatal-warnings -c -o build/sort.o src/sort.S
+cc -Iinclude -g -Wa,--fatal-warnings -c -o build/storage.o src/storage.S
+cc -Iinclude -g -Wa,--fatal-warnings -c -o build/strfuncs.o src/strfuncs.S
+cc -Iinclude -g -Wa,--fatal-warnings -c -o build/types.o src/types.S
+cc -Iinclude -g -Wa,--fatal-warnings -c -o build/vagg.o src/vagg.S
+cc -Iinclude -g -Wa,--fatal-warnings -c -o build/values.o src/values.S
+cc -Iinclude -g -Wa,--fatal-warnings -c -o build/vexec.o src/vexec.S
+cc -Iinclude -g -Wa,--fatal-warnings -c -o build/volcano.o src/volcano.S
+cc -Iinclude -g -Wa,--fatal-warnings -c -o build/wdec.o src/wdec.S
+cc -g -o build/polyquery build/access.o build/api.o build/binder.o build/catalog.o build/datetime.o build/decimal.o build/eval.o build/exec.o build/functions.o build/http.o build/index.o build/ingest.o build/join.o build/json.o build/lexer.o build/log.o build/logical.o build/main.o build/ops.o build/optimize.o build/parallel.o build/parser.o build/physical.o build/plan.o build/pqcf.o build/protocol.o build/rt.o build/rule_fold.o build/rule_joinorder.o build/rule_prune.o build/rule_pushdown.o build/rule_simplify.o build/server.o build/sort.o build/storage.o build/strfuncs.o build/types.o build/vagg.o build/values.o build/vexec.o build/volcano.o build/wdec.o -lm -lpthread
+ld -r -o build/libpolyquery-all.o build/access.o build/api.o build/binder.o build/catalog.o build/datetime.o build/decimal.o build/eval.o build/exec.o build/functions.o build/http.o build/index.o build/ingest.o build/join.o build/json.o build/lexer.o build/log.o build/logical.o build/ops.o build/optimize.o build/parallel.o build/parser.o build/physical.o build/plan.o build/pqcf.o build/protocol.o build/rt.o build/rule_fold.o build/rule_joinorder.o build/rule_prune.o build/rule_pushdown.o build/rule_simplify.o build/server.o build/sort.o build/storage.o build/strfuncs.o build/types.o build/vagg.o build/values.o build/vexec.o build/volcano.o build/wdec.o
+objcopy -G pq_create -G pq_close -G pq_errcode -G pq_errname -G pq_errmsg -G pq_code_name -G pq_load_file -G pq_load_text -G pq_save -G pq_open -G pq_drop -G pq_tables -G pq_schema -G pq_query -G pq_query_into -G pq_result_free -G pq_value_at -G pq_format_value -G pq_version build/libpolyquery-all.o build/libpolyquery.o
+rm -f lib/libpolyquery.a
+ar rcs lib/libpolyquery.a build/libpolyquery.o
+cc -Iapp -Iinclude -g -Wa,--fatal-warnings -c -o build/app/bankcsv.o app/bankcsv.S
+cc -Iapp -Iinclude -g -Wa,--fatal-warnings -c -o build/app/commands.o app/commands.S
+cc -Iapp -Iinclude -g -Wa,--fatal-warnings -c -o build/app/config.o app/config.S
+cc -Iapp -Iinclude -g -Wa,--fatal-warnings -c -o build/app/main.o app/main.S
+cc -Iapp -Iinclude -g -Wa,--fatal-warnings -c -o build/app/options.o app/options.S
+cc -Iapp -Iinclude -g -Wa,--fatal-warnings -c -o build/app/output.o app/output.S
+cc -Iapp -Iinclude -g -Wa,--fatal-warnings -c -o build/app/util.o app/util.S
+cc -g -o build/pqledger build/app/bankcsv.o build/app/commands.o build/app/config.o build/app/main.o build/app/options.o build/app/output.o build/app/util.o -Llib -lpolyquery -lm -lpthread
+/usr/bin/make -C examples/embed-demo POLYQUERY=/srv/pqrunner/jobs/interop-20261014T183932Z-1262509/repo/implementations/arm64-asm-engine
+make[1]: Entering directory '/srv/pqrunner/jobs/interop-20261014T183932Z-1262509/repo/implementations/arm64-asm-engine/examples/embed-demo'
+cc -I/srv/pqrunner/jobs/interop-20261014T183932Z-1262509/repo/implementations/arm64-asm-engine/include -g -Wa,--fatal-warnings -o build/pq-embed-demo demo.S -L/srv/pqrunner/jobs/interop-20261014T183932Z-1262509/repo/implementations/arm64-asm-engine/lib -lpolyquery -lm -lpthread
+make[1]: Leaving directory '/srv/pqrunner/jobs/interop-20261014T183932Z-1262509/repo/implementations/arm64-asm-engine/examples/embed-demo'
+make: Leaving directory '/srv/pqrunner/jobs/interop-20261014T183932Z-1262509/repo/implementations/arm64-asm-engine'

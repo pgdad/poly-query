@@ -1,0 +1,338 @@
+{
+ "python__arm64-asm-engine": {
+  "producer": "python",
+  "writer": "arm64-asm-engine",
+  "ok": true,
+  "failures": []
+ },
+ "python__clojure": {
+  "producer": "python",
+  "writer": "clojure",
+  "ok": true,
+  "failures": []
+ },
+ "python__common-lisp": {
+  "producer": "python",
+  "writer": "common-lisp",
+  "ok": true,
+  "failures": []
+ },
+ "python__go": {
+  "producer": "python",
+  "writer": "go",
+  "ok": true,
+  "failures": []
+ },
+ "python__java": {
+  "producer": "python",
+  "writer": "java",
+  "ok": true,
+  "failures": []
+ },
+ "python__python": {
+  "producer": "python",
+  "writer": "python",
+  "ok": true,
+  "failures": []
+ },
+ "python__rust": {
+  "producer": "python",
+  "writer": "rust",
+  "ok": true,
+  "failures": []
+ },
+ "python__x86_64-asm-engine": {
+  "producer": "python",
+  "writer": "x86_64-asm-engine",
+  "ok": true,
+  "failures": []
+ },
+ "go__arm64-asm-engine": {
+  "producer": "go",
+  "writer": "arm64-asm-engine",
+  "ok": true,
+  "failures": []
+ },
+ "go__clojure": {
+  "producer": "go",
+  "writer": "clojure",
+  "ok": true,
+  "failures": []
+ },
+ "go__common-lisp": {
+  "producer": "go",
+  "writer": "common-lisp",
+  "ok": true,
+  "failures": []
+ },
+ "go__go": {
+  "producer": "go",
+  "writer": "go",
+  "ok": true,
+  "failures": []
+ },
+ "go__java": {
+  "producer": "go",
+  "writer": "java",
+  "ok": true,
+  "failures": []
+ },
+ "go__python": {
+  "producer": "go",
+  "writer": "python",
+  "ok": true,
+  "failures": []
+ },
+ "go__rust": {
+  "producer": "go",
+  "writer": "rust",
+  "ok": true,
+  "failures": []
+ },
+ "go__x86_64-asm-engine": {
+  "producer": "go",
+  "writer": "x86_64-asm-engine",
+  "ok": true,
+  "failures": []
+ },
+ "rust__arm64-asm-engine": {
+  "producer": "rust",
+  "writer": "arm64-asm-engine",
+  "ok": true,
+  "failures": []
+ },
+ "rust__clojure": {
+  "producer": "rust",
+  "writer": "clojure",
+  "ok": true,
+  "failures": []
+ },
+ "rust__common-lisp": {
+  "producer": "rust",
+  "writer": "common-lisp",
+  "ok": true,
+  "failures": []
+ },
+ "rust__go": {
+  "producer": "rust",
+  "writer": "go",
+  "ok": true,
+  "failures": []
+ },
+ "rust__java": {
+  "producer": "rust",
+  "writer": "java",
+  "ok": true,
+  "failures": []
+ },
+ "rust__python": {
+  "producer": "rust",
+  "writer": "python",
+  "ok": true,
+  "failures": []
+ },
+ "rust__rust": {
+  "producer": "rust",
+  "writer": "rust",
+  "ok": true,
+  "failures": []
+ },
+ "rust__x86_64-asm-engine": {
+  "producer": "rust",
+  "writer": "x86_64-asm-engine",
+  "ok": true,
+  "failures": []
+ },
+ "java__arm64-asm-engine": {
+  "producer": "java",
+  "writer": "arm64-asm-engine",
+  "ok": true,
+  "failures": []
+ },
+ "java__clojure": {
+  "producer": "java",
+  "writer": "clojure",
+  "ok": true,
+  "failures": []
+ },
+ "java__common-lisp": {
+  "producer": "java",
+  "writer": "common-lisp",
+  "ok": true,
+  "failures": []
+ },
+ "java__go": {
+  "producer": "java",
+  "writer": "go",
+  "ok": true,
+  "failures": []
+ },
+ "java__java": {
+  "producer": "java",
+  "writer": "java",
+  "ok": true,
+  "failures": []
+ },
+ "java__python": {
+  "producer": "java",
+  "writer": "python",
+  "ok": true,
+  "failures": []
+ },
+ "java__rust": {
+  "producer": "java",
+  "writer": "rust",
+  "ok": true,
+  "failures": []
+ },
+ "java__x86_64-asm-engine": {
+  "producer": "java",
+  "writer": "x86_64-asm-engine",
+  "ok": true,
+  "failures": []
+ },
+ "clojure__arm64-asm-engine": {
+  "producer": "clojure",
+  "writer": "arm64-asm-engine",
+  "ok": true,
+  "failures": []
+ },
+ "clojure__clojure": {
+  "producer": "clojure",
+  "writer": "clojure",
+  "ok": true,
+  "failures": []
+ },
+ "clojure__common-lisp": {
+  "producer": "clojure",
+  "writer": "common-lisp",
+  "ok": true,
+  "failures": []
+ },
+ "clojure__go": {
+  "producer": "clojure",
+  "writer": "go",
+  "ok": true,
+  "failures": []
+ },
+ "clojure__java": {
+  "producer": "clojure",
+  "writer": "java",
+  "ok": true,
+  "failures": []
+ },
+ "clojure__python": {
+  "producer": "clojure",
+  "writer": "python",
+  "ok": true,
+  "failures": []
+ },
+ "clojure__rust": {
+  "producer": "clojure",
+  "writer": "rust",
+  "ok": true,
+  "failures": []
+ },
+ "clojure__x86_64-asm-engine": {
+  "producer": "clojure",
+  "writer": "x86_64-asm-engine",
+  "ok": true,
+  "failures": []
+ },
+ "common-lisp__arm64-asm-engine": {
+  "producer": "common-lisp",
+  "writer": "arm64-asm-engine",
+  "ok": true,
+  "failures": []
+ },
+ "common-lisp__clojure": {
+  "producer": "common-lisp",
+  "writer": "clojure",
+  "ok": true,
+  "failures": []
+ },
+ "common-lisp__common-lisp": {
+  "producer": "common-lisp",
+  "writer": "common-lisp",
+  "ok": true,
+  "failures": []
+ },
+ "common-lisp__go": {
+  "producer": "common-lisp",
+  "writer": "go",
+  "ok": true,
+  "failures": []
+ },
+ "common-lisp__java": {
+  "producer": "common-lisp",
+  "writer": "java",
+  "ok": true,
+  "failures": []
+ },
+ "common-lisp__python": {
+  "producer": "common-lisp",
+  "writer": "python",
+  "ok": true,
+  "failures": []
+ },
+ "common-lisp__rust": {
+  "producer": "common-lisp",
+  "writer": "rust",
+  "ok": true,
+  "failures": []
+ },
+ "common-lisp__x86_64-asm-engine": {
+  "producer": "common-lisp",
+  "writer": "x86_64-asm-engine",
+  "ok": true,
+  "failures": []
+ },
+ "x86_64-asm-engine__arm64-asm-engine": {
+  "producer": "x86_64-asm-engine",
+  "writer": "arm64-asm-engine",
+  "ok": true,
+  "failures": []
+ },
+ "x86_64-asm-engine__clojure": {
+  "producer": "x86_64-asm-engine",
+  "writer": "clojure",
+  "ok": true,
+  "failures": []
+ },
+ "x86_64-asm-engine__common-lisp": {
+  "producer": "x86_64-asm-engine",
+  "writer": "common-lisp",
+  "ok": true,
+  "failures": []
+ },
+ "x86_64-asm-engine__go": {
+  "producer": "x86_64-asm-engine",
+  "writer": "go",
+  "ok": true,
+  "failures": []
+ },
+ "x86_64-asm-engine__java": {
+  "producer": "x86_64-asm-engine",
+  "writer": "java",
+  "ok": true,
+  "failures": []
+ },
+ "x86_64-asm-engine__python": {
+  "producer": "x86_64-asm-engine",
+  "writer": "python",
+  "ok": true,
+  "failures": []
+ },
+ "x86_64-asm-engine__rust": {
+  "producer": "x86_64-asm-engine",
+  "writer": "rust",
+  "ok": true,
+  "failures": []
+ },
+ "x86_64-asm-engine__x86_64-asm-engine": {
+  "producer": "x86_64-asm-engine",
+  "writer": "x86_64-asm-engine",
+  "ok": true,
+  "failures": []
+ }
+}
