@@ -26,6 +26,8 @@
 opt_request: .quad 0
 cur_mode:    .quad 0
 opt_threads: .quad 0                /* --threads N, 0 = automatic */
+    .globl g_threads_auto
+g_threads_auto: .quad 0             /* 1 = default threads not given (--threads) */
 
     .section .rodata
 /* options taking a value; the value is stored by index in option handling */
@@ -446,6 +448,7 @@ FUNC resolve_threads
     mov opt_threads(%rip), %rax
     test %rax, %rax
     jnz 1f
+    movq $1, g_threads_auto(%rip)
     mov $SC_NPROCESSORS_ONLN, %edi
     call sysconf
     mov $DEFAULT_THREADS_MAX, %ecx

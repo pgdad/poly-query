@@ -1693,6 +1693,27 @@ FUNC cat_parse_end
     ret
 ENDF cat_parse_end
 
+/* child_threads(): in a forked query process, the default threads per
+ * query (unless --threads was given) become this query's share of them:
+ * ceil(default / queries running).  Concurrent queries thus do not
+ * oversubscribe the CPUs (16 queries of 16 threads each took more than
+ * twice the CPU time per query at 10m rows); a query running alone keeps
+ * all of them.  Results do not depend on the number of threads. */
+FUNC child_threads
+    cmpq $0, g_threads_auto(%rip)
+    je 9f
+    mov n_running(%rip), %rcx
+    cmp $1, %rcx
+    jbe 9f
+    mov g_default_threads(%rip), %rax
+    add %rcx, %rax
+    dec %rax
+    xor %edx, %edx
+    div %rcx
+    mov %rax, g_default_threads(%rip)
+9:  ret
+ENDF child_threads
+
 /* srv_prepare_table(table rdi): in the server process, computes the
  * statistics of every column of a table about to be published (on the
  * catalog worker, outside the catalog lock).  Queries run in fork()ed
@@ -1925,6 +1946,7 @@ FUNC start_child
     LEAVE
 1:  call chunk_pool_forget
     call par_after_fork
+    call child_threads
     mov %rbx, %rdi
     call child_main                 /* does not return */
 7:  xor %eax, %eax
