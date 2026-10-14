@@ -14,6 +14,21 @@ a switchable logical optimizer and explicit SIMD kernels — and optionally
 accelerated by the native kernel library `libpqkernels` loaded through cgo
 (M9).
 
+The engine is also a **library** (spec/apps/embedding.md): the module's
+root package `polyquery` embeds it in any Go program, and two programs are
+built on that API:
+
+* **[EMBEDDING.md](EMBEDDING.md)** — developer guide to the embedding API:
+  depending on the module (`require` + `replace`), API reference, value
+  types, errors, resources, thread safety, a complete program.
+* **[APP.md](APP.md)** — user guide to **pqledger** (`app/`, launcher
+  `bin/pqledger`), a personal-finance ledger for bank-statement CSV
+  exports (spec/apps/pqledger.md): configuration, rules and budget files,
+  every command with example output, exit codes, troubleshooting.
+* [`examples/embed-demo`](examples/embed-demo/main.go) — the minimal
+  embedding example (`bin/pq-embed-demo DATA_DIR CSV_FILE SQL`), a
+  separate module.
+
 ## Build prerequisites
 
 * Go 1.27 (tested with `go1.27.1`), standard library only — `go.mod` has no
@@ -28,8 +43,9 @@ accelerated by the native kernel library `libpqkernels` loaded through cgo
   engine builds without native kernel support.
 
 ```bash
-make build      # → build/polyquery
-make test       # unit tests (go test ./...)
+make build      # → the library (package polyquery), build/polyquery,
+                #   build/pqledger, build/pq-embed-demo
+make test       # unit tests (go test ./...: engine, library, pqledger)
 make lint       # go vet + gofmt check
 make fmt        # gofmt -w
 make clean
@@ -73,6 +89,9 @@ SQL text ─lexer→ tokens ─parser→ AST ─analyzer→ logical plan ─opti
 
 | Package | Responsibility |
 |---|---|
+| `polyquery` (module root: `polyquery.go`, `values.go`, `errors.go`) | Public embedding API ([EMBEDDING.md](EMBEDDING.md)): `DB` (create, load, query, create-table, save/open, drop/list/schema, close) over `internal/engine`, typed result values, `*Error` with the spec's codes, panic containment |
+| `app/` | The pqledger application ([APP.md](APP.md)), a client of the public API only: `cli` (arguments, commands, exit codes), `config` (configuration syntax and keys), `rules` (rules and budget files), `bank` (statement CSV, dates, amounts, merchant normalization), `ledger` (PQCF ledger files, import with duplicate detection, category resolution and reports as SQL), `output` (table/csv/json) |
+| `examples/embed-demo` | Minimal embedding example; its own module (`require polyquery` + `replace => ../..`) |
 | `cmd/polyquery` | CLI: modes `version`, `capabilities`, `session`, `exec`, `serve`; option parsing, JSON logs on stderr, SIGTERM/SIGINT handling |
 | `internal/server` | HTTP API (protocol.md §7): router, admission control (workers + bounded FIFO queue), query registry (listing, cancellation, duplicate ids), timeouts, NDJSON streaming with backpressure, Prometheus metrics, completion logs, graceful shutdown |
 | `internal/protocol` | JSON request decoding/validation, context-aware op dispatch (incl. `explain`, `save`, `open`, `stats`), single-line JSON response writer, NDJSON stream lines, session loop and exec mode |
@@ -1320,6 +1339,66 @@ Observations:
   library's own benchmark (`native-kernels/build/x86_64/kernel_bench`, 4M
   elements) reports 0.06–0.10 ns/element for filter, count and sum with
   AVX-512 vs 0.33–0.78 ns for the reference C build.
+
+### Embedding API and pqledger (application spec 1.0.0)
+
+* **Packaging.** The public API is the root package of the existing module
+  `polyquery` (`import "polyquery"`); the engine stays in `internal/`,
+  which Go forbids other modules to import, so the public package is the
+  whole contract. A separate project depends on it with `require
+  polyquery v0.0.0` + `replace polyquery => PATH` (no download, no
+  `go.sum` entries); `examples/embed-demo` is such a project.
+* **One implementation.** `polyquery.DB` is a thin layer over
+  `internal/engine.Engine` — the same object the CLI's session/exec modes
+  and the HTTP server use — adding option validation, conversion of values
+  to Go types and of errors to `*polyquery.Error`, and panic containment
+  (`INTERNAL_ERROR`, the instance stays usable). The engine gained two
+  operations for embedders: `Create` (a table from in-memory rows) and
+  `CreateAs` (a table from a query result); the protocol does not expose
+  them, so engine behaviour is unchanged.
+* **Values.** Results are `[][]any` with `nil` for NULL and one Go type
+  per SQL type (`int64`, `float64`, `bool`, `string`, and the package's
+  `Decimal` — 128-bit unscaled value plus scale —, `Date` — days —, and
+  `Timestamp` — microseconds). `QueryRows` streams results without
+  materializing them.
+* **pqledger storage.** Each invocation opens the three PQCF files
+  (memory-mapped), loads `rules`/`budgets` with `CreateTable`, and builds
+  the `ledger` table with one `CreateTableAs` query that resolves
+  categories in SQL: the distinct merchants are joined with the rules on
+  `merchant LIKE REPLACE(REPLACE(pattern,'*','%'),'?','_')` (rule patterns
+  cannot contain `%`/`_`, and both sides are ASCII upper-case, which makes
+  the case-insensitive match exact), `MIN(rule_no)` picks the first match,
+  and `COALESCE(override, rule category, 'uncategorized')` resolves.
+  Reports, lists, budgets and exports are single SQL statements over
+  `ledger`/`transactions`; only `share` is computed by the program, in
+  exact integer arithmetic.
+* **pqledger writes.** An import counts the existing (date, amount,
+  merchant) keys of the account in the file's date range with a GROUP BY
+  query, decides duplicates in Go, loads the new rows with `CreateTable`
+  and rebuilds `transactions`/`batches` with `… UNION ALL … ORDER BY`
+  (`CreateTableAs`). Changed tables are saved to `NAME.pqcf.new` and then
+  renamed over the ledger files, so a failing command never leaves a
+  partial ledger. Measured on this machine: importing 970,000 records
+  into a 220,000-transaction ledger takes 2.3 s; on the resulting
+  1.2-million-transaction ledger `accounts`, `report monthly` and `report
+  merchants` take ≤ 0.12 s, the category-based commands (`report
+  categories`, `budget`, `list`) ≈ 1.1 s and a full `export` 1.8 s.
+* **pqledger decisions** where the application spec is silent: `--category
+  uncategorized` is accepted as a synonym of `--uncategorized`; an
+  `[engine] threads`/`memory_mb` beyond what the engine can use is capped
+  (256 threads, 8 TiB); a header-less import of an empty file imports
+  nothing, while a missing header record (with `header = true`) is an
+  import error; a quote inside an unquoted CSV field is literal (as in
+  the engine's CSV reader); a set-category id beyond INT64 is an unknown
+  id (exit 6); a ledger file with unexpected columns is exit 7, a missing
+  `batches`/`overrides` file next to `transactions.pqcf` exit 6. The next
+  batch number is one more than the largest batch in `batches.pqcf` *or*
+  `transactions.pqcf`.
+* **pqledger limitations.** Commands load the whole ledger into memory
+  (about 0.6–1.3 KB per transaction at peak for the category-based
+  commands and `export`); the `table` format holds the whole result to
+  compute column widths. The engine's reserved words apply in `query`:
+  the columns `date`, `first` and `last` must be written `"date"`, ….
 
 ## Decisions on points the spec leaves open
 
