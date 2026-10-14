@@ -49,6 +49,28 @@ pub fn spawn<T: Send + 'static>(
         })
 }
 
+/// Runs `f` on a new guarded thread with a stack of `size` bytes, which may
+/// borrow from the caller, and waits for its result. Used by the embedding
+/// API so that statements run with the same stack guarantees as in the CLI,
+/// whatever thread the host program calls from. A panic in `f` is
+/// propagated as `Err` with the panic payload.
+pub fn run_scoped<T: Send>(
+    name: &str,
+    size: usize,
+    f: impl FnOnce() -> T + Send,
+) -> io::Result<std::thread::Result<T>> {
+    std::thread::scope(|scope| {
+        let handle = std::thread::Builder::new()
+            .name(name.to_string())
+            .stack_size(size)
+            .spawn_scoped(scope, move || {
+                guard_current_thread(size);
+                f()
+            })?;
+        Ok(handle.join())
+    })
+}
+
 /// Guards the current thread, whose stack (growing downwards from about
 /// here) is `size` bytes.
 fn guard_current_thread(size: usize) {

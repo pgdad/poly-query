@@ -28,14 +28,28 @@ Capabilities claimed:
 `join.hash`, `join.merge`, `join.nested_loop`, `native.kernels`,
 `change.union_all`, `change.decimal38`, `change.expression_limits`.
 
+**Library and application.** The engine is also usable as an in-process
+library through its embedding API `polyquery::api`
+(`spec/apps/embedding.md`), and `pqledger`, a personal-finance command-line
+application (`spec/apps/pqledger.md`), is built on it:
+
+* **[APP.md](APP.md)** — user guide of `pqledger`: building, configuration
+  reference, rules and budget files, every command with example output, exit
+  codes, troubleshooting.
+* **[EMBEDDING.md](EMBEDDING.md)** — developer guide to the library: Cargo
+  set-up, API reference, value-type mapping, errors, resource management,
+  thread safety, a complete minimal program.
+
+See [Embedding API and pqledger](#embedding-api-and-pqledger) for the design.
+
 ## Build and run
 
 Prerequisites: Rust 1.96.0 stable with Cargo (edition 2024). No network
 access is needed; there are no dependencies.
 
 ```bash
-make build          # cargo build --release --offline
-make test           # unit tests (cargo test)
+make build          # cargo build --release --offline --workspace
+make test           # unit tests of all packages (cargo test --workspace)
 make lint           # cargo clippy -D warnings
 make fmt            # cargo fmt
 make clean
@@ -50,7 +64,10 @@ bin/polyquery serve --port N [--host H] [--workers N] [--queue-depth Q]
 ```
 
 `bin/polyquery` is a POSIX shell launcher that resolves its own location and
-runs `target/release/polyquery`, so it works from any directory.
+runs `target/release/polyquery`, so it works from any directory. `make build`
+also builds `bin/pqledger` ([APP.md](APP.md)) and `bin/pq-embed-demo`
+(`pq-embed-demo DATA_DIR CSV_FILE SQL`, [EMBEDDING.md](EMBEDDING.md)), with
+launchers of the same kind.
 
 ## Libraries
 
@@ -62,6 +79,8 @@ crate) is loaded at run time with `--native-kernels PATH`; see
 ## Architecture
 
 The crate is a library (`src/lib.rs`) plus a thin binary (`src/main.rs`).
+The Cargo workspace has two more packages that use the library through its
+public API only: `app/` (`pqledger`) and `examples/embed-demo/`.
 Layers, bottom-up:
 
 | Module | Responsibility |
@@ -89,6 +108,7 @@ Layers, bottom-up:
 | `exec::native_filter` | analysis of filters above column-table scans for the native kernels (used by physical planning) and their vectorized and row operators |
 | `native` | `libpqkernels` integration: `dlopen`/`dlsym` FFI (`native::ffi`), typed function-pointer table with safe slice wrappers (`Kernels`), bitmap helpers |
 | `engine` | transport-independent facade: load/drop/reset/query/explain, path safety, limits |
+| `api` | the public embedding API: `Database` (create/load/query/save/open/drop/tables/schema/close), `Config`, typed `Value`s, `Error` with spec error codes ([EMBEDDING.md](EMBEDDING.md)) |
 | `protocol` | request validation, response building, `session` (JSON lines) and `exec` modes |
 | `server` | `serve`: HTTP/1.1 (`http`), routing (`conn`), admission control (`admission`), query registry (`registry`), query threads and NDJSON streaming (`query`), Prometheus metrics (`metrics`), SIGTERM/SIGINT (`signal`) |
 | `cli` | argument parsing (unknown options ⇒ exit 2) |
@@ -1556,11 +1576,103 @@ python3 implementations/rust/bench/limits.py --engine implementations/rust/bin/p
 POLYQUERY_MORSEL_ROWS=1 python3 implementations/rust/bench/limits.py ...   # force parallel workers
 ```
 
+## Embedding API and pqledger
+
+ADR-0018 (`spec/apps/`) made the engine a library and added an application
+on top of it. User guide: [APP.md](APP.md); developer guide:
+[EMBEDDING.md](EMBEDDING.md).
+
+### Library (`src/api/`)
+
+* **Packaging.** The `polyquery` crate was already a library plus a thin
+  binary; it is used by other projects as a Cargo path dependency. The
+  workspace (`Cargo.toml`) adds `app/` and `examples/embed-demo/`, each a
+  separate package depending on `polyquery = { path = … }` exactly as a
+  third-party project would; `autoexamples = false` keeps Cargo from treating
+  `examples/` as examples of the engine package.
+* **One implementation.** `polyquery::api::Database` wraps the same
+  `engine::Engine` the CLI, session and HTTP modes use, so the API inherits
+  path safety, limits, snapshot isolation and atomic catalog changes. The only
+  engine additions are `Engine::insert_table` (to register tables built by the
+  API) and `stack::run_scoped`; the engine's behaviour and capabilities are
+  unchanged.
+* **Own public types.** The API has its own `Value`, `ColumnType`, `Decimal`,
+  `Date`, `Timestamp`, `Column`, `Error` instead of exposing the internal
+  `types::Value` (which uses `Arc<str>`, mixed decimal scales and engine
+  details). Results are converted once; DECIMAL values are normalized to the
+  column's scale. `ErrorCode` is shared with the engine.
+* **Guarded stacks.** Statements are processed recursively; the CLI runs them
+  on threads with large guarded stacks (CR-6). The API runs every operation
+  on a scoped helper thread with the same stack (`stack::run_scoped`), so a
+  host's small thread stack cannot be overflowed by a deep statement, and a
+  panic is contained and reported as `INTERNAL_ERROR`.
+* **Extensions beyond the required operations**: `create_table` (a table
+  from native values) and `create_table_from_query` (materialize a result).
+  `pqledger` needs both — to append rows to a table and to provide the
+  derived `ledger` table to `query` — and they avoid round-trips through CSV
+  text.
+
+### pqledger (`app/src/`)
+
+| module | responsibility |
+|---|---|
+| `main` | entry point: runs the command, prints the output, maps errors to exit statuses |
+| `cli` | command line: global options, commands, filters, months |
+| `ini` | the line syntax shared by the configuration, rules and budget files |
+| `config` | the configuration file, effective `[import]` settings per account |
+| `rules` | the rules and budget files |
+| `bankcsv` | RFC 4180 reader that records each record's physical line |
+| `amount`, `convert` | amounts in integer cents, dates, merchant normalization, records → transactions |
+| `ledger` | the three PQCF files through `polyquery::api`: init, open (mmap), duplicates, appends, overrides, the derived `rules`/`budgets`/`ledger` tables |
+| `commands` | each command as SQL on the embedded engine; the `share` column |
+| `output` | `table`, `csv` and `json` output |
+| `error` | error kinds and exit statuses |
+
+Decisions:
+
+* **Category resolution in SQL.** `ledger` is materialized with one
+  statement: the distinct merchants are joined to the rules (`*`/`?`
+  rewritten to `%`/`_` by `REPLACE` in SQL, `UPPER(merchant) LIKE pattern`),
+  the first rule per merchant is `MIN(rule_no)`, and overrides win through
+  `COALESCE(override, rule category, 'uncategorized')`. Matching distinct
+  merchants keeps the nested-loop LIKE join small (merchants × patterns
+  instead of transactions × patterns). Commands that need categories
+  (`report categories`, `budget`, `list`, `export`, `query`) build it;
+  the others query `transactions` directly.
+* **Duplicates.** The host counts the file's records per key (account, date,
+  amount, merchant), queries the ledger's counts for the account with one
+  `GROUP BY`, and skips the first `min(f, l)` records of each key.
+* **Writes.** New rows become a table (`create_table`), `SELECT * FROM t
+  UNION ALL SELECT * FROM added ORDER BY id` is materialized and saved. An
+  import writes `batches.pqcf` and (if rows were added) `transactions.pqcf`
+  under temporary names first and renames them only when both are written;
+  `set-category` saves `overrides.pqcf` (atomic in the engine). `init`
+  writes `transactions.pqcf` last, since it marks a ledger as existing.
+* **Opening.** The ledger files are opened memory-mapped, so commands that
+  read little (e.g. `accounts`) do not decode whole files; the column names
+  and types are checked against the specification.
+* **Interpretation choices** where the spec is silent: an import file
+  without a header record (empty after `skip_lines`) is an import data error
+  when `header = true`; a column given by name with `header = false` is an
+  import data error; numeric column references are positive integers (`0`
+  is invalid); `--top` values beyond 2⁶⁴−1 saturate; `--help` must be the
+  last argument; `list --category uncategorized` is accepted (same as
+  `--uncategorized`); the next batch number is one more than the largest
+  batch in `batches.pqcf` or `transactions.pqcf`.
+* **Scale.** On 300,000 transactions every command takes under one second
+  and importing 100,000 records about 0.4 s.
+
 ## Known limitations
 
 * The HTTP server uses a thread per connection and per running query
   (no event loop); idle keep-alive connections each hold a thread.
 * `mode: "row"` is single-threaded by design (it is the baseline).
+* pqledger: two commands that modify the same ledger at the same time are
+  not coordinated (no lock file); the last writer wins. If renaming the
+  second of two files of an import fails (after the first was renamed),
+  the ledger can be left with a batch whose rows are missing.
+* The embedding API returns results fully materialized (no streaming
+  cursor); every operation starts a short-lived helper thread.
 * Parallelism covers scan pipelines (filters, projections, join probes),
   aggregation, DISTINCT, top-N and sorting; merge joins, hash-table
   building and operators above pipeline breakers run serially. Correlated

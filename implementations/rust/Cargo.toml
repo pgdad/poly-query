@@ -4,6 +4,11 @@ version = "0.1.0"
 edition = "2024"
 description = "PolyQuery analytical database engine (Rust, Track A, std only)"
 publish = false
+# examples/embed-demo is a separate package of the workspace, not a Cargo example.
+autoexamples = false
+
+[workspace]
+members = [".", "app", "examples/embed-demo"]
 
 [dependencies]
 

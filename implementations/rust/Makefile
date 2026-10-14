@@ -5,13 +5,13 @@ export CARGO_NET_OFFLINE := true
 .PHONY: build test lint fmt clean
 
 build:
-	$(CARGO) build --release --offline
+	$(CARGO) build --release --offline --workspace
 
 test:
-	$(CARGO) test --release --offline
+	$(CARGO) test --release --offline --workspace
 
 lint:
-	$(CARGO) clippy --release --offline --all-targets -- -D warnings
+	$(CARGO) clippy --release --offline --workspace --all-targets -- -D warnings
 
 fmt:
 	$(CARGO) fmt

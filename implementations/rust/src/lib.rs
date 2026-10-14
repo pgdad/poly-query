@@ -9,11 +9,13 @@
 //! * [`planner`]  — semantic analysis (binding, typing) and logical plans
 //! * [`exec`]     — physical operators and expression evaluation
 //! * [`engine`]   — transport-independent facade
+//! * [`api`]      — the public embedding API (the engine as a library)
 //! * [`protocol`] — JSON request/response protocol, session and exec modes
 //! * [`server`]   — HTTP/1.1 server (`serve`): admission, streaming, metrics, shutdown
 //! * [`alloc`]    — the global allocator (arena-local `realloc`)
 
 pub mod alloc;
+pub mod api;
 pub mod catalog;
 pub mod cli;
 pub mod config;

@@ -417,6 +417,13 @@ impl Engine {
         })
     }
 
+    /// Adds a table built by the caller (embedding API: tables from native
+    /// values or materialized query results). Without `replace`, an
+    /// existing name is `ALREADY_EXISTS`.
+    pub fn insert_table(&self, table: Table, replace: bool) -> Result<Arc<Table>> {
+        self.mutate(|c| c.insert(table, replace))
+    }
+
     pub fn drop_table(&self, name: &str) -> Result<()> {
         self.mutate(|c| c.drop_table(name))
     }
