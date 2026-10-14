@@ -11,7 +11,8 @@ public final class AppTestMain {
     }
 
     public static void main(String[] args) throws Exception {
-        List<Class<?>> suites = List.of();
+        List<Class<?>> suites = List.of(ImporterTest.class, ConfigTest.class, CliTest.class, OutputTest.class,
+                ApplicationTest.class);
         int passed = 0;
         int failed = 0;
         for (Class<?> suite : suites) {

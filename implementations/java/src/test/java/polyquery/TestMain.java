@@ -16,7 +16,7 @@ public final class TestMain {
                 polyquery.server.ServerTest.class, Phase5Test.class, polyquery.exec.vector.VectorTest.class,
                 NativeKernelsTest.class, polyquery.exec.vector.NativeVectorTest.class,
                 polyquery.optimizer.OptimizerRulesTest.class, polyquery.physical.PhysicalPlannerTest.class,
-                WideDecimalTest.class, ExpressionLimitsTest.class);
+                WideDecimalTest.class, ExpressionLimitsTest.class, ApiTest.class);
         int passed = 0;
         int failed = 0;
         for (Class<?> suite : suites) {
