@@ -1,0 +1,96 @@
+{
+ "schema": "polyquery-telemetry/1",
+ "run_id": "a-fix-large-data-common-lisp-a1-20261013T234442Z",
+ "language": "common-lisp",
+ "task": "fix-large-data",
+ "track": "A",
+ "attempt": 1,
+ "model": "claude-opus-5-5",
+ "effort": "high",
+ "agent_harness_version": "2.1.296",
+ "prompt_id": "track-a-fix-large-data",
+ "prompt_sha256": "4a01775136c5099d20c40dded43135a0057e9860c52322dbb4c63132c98dabd0",
+ "session_id": "77bd0ddd-363d-40d0-883b-c3734f5867a9",
+ "tokens": {
+  "input": 226,
+  "output": 115867,
+  "cache_read": 19756667,
+  "cache_creation": 263172,
+  "thinking": null,
+  "thinking_estimated": 55515,
+  "source": "result events",
+  "api_messages": 113
+ },
+ "rate_limit": {
+  "events": 8,
+  "max_utilization": {
+   "five_hour": 0.07,
+   "seven_day": 0.7
+  },
+  "statuses": [
+   "allowed"
+  ]
+ },
+ "cost_usd": 8.374953400000003,
+ "cost_basis": "platform-reported list price (total_cost_usd)",
+ "agent_turns": 115,
+ "result_segments": 1,
+ "assistant_messages": 252,
+ "tool_calls": {
+  "Bash": 106,
+  "Write": 4,
+  "ToolSearch": 1,
+  "Monitor": 3
+ },
+ "tool_calls_total": 114,
+ "tool_failures": 2,
+ "build_invocations": 29,
+ "build_failures_heuristic": 1,
+ "conformance_runs": 4,
+ "conformance_progress": [
+  [
+   660,
+   660
+  ],
+  [
+   660,
+   660
+  ],
+  [
+   660,
+   660
+  ],
+  [
+   660,
+   660
+  ]
+ ],
+ "repair_iterations": 0,
+ "time": {
+  "wall_seconds": 2813.0,
+  "model_api_seconds": 1188.2,
+  "tool_seconds": 1624.7,
+  "waiting_seconds": null,
+  "human_seconds": 0
+ },
+ "human_interventions": 0,
+ "git": {
+  "commits": 3,
+  "files_changed": 17,
+  "lines_added": 1458,
+  "lines_removed": 213,
+  "uncommitted_changes": false,
+  "paths_outside_language_dir": []
+ },
+ "agent_exit_code": 0,
+ "result_subtype": "success",
+ "is_error": false,
+ "stop_reason": "completed",
+ "final_message": "The engine now loads and answers the full 10m workload, and when memory really runs out it returns `RESOURCE_LIMIT` and keeps serving instead of dying. Everything in the definition of done passes and all work is committed (3 commits on `main`); the generated data is gitignored and not committed.\n\n**Cause.** Loading a CSV kept everything in memory at once: the whole file, one Lisp string per field (110 million of them for `transactions`), a boxed value array per column, and then the final typed column. That overran the fixed 8 GiB heap. SBCL can't recover when the garbage collector itself runs out of space, so the process died while loading the first table.\n\n**What I changed**\n- **Streaming CSV loads** (`ingest/csv.lisp` rewritten, new `storage/builders.lisp`):\n  - Files are read in 8 MiB blocks and fields go straight into typed column chunks.\n  - Integers, decimals, floats, booleans, dates and timestamps are parsed from the bytes without creating strings. Repeated strings are deduplicated without allocating.\n  - Without a schema the file is read twice: once to infer types, once to convert.\n  - Results, dictionary-encoding decisions, error messages and error precedence are unchanged. Unit tests cover all four, including records split across block boundaries.\n- **Heap guard** (new `util/memory.lisp`):\n  - There is a soft heap limit: the 64 GiB heap minus a 15% reserve for the collector, capped at 80% of the host's memory. Here that is 54.4 GiB.\n  - Loads, every query loop, memory accounting, the JSON reader and PQCF reads check it. Over the limit it first does a full garbage collection. If live data is still too big, the request fails with `RESOURCE_LIMIT`.\n  - A new engine option `--max-memory-mb` lowers the limit, which is useful for tests.\n- **Heap size**: raised from 8 GiB to 64 GiB in the `Makefile`. This is reserved address space, not used memory; an idle engine uses about 80 MB.\n- JSON loads got heap checks and the column builders, but still hold the whole input in memory.\n- The README has a new section covering the memory model, the limits, the measurements and the modules touched.\n\n**Results**\n\n| Suite | Result |\n|---|---|\n| `large_data_probe.py --require-pass` | workload, query_budget, ingest_limit, exhaustion all pass (peak 6.4 GiB) |\n| conformance | `TOTAL: 660/660 pass` |\n| conformance `--modes` | `TOTAL: 3870/3870 pass` |\n| conformance `--transport http` | `TOTAL: 660/660 pass` |\n| `http_suite.py` | `19/19 passed` |\n| `robustness_probe.py --only expression_limits` | pass (the full probe also shows no failures) |\n| `make build test`, `make lint` | succeed, no warnings |\n\n- **Exhaustion at real scale.** The probe's 6 copies never reach the limit, so I ran my own test with 95 copies of the 10m `transactions` table:\n  - Copies 1\u201385 loaded (55.4 GB).\n  - Copies 86\u201395 each got `RESOURCE_LIMIT` after about 2.3 s, with memory flat at 55.8 GB.\n  - Afterwards, count and sort queries on the first copy still answered.\n- **Correctness of values.** The probe only checks that queries succeed. Separately, I computed 5 workload queries in Python straight from the 10m CSV and they match the engine. At 1m, all 20 queries return identical rows to the old build.\n- **Speed.** Loads are faster: 27.5 s for all 9 tables at 10m, and 6.8 s \u2192 3.2\u20133.6 s at 1m. Query speed at 1m is unchanged.\n\n**Known limitations**\n- The heap limit applies to the whole process. Once tables fill it, every request that needs more memory fails until tables are dropped, not just the one that crossed it.\n- JSON/JSONL loads still read the whole input into memory. A 1 GB JSON file needs roughly 10 GB of heap; beyond the limit it fails with `RESOURCE_LIMIT` rather than crashing.\n- The query memory budget (`--max-query-memory-mb`, default 2048) is still an approximate per-query count, separate from the heap guard.\n\n**Main design decisions**\n- I kept the result format unchanged \u2014 loaded tables are still a single segment \u2014 so query plans and performance at small scale sta",
+ "notes": {
+  "human_seconds": "0 by construction: unattended run, no human input after launch",
+  "waiting_seconds": "not exposed by the platform",
+  "build_failures_heuristic": "Bash build commands whose output matched compiler-error patterns",
+  "repair_iterations": "conformance runner invocations after the first one reporting failures"
+ }
+}

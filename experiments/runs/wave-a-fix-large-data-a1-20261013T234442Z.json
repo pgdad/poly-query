@@ -1,0 +1,40 @@
+{
+ "wave_id": "wave-a-fix-large-data-a1-20261013T234442Z",
+ "task": "fix-large-data",
+ "track": "A",
+ "attempt": 1,
+ "seed": 1791935082,
+ "order": [
+  "common-lisp"
+ ],
+ "run_ids": [
+  "a-fix-large-data-common-lisp-a1-20261013T234442Z"
+ ],
+ "started": "2026-10-13T23:44:43+00:00",
+ "parallel": 1,
+ "base_refs": {},
+ "attempts": {},
+ "record_only": false,
+ "limits": {
+  "timeout_min": 240,
+  "budget_usd": 60.0,
+  "max_turns": null
+ },
+ "loadavg_start": [
+  1.62646484375,
+  2.8310546875,
+  1.69482421875
+ ],
+ "finished": "2026-10-14T01:06:14+00:00",
+ "loadavg_end": [
+  6.6201171875,
+  4.20166015625,
+  3.54931640625
+ ],
+ "results": [
+  {
+   "run_id": "a-fix-large-data-common-lisp-a1-20261013T234442Z",
+   "outcome": "tests_failed"
+  }
+ ]
+}
