@@ -29,6 +29,13 @@ embed 3/3 (also `--trace`); conformance 660/660, `--modes` 3870/3870,
 capabilities unchanged. APP.md written (session 2). Scale: a 1,011,875-row
 ledger (10 imports of ~100k records, bankgen) - every command < 1 s, import
 of 100k records into it 0.6 s, peak RSS ~1.5 GB for list/export.
+Session 2 fixes after an edge-case probe against the spec: invalid UTF-8
+in an import record -> exit 4 `FILE:LINE` (util.S utf8_check per field in
+i_csv_record), in configuration / rules / budget files -> exit 2
+(config.S check_utf8); 19-digit set-category ids and --top.
+Known: `[engine] memory_mb` is the instance limit, so it also bounds the
+app's own queries (~1-1.5 KB per transaction; 100k rows need ~128 MiB),
+documented in APP.md.
 Ideas left: import / set-category rewrite all of transactions.pqcf (fine at
 1M rows); the ledger save is per table (transactions, then batches), so a
 crash between the two writes could leave them inconsistent.

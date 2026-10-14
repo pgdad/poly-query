@@ -199,6 +199,13 @@ name.
 | `threads` | integer ≥ 1: worker threads per query | engine default (online CPUs, at most 16) |
 | `memory_mb` | integer ≥ 1: memory limit per query, MiB | engine default (4096) |
 
+`memory_mb` applies to **every** query pqledger runs, including its own
+report queries and the preparation of the `ledger` table for `query`. Those
+need roughly 1–1.5 KB per transaction (about 128 MiB for a ledger of
+100,000 transactions); with a smaller limit the command fails with
+`RESOURCE_LIMIT: query memory budget exceeded` (exit 7, or exit 5 when your
+own `query` statement exceeds it).
+
 ### A complete example
 
 A checking account with the defaults, a credit card that exports charges as
@@ -606,9 +613,11 @@ first line on standard error starts with `pqledger: error: `.
 | `FILE: the header has no column 'Date'` (exit 4) | the account's `date_column` / `description_column` / `amount_column` does not match the bank's header; check with `head -3 FILE`, mind a preamble (`skip_lines`) |
 | `FILE:7: expected 4 fields, found 3` (exit 4) | wrong `delimiter`, or a broken record at line 7 |
 | `FILE:2: invalid date '09/01/2026'` | `date_format` does not match the file |
+| `FILE:5: the record is not valid UTF-8` (exit 4) | the export is not UTF-8 (often Latin-1 / Windows-1252); convert it first, e.g. `iconv -f WINDOWS-1252 -t UTF-8 in.csv > out.csv` |
 | `FILE:2: invalid amount '1.234,56'` | set `decimal_separator = ,` and `thousands_separator = .`; amounts with a currency text need `currency_symbol` |
 | everything is `uncategorized` | patterns must match the whole merchant: add `*` (`WHOLE FOODS*`); look at the `merchant` column of `pqledger export` |
 | card charges show up as income | set `invert_sign = true` for that account |
 | an import reports duplicates you expected to be new | identical (account, date, amount, merchant) transactions already in the ledger are matched one to one; see [Duplicates](#pqledger-import-file---account-name) |
+| `RESOURCE_LIMIT: query memory budget exceeded` (exit 7) | `[engine] memory_mb` is too small for the ledger; raise it or remove it (see [`[engine]`](#engine)) |
 | `SEMANTIC_ERROR` … from `query` (exit 5) | the SQL is wrong; `date` must be quoted as `"date"` |
 | very large ledgers | the whole ledger is processed in memory; at 1,000,000 transactions every command runs in under a second and `list` / `export` peak at about 1.5 GB. `[engine] memory_mb` caps a single query |
