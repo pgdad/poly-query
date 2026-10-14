@@ -106,6 +106,34 @@ columns in the column layout (T, NIL or :AUTO)."
      :layout layout)))
 
 ;;; ------------------------------------------------------------------
+;;; Construction from column stores (ingestion)
+
+(defun rows-from-stores (stores row-count)
+  "Row tuples holding the values of the COLUMN-STOREs STORES."
+  (let* ((readers (map 'simple-vector #'column-reader stores))
+         (width (length readers))
+         (rows (progn (ensure-heap-room (* row-count (+ 24 (* 8 width))))
+                      (make-array row-count))))
+    (dotimes (i row-count rows)
+      (when (zerop (mod i 65536)) (check-heap))
+      (let ((row (make-array width)))
+        (dotimes (k width)
+          (setf (svref row k) (funcall (the function (svref readers k)) i)))
+        (setf (svref rows i) row)))))
+
+(defun make-table-from-stores (name column-defs stores row-count &key (layout :column))
+  "Table NAME holding the COLUMN-STOREs STORES (one per column, ROW-COUNT
+values each) in LAYOUT."
+  (let ((stores (coerce stores 'simple-vector)))
+    (make-table-from-segments
+     name column-defs
+     (list (ecase layout
+             (:column (make-segment :start 0 :count row-count :columns stores))
+             (:row (make-segment :start 0 :count row-count
+                                 :rows (rows-from-stores stores row-count)))))
+     :layout layout)))
+
+;;; ------------------------------------------------------------------
 ;;; Access
 
 (defun segment-column (segment k)

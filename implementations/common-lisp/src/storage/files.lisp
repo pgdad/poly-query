@@ -129,7 +129,7 @@ IO_ERROR."
                  (sb-ext:finalize source (lambda () (ignore-errors (sb-posix:munmap sap size)))
                                   :dont-save t)
                  source)
-               (let ((buf (make-octets size)))
+               (let ((buf (progn (ensure-heap-room size) (make-octets size))))
                  (handler-case
                      (loop with pos = 0
                            while (< pos size)

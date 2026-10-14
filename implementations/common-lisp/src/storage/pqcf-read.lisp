@@ -247,6 +247,7 @@ zero padding; anything else is damage no checksum would catch."
 (defun decode-chunk (source desc n type)
   "Verify and decode the chunk DESC of N rows of TYPE into a COLUMN-STORE."
   (declare (type fixnum n))
+  (check-heap)
   (let ((length (chunk-desc-length desc))
         (null-count (chunk-desc-null-count desc)))
     (multiple-value-bind (buf base) (source-range source (chunk-desc-offset desc) length)
@@ -452,7 +453,7 @@ first access; otherwise all chunks are verified and decoded now."
   (mapcar (lambda (seg)
             (let* ((n (segment-count seg))
                    (readers (loop for k below width collect (segment-column-reader seg k)))
-                   (rows (make-array n)))
+                   (rows (progn (check-heap) (make-array n))))
               (dotimes (i n)
                 (let ((row (make-array width)))
                   (loop for r in readers for k from 0

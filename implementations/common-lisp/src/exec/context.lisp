@@ -35,7 +35,9 @@ request (CR-6: the timeout covers every stage of the query)."
        (ceiling (* timeout-ms internal-time-units-per-second) 1000))))
 
 (defun check-interrupts ()
-  "Signal TIMEOUT or CANCELLED when the current query must stop."
+  "Signal TIMEOUT or CANCELLED when the current query must stop, and
+RESOURCE_LIMIT when the heap is exhausted (see memory.lisp)."
+  (check-heap)
   (let ((ctx *query-context*))
     (when ctx
       (when (query-context-cancelled ctx)
@@ -50,7 +52,9 @@ never be absorbed by code that handles other errors)."
   (member (pq-error-code condition) '("TIMEOUT" "CANCELLED") :test #'string=))
 
 (defun charge-memory (bytes)
-  "Account BYTES of materialized state against the query memory budget."
+  "Account BYTES of materialized state against the query memory budget (and
+check the heap)."
+  (check-heap)
   (let ((ctx *query-context*))
     (when ctx
       (when (> (+ (sb-ext:atomic-incf (query-context-memory-used ctx) bytes) bytes)
