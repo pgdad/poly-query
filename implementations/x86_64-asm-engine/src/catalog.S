@@ -7,6 +7,8 @@
  *   cat_drop(ptr, len) -> eax 1 if dropped, 0 if unknown
  *   cat_reset()
  *   cat_count() -> rax ; cat_at(i) -> rax Table* ; cat_sorted() -> rax Table*[] sorted by name (request arena)
+ *   cat_swap(state)    exchanges the catalog with a saved one (3 words:
+ *                      table array, length, capacity; embedding API instances)
  */
 #include "pq.inc"
 
@@ -127,6 +129,21 @@ FUNC cat_reset
     jmp 1b
 2:  LEAVE
 ENDF cat_reset
+
+/* cat_swap(state rdi): exchanges the catalog state (tables, len, cap) with
+ * the 3 words at rdi (api.S: each instance owns a catalog) */
+FUNC cat_swap
+    mov cat_tables(%rip), %rax
+    xchg %rax, 0(%rdi)
+    mov %rax, cat_tables(%rip)
+    mov cat_len(%rip), %rax
+    xchg %rax, 8(%rdi)
+    mov %rax, cat_len(%rip)
+    mov cat_cap(%rip), %rax
+    xchg %rax, 16(%rdi)
+    mov %rax, cat_cap(%rip)
+    ret
+ENDF cat_swap
 
 FUNC cat_count
     mov cat_len(%rip), %rax

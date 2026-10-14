@@ -1,0 +1,8 @@
+#!/bin/sh
+# Launcher of pqledger: builds on first use if needed, then execs the
+# assembled application (spec/apps/pqledger.md).
+DIR=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+if [ ! -x "$DIR/out/pqledger" ]; then
+  make -s -C "$DIR" build >&2 || exit 7
+fi
+exec "$DIR/out/pqledger" "$@"

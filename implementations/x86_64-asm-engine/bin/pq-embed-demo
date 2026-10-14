@@ -1,0 +1,7 @@
+#!/bin/sh
+# Launcher of the embedding example: builds on first use, then execs it.
+DIR=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+if [ ! -x "$DIR/out/pq-embed-demo" ]; then
+  make -s -C "$DIR" build >&2 || exit 1
+fi
+exec "$DIR/out/pq-embed-demo" "$@"

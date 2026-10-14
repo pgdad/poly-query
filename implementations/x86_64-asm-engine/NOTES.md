@@ -1,5 +1,45 @@
 # Working notes — x86-64 assembly engine
 
+## Current task: embedding API + pqledger (TASK.md "app-pqledger")
+
+Spec: `spec/apps/embedding.md`, `spec/apps/pqledger.md`; tests
+`tests/apps/pqledger/runner.py` (cases + embed). Layout:
+* `src/api.S` + `include/polyquery.h` / `polyquery.inc`: the library.
+  `make build` pre-links all engine objects except main.o into
+  `out/libpolyquery.o` (`ld -r`), keeps only the public `pq_*` symbols global
+  (`objcopy --keep-global-symbol`, list `API_SYMS` in the Makefile) and
+  archives it as `lib/libpolyquery.a` (git-ignored). Clients link with
+  `-no-pie -lpolyquery -lm -lpthread`.
+* API calls build a JSON request and run it through `proto_handle_line` with
+  `g_http_capture=1` (response stays in g_out); queries set `g_api_capture`
+  so `op_query` (protocol.S) hands the result to `api_capture_result`
+  (typed pq_result) or `api_capture_table` (pq_create_table). Instances:
+  `cat_swap` (catalog.S) swaps the catalog in; limits are set per call.
+  Engine runs on a 1 GiB NORESERVE stack (STACK_CHECK limit set per call).
+  `par_no_pin` (par.S): library never pins threads.
+* `examples/embed-demo/` (own Makefile, builds like a separate project),
+  `bin/pq-embed-demo`.
+* `app/`: pqledger (main, util, config, ledger, output, report, import),
+  `app/app.inc` documents the module interfaces; `bin/pqledger`.
+* Tests: `tests/test_api.S` (API unit test), `app/tests/*.S` (app units),
+  `tests/pqledger_test.sh` (end to end).
+Status (session 2): DONE. `make build test` pass; pqledger runner 24/24 +
+embed 3/3 (also `--trace`); conformance 660/660, `--modes` 3870/3870,
+`--transport http` 660/660, http_suite 19/19, expression_limits pass;
+capabilities unchanged. APP.md written (session 2). Scale: a 1,011,875-row
+ledger (10 imports of ~100k records, bankgen) - every command < 1 s, import
+of 100k records into it 0.6 s, peak RSS ~1.5 GB for list/export.
+Session 2 fixes after an edge-case probe against the spec: invalid UTF-8
+in an import record -> exit 4 `FILE:LINE` (util.S utf8_check per field in
+i_csv_record), in configuration / rules / budget files -> exit 2
+(config.S check_utf8); 19-digit set-category ids and --top.
+Known: `[engine] memory_mb` is the instance limit, so it also bounds the
+app's own queries (~1-1.5 KB per transaction; 100k rows need ~128 MiB),
+documented in APP.md.
+Ideas left: import / set-category rewrite all of transactions.pqcf (fine at
+1M rows); the ledger save is per table (transactions, then batches), so a
+crash between the two writes could leave them inconsistent.
+
 ## Current task: scaling 1m -> 10m rows (TASK.md "optimize-scaling") — DONE
 
 README "Scaling optimization: 1m -> 10m rows" has the before/after table
