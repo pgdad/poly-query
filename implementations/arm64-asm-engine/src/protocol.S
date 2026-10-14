@@ -17,6 +17,9 @@
     .global g_req_start
 g_cur_id:       .skip 8         // JNode* of the request "id" (or 0)
 g_req_start:    .skip 8         // µs timestamp of request start
+    .global g_api_sink
+g_api_sink:     .skip 8         // embedding API (api.S): query result sink
+                                // fn(x0 BoundQuery*, x1 ResultSet*) or 0
 
     .section .rodata
 k_id:       .asciz "id"
@@ -1961,7 +1964,14 @@ LFUNC op_query
 5:  ldr  x0, [x24, #RS_NROWS]
     TLS_ADDR x1, g_result_rows
     str  x0, [x1]
-    TLS_LDR x9, g_stream
+    TLS_LDR x9, g_api_sink          // embedding API: typed result, no JSON
+    cbz  x9, 50f
+    mov  x0, x23
+    mov  x1, x24
+    blr  x9
+    bl   out_begin_ok
+    b    .Lq_ret
+50: TLS_LDR x9, g_stream
     cbz  x9, 51f
     mov  x0, x23                    // HTTP streaming: header, row batches,
     mov  x1, x24                    // end line go straight to the client

@@ -1,5 +1,32 @@
 # Working notes (arm64-asm-engine)
 
+## Status (app task: embedding API + pqledger, session 2) — complete
+- Definition of done met: `make build test` pass; pqledger runner 24/24 +
+  embed-demo 3/3 (also with `--trace`); conformance 660/660, `--modes`
+  3870/3870, `--transport http` 660/660, http_suite 19/19,
+  expression_limits probe pass; ENGINE.json capabilities unchanged.
+- Library: `src/api.S` (pq_* API on the protocol layer, one worker thread per
+  instance, process-wide API lock), `lib/libpolyquery.a` = `ld -r` of all
+  engine objects but main.o + `objcopy -G` of the API symbols.
+  Headers: include/polyquery.h (C), include/polyquery.inc (asm offsets).
+  Guide: EMBEDDING.md (its minimal program was built and run against the lib).
+- App (`app/`): main.S (argument parsing, option tables), options.S (shared
+  option globals, g_out, parse_month — separate so app/tests link without
+  main.o), config.S (config / rules / budgets), bankcsv.S (bank CSV reader,
+  dates, amounts, merchant normalization), commands.S (all commands as SQL
+  on the embedded engine; category resolution CTE pql_m/pql_c/pql_l with
+  rule patterns turned into LIKE), output.S (table/csv/json), util.S.
+  Module tests: app/tests/test_{bankcsv,config,output}.S. User guide: APP.md.
+- Verified (session 2, throw-away scripts in /tmp, not in the repo): a Python
+  oracle (bank CSV conversion, merchant normalization, duplicate rule, rule
+  resolution) agrees with `export` on ~149k transactions from bankgen's three
+  styles incl. overlapping re-imports; every command < 0.25 s at 149k rows.
+- Fixed in session 2: `make test` link failure (globals in main.S), `query`
+  without budget_file loaded `budgets` twice (ALREADY_EXISTS).
+- Possible next steps: a shared-object build (`lib/libpolyquery.so`); let
+  bin/polyquery's CLI become a client of api.S (spec SHOULD, not done: the
+  API reuses the same protocol handler instead).
+
 ## Status (change CR-6 expression size limits, session 1)
 - Done: `robustness_probe.py --only expression_limits --require-pass` passes;
   conformance 660/660, `--modes` 3870/3870, `--transport http` 660/660,

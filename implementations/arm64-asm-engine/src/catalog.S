@@ -30,6 +30,9 @@
 //   catalog_snapshot() -> x0 Table** (request arena), x1 count
 //   catalog_count() -> x0 tables in the current version (metrics)
 //   table_free(x0 Table*)           free a table no version refers to
+//   cat_exchange(x0 CatVer*) -> x0  install a version as the current one and
+//                                   return the previous (embedding API: each
+//                                   instance owns its catalog, api.S)
 // =============================================================================
 #include "pq.inc"
 #include "frame.inc"
@@ -423,6 +426,22 @@ FUNC catalog_reset
 2:  str  xzr, [x19, #CV_NT]
     LEAVE 2
 ENDF catalog_reset
+
+// cat_exchange(x0 CatVer* or 0) -> x0 previous current version. The
+// reference held by "current" moves with the pointer (no counts change).
+FUNC cat_exchange
+    ENTER 2
+    mov  x19, x0
+    ADR_L x0, g_cat_lock
+    bl   pthread_mutex_lock
+    ADR_L x9, g_cat_cur
+    ldr  x20, [x9]
+    str  x19, [x9]
+    ADR_L x0, g_cat_lock
+    bl   pthread_mutex_unlock
+    mov  x0, x20
+    LEAVE 2
+ENDF cat_exchange
 
 // catalog_snapshot() -> x0 Table** (request-arena copy), x1 count
 //   x19 copy, x20 count, x21 version

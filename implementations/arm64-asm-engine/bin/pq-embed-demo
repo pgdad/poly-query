@@ -1,0 +1,4 @@
+#!/bin/sh
+# pq-embed-demo launcher: execs the example program (examples/embed-demo).
+here=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+exec "$here/../examples/embed-demo/build/pq-embed-demo" "$@"

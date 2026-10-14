@@ -1,0 +1,4 @@
+#!/bin/sh
+# pqledger launcher: execs the assembled application (app/).
+here=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+exec "$here/../build/pqledger" "$@"
