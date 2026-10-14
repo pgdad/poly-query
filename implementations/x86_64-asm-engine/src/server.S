@@ -1693,6 +1693,23 @@ FUNC cat_parse_end
     ret
 ENDF cat_parse_end
 
+/* srv_prepare_table(table rdi): in the server process, computes the
+ * statistics of every column of a table about to be published (on the
+ * catalog worker, outside the catalog lock).  Queries run in fork()ed
+ * children, which would otherwise compute the statistics their plans
+ * consult (table_col_stats: a pass over the column) on every query and
+ * lose them at exit.  Lazily opened PQCF tables stay lazy. */
+FUNC srv_prepare_table
+    cmpq $0, g_cat_threaded(%rip)
+    je 9f
+    cmpq $0, TB_MAP(%rdi)
+    jne 9f
+    sub $8, %rsp
+    call table_stats
+    add $8, %rsp
+9:  ret
+ENDF srv_prepare_table
+
 /* ================================================================ queries */
 
 /* query_id_of(request node rdi) -> rax malloc'd query id: options.query_id
