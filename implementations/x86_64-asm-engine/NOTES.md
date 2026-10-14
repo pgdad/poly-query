@@ -23,7 +23,15 @@ Spec: `spec/apps/embedding.md`, `spec/apps/pqledger.md`; tests
   `app/app.inc` documents the module interfaces; `bin/pqledger`.
 * Tests: `tests/test_api.S` (API unit test), `app/tests/*.S` (app units),
   `tests/pqledger_test.sh` (end to end).
-Status: see the end of this section (updated as work proceeds).
+Status (session 2): DONE. `make build test` pass; pqledger runner 24/24 +
+embed 3/3 (also `--trace`); conformance 660/660, `--modes` 3870/3870,
+`--transport http` 660/660, http_suite 19/19, expression_limits pass;
+capabilities unchanged. APP.md written (session 2). Scale: a 1,011,875-row
+ledger (10 imports of ~100k records, bankgen) - every command < 1 s, import
+of 100k records into it 0.6 s, peak RSS ~1.5 GB for list/export.
+Ideas left: import / set-category rewrite all of transactions.pqcf (fine at
+1M rows); the ledger save is per table (transactions, then batches), so a
+crash between the two writes could leave them inconsistent.
 
 ## Current task: scaling 1m -> 10m rows (TASK.md "optimize-scaling") — DONE
 

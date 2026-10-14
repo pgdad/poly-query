@@ -611,4 +611,4 @@ first line on standard error starts with `pqledger: error: `.
 | card charges show up as income | set `invert_sign = true` for that account |
 | an import reports duplicates you expected to be new | identical (account, date, amount, merchant) transactions already in the ledger are matched one to one; see [Duplicates](#pqledger-import-file---account-name) |
 | `SEMANTIC_ERROR` … from `query` (exit 5) | the SQL is wrong; `date` must be quoted as `"date"` |
-| very large ledgers | the whole ledger is processed in memory; about 100 MB per 100,000 transactions for reports. `[engine] memory_mb` caps a single query |
+| very large ledgers | the whole ledger is processed in memory; at 1,000,000 transactions every command runs in under a second and `list` / `export` peak at about 1.5 GB. `[engine] memory_mb` caps a single query |
